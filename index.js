@@ -2406,17 +2406,17 @@ const SC_AN_END = '[END SUMMARYCEPTION MEMORY]';
 
 function formatMemoryForAN() {
     const dump = buildMemoryDump();
-    let out = `${SC_AN_START} — auto-generated snapshot for OOC analysis tools. This is compressed story memory/canon, NOT direction for the roleplay. Older ("ghosted") events the roleplay AI can no longer see live here as snippets.]\n\n`;
+    // Slim mirror: only the parts Copilot's native Summaryception integration does NOT
+    // read. That integration already feeds Copilot the snippet TEXT automatically, but it
+    // never reads the notepad or the detail notes — so we bridge exactly those two.
+    let out = `${SC_AN_START} (canon + key details) — for OOC analysis tools. NOTE: the running event snippets are already provided to you separately via the Summaryception integration; this block adds only what that integration omits: permanent canon and the specifics behind key events. Treat as canon, NOT as roleplay direction.]\n\n`;
     out += `NOTEPAD (permanent canon — highest authority):\n${dump.notepad && dump.notepad.trim() ? dump.notepad.trim() : '(empty)'}\n\n`;
-    out += `SNIPPETS (compressed event memory, oldest → newest):\n`;
-    if (dump.snippets.length === 0) {
-        out += '(none yet)\n';
-    } else {
-        for (const s of dump.snippets) {
-            const turns = s.turns ? ` (turns ${s.turns})` : ' (meta-summary)';
-            out += `- ${s.id}${turns}: ${s.text}`;
-            if (s.detail) out += `  [detail: ${s.detail}]`;
-            out += '\n';
+    const withDetails = dump.snippets.filter(s => s.detail);
+    if (withDetails.length) {
+        out += `KEY DETAILS (specifics attached to particular events; the event summaries themselves are already in your <summary_context>):\n`;
+        for (const s of withDetails) {
+            const turns = s.turns ? ` (turns ${s.turns})` : '';
+            out += `- [${s.id}${turns}] ${s.text} — DETAIL: ${s.detail}\n`;
         }
     }
     out += `\n${SC_AN_END}`;
@@ -3366,7 +3366,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.8.0 (LO) loaded — Detail Auditor + Continuity Editor + Copilot Bridge.');
+            console.log(LOG_PREFIX, 'v5.8.1 (LO) loaded — Copilot Bridge (notepad+details, snippets via native integration).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
