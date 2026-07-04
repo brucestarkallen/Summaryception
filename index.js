@@ -1064,6 +1064,14 @@ async function processAuditQueue() {
                     log('Detail auditor: snippet no longer in Layer 0 — result discarded.');
                     continue;
                 }
+                // External-editor guard: if another tool (e.g. Continuity Copilot)
+                // rewrote this snippet's text while the audit was in flight, the
+                // audit was computed against STALE text — discard rather than
+                // attach a detail that may duplicate or contradict the correction.
+                if (typeof job.snippetText === 'string' && job.snip.text !== job.snippetText) {
+                    log('Detail auditor: snippet text changed externally mid-audit — result discarded.');
+                    continue;
+                }
                 if (detail) {
                     job.snip.detail = detail;
                     await saveChatStore();
@@ -3435,7 +3443,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.9.0 (LO) loaded — final audit: quiet auditor, per-chat editor state, decluttered UI.');
+            console.log(LOG_PREFIX, 'v5.9.1 (LO) loaded — external-editor guard for background audits.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
