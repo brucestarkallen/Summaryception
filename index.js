@@ -55,6 +55,7 @@ const defaultSettings = Object.freeze({
     recallPosition: 1,
     recallDepth: 6,
     recallRole: 0,
+    recallAuto: false,
     recallSystemPrompt: 'Role: memory index selector. You receive a query and a catalog of memory snippets (JSON array of {id,text,detail}). Output STRICT JSON ONLY: an array of the snippet id strings most relevant to the query, most relevant first, maximum {{k}} ids, e.g. ["L0#3","L1#0"]. No prose, no markdown, no explanation. If nothing is relevant output [].',
 
     sisterSystemPrompt:
@@ -1890,6 +1891,7 @@ function updateUI() {
         $('#sc_editor_user_prompt').val(s.editorUserPrompt);
         $('#sc_recall_k').val(s.recallMaxSnippets??4);
         $('#sc_recall_persist').val(s.recallPersist??1);
+        $('#sc_recall_auto').prop('checked', s.recallAuto===true);
         renderPins();
         // ── Prompt preset migration & sync ──
         // Migration: existing users with the old game-state default get upgraded to narrative.
@@ -2598,7 +2600,7 @@ function buildPinnedBlock() {
 }
 
 // ─── Verbatim Recall ─────────────────────────────────────────────────
-let _recallRemaining=0; let _lastRecallText='';
+let _recallRemaining=0; let _lastRecallText=''; let _autoRecallBusy=false;
 
 function _mergeRanges(ranges, chatLen){
     const cl=ranges.map(([a,b])=>[Math.max(0,a),Math.min(chatLen-1,b)]).filter(([a,b])=>b>=a);
@@ -2614,11 +2616,11 @@ function clearRecall(){
     _recallRemaining=0;
 }
 
-async function runRecall(query){
-    query=(query||'').trim(); if(!query){ toastr.warning('Give the recall a query.','Summaryception'); return; }
+async function runRecall(query, opts = {}){
+    query=(query||'').trim(); if(!query){ if(!opts.silent) toastr.warning('Give the recall a query.','Summaryception'); return; }
     const s=getSettings(); const { chat }=SillyTavern.getContext();
     const dump=buildMemoryDump();
-    if(!dump.snippets.length){ toastr.info('No memory snippets to recall from yet.','Summaryception'); return; }
+    if(!dump.snippets.length){ if(!opts.silent) toastr.info('No memory snippets to recall from yet.','Summaryception'); return; }
     const k=s.recallMaxSnippets??4;
     const catalog=JSON.stringify(dump.snippets.map(x=>({id:x.id,text:x.text,detail:x.detail?String(x.detail).split('\n')[0]:undefined})));
     const sys=(s.recallSystemPrompt||'').replace('{{k}}',String(k));
@@ -2629,11 +2631,11 @@ async function runRecall(query){
             const arr=extractJsonArray(raw); if(Array.isArray(arr)) ids=arr.filter(x=>typeof x==='string').slice(0,k);
         }catch(e){ log('recall select failed:',e); }
     }
-    if(!ids){ toastr.error('Recall selection failed — model did not return valid ids.','Summaryception'); return; }
-    if(!ids.length){ toastr.info('Recall: nothing relevant found for that query.','Summaryception'); return; }
+    if(!ids){ if(!opts.silent) toastr.error('Recall selection failed — model did not return valid ids.','Summaryception'); else log('auto-recall: selection failed'); return; }
+    if(!ids.length){ if(!opts.silent) toastr.info('Recall: nothing relevant found for that query.','Summaryception'); return; }
     const ranges=[]; const unrec=[];
     for(const id of ids){ const r=resolveSnippetId(id); if(r && r.obj.turnRange) ranges.push({id,range:r.obj.turnRange}); else unrec.push(id); }
-    if(!ranges.length){ toastr.warning('Chosen snippets are unrecallable (legacy promoted — no turn range).','Summaryception',{timeOut:5000}); return; }
+    if(!ranges.length){ if(!opts.silent) toastr.warning('Chosen snippets are unrecallable (legacy).','Summaryception',{timeOut:5000}); return; }
     const merged=_mergeRanges(ranges.map(x=>x.range), chat.length);   // A1: clamp + merge
     let block='[RECALLED SCENES — verbatim from earlier turns]\n'; let used=block.length; const cap=s.recallMaxChars??12000;
     for(const [a,b] of merged){
@@ -2646,10 +2648,20 @@ async function runRecall(query){
     const {setExtensionPrompt}=SillyTavern.getContext();
     setExtensionPrompt(MODULE_NAME+'_recall',block,s.recallPosition??1,s.recallDepth??6,false,s.recallRole??0);
     _recallRemaining=Math.max(1,s.recallPersist??1);
-    toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
+    if(opts.silent){ log('Auto-recall injected: '+merged.length+' range(s), '+used+' chars'); } else toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
 }
 
-function onGenerationEnded(){ if(_recallRemaining>0){ _recallRemaining--; if(_recallRemaining<=0){ clearRecall(); log('Recall injection cleared (ephemeral).'); } } }
+function onGenerationEnded(){
+    if(_recallRemaining>0){ _recallRemaining--; if(_recallRemaining<=0){ clearRecall(); log('Recall injection cleared (ephemeral).'); } }
+    // Auto-recall: background, never blocks. Uses YOUR latest message as the query
+    // and stages the recalled scene for your NEXT reply (one-turn continuity window).
+    const s=getSettings();
+    if(s.recallAuto && s.enabled && !_autoRecallBusy){
+        const { chat }=SillyTavern.getContext(); let q='';
+        for(let i=(chat?.length||0)-1;i>=0;i--){ const m=chat[i]; if(m?.is_user && m.mes?.trim()){ q=m.mes.trim().slice(0,400); break; } }
+        if(q.length>10){ _autoRecallBusy=true; runRecall(q,{silent:true}).catch(e=>log('auto-recall failed:',e)).finally(()=>{ _autoRecallBusy=false; }); }
+    }
+}
 
 function bindUIEvents() {
     $(document).on('change', '#sc_enabled', function () {
@@ -2851,6 +2863,7 @@ function bindUIEvents() {
         toastr.success('Recall appended to Notepad (permanent).','Summaryception');
     });
     $(document).on('input', '#sc_recall_k', function(){ getSettings().recallMaxSnippets=parseInt($(this).val())||4; saveSettings(); });
+    $(document).on('change', '#sc_recall_auto', function(){ getSettings().recallAuto=$(this).prop('checked'); saveSettings(); if(!$(this).prop('checked')) clearRecall(); });
     $(document).on('input', '#sc_recall_persist', function(){ getSettings().recallPersist=parseInt($(this).val())||1; saveSettings(); });
 
     $(document).on('change', '#sc_debug_mode', function () {
@@ -3583,7 +3596,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.10.0 (LO) loaded — Pinned Memories + Verbatim Recall.');
+            console.log(LOG_PREFIX, 'v5.11.0 (LO) loaded — Auto-Recall (background, self-clearing).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
