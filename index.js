@@ -46,6 +46,17 @@ const defaultSettings = Object.freeze({
     //    snippet. Empty (NONE) for routine batches. Never touches the snippet itself. ──
     sisterEnabled: true,
     sisterInjectTemplate: '\n\n<details>\nSpecifics behind recent events (canon — do not contradict):\n{{details}}\n</details>\n',
+    // ── Pinned Memories + Verbatim Recall ──
+    pinMaxChars: 1500,
+    pinsMaxTotalChars: 6000,
+    recallMaxSnippets: 4,
+    recallMaxChars: 12000,
+    recallPersist: 1,
+    recallPosition: 1,
+    recallDepth: 6,
+    recallRole: 0,
+    recallSystemPrompt: 'Role: memory index selector. You receive a query and a catalog of memory snippets (JSON array of {id,text,detail}). Output STRICT JSON ONLY: an array of the snippet id strings most relevant to the query, most relevant first, maximum {{k}} ids, e.g. ["L0#3","L1#0"]. No prose, no markdown, no explanation. If nothing is relevant output [].',
+
     sisterSystemPrompt:
         'Role: continuity auditor for an ongoing fiction. You receive a compact summary snippet and the exact passage it was made from. Your ONLY job: decide whether the snippet dropped important, hard-to-reconstruct information a future storyteller would need — exact numbers, named plans or tactics, specific commitments or conditions, precise capabilities, identity details, or background canon (character backstory, family structure, separations/divorces, custody or legal situations, hidden truths, world rules, relationships, motives). Pure processing directives ("keep it short", "stay in character", "analyze before the header") are NOT information — never flag them as omissions. The passage may include out-of-character material — parentheticals, analysis requests, or verification blocks before/after the scene; facts established there COUNT as part of the passage. Words like "Confirmed" or OOC framing do NOT make a fact already-established — only actual presence in the prior context does. If the snippet already captures everything important, output exactly: NONE. Otherwise output a single "DETAIL:" line containing ONLY the missing information, as terse director\'s notes (breaking the fourth wall is fine). Never repeat anything the snippet or prior context already contains. No preamble, no markdown, no commentary.',
     sisterUserPrompt:
@@ -1678,7 +1689,7 @@ function assembleSummaryBlock() {
     }
 
     // Notepad first (stable canon), then the summary (gist), then details (specifics).
-    return notesPart + summaryPart + detailPart;
+    return notesPart + buildPinnedBlock() + summaryPart + detailPart;
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
@@ -1747,6 +1758,8 @@ function onChatChanged() {
     _auditQueue = [];
     $('#sc_editor_undo').hide();
     $('#sc_editor_review_list').empty();
+    clearRecall();
+    setTimeout(renderPins, 300);
     setTimeout(async () => {
         await repairIfBranched();
         updateInjection(true);   // force — new branch/chat needs re-injection past the cache
@@ -1773,6 +1786,17 @@ function registerSlashCommands() {
         }
 
         const { SlashCommandParser, SlashCommand } = ctx;
+
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'sc-pin',
+            callback: (args, value) => { addPin(String(value||'')); return ''; },
+            helpString: 'Pin the current text selection (or the last message) into Summaryception permanent memory. Optional value = label.',
+        }));
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'sc-recall',
+            callback: (args, value) => { runRecall(String(value||'')); return ''; },
+            helpString: 'Verbatim recall: fetch the original chat text behind the memory snippets matching the query, inject for the next generation.',
+        }));
 
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
             name: 'sc-status',
@@ -1864,6 +1888,9 @@ function updateUI() {
         $('#sc_sister_user_prompt').val(s.sisterUserPrompt);
         $('#sc_editor_system_prompt').val(s.editorSystemPrompt);
         $('#sc_editor_user_prompt').val(s.editorUserPrompt);
+        $('#sc_recall_k').val(s.recallMaxSnippets??4);
+        $('#sc_recall_persist').val(s.recallPersist??1);
+        renderPins();
         // ── Prompt preset migration & sync ──
         // Migration: existing users with the old game-state default get upgraded to narrative.
         // Users who customized their prompt get marked as 'custom'.
@@ -2531,6 +2558,99 @@ async function clearAuthorsNoteHard() {
     toastr.info("Author's Note wiped.", 'Summaryception', { timeOut: 2500 });
 }
 
+// ─── Pinned Memories ──────────────────────────────────────────────────
+function getPins() { const st=getChatStore(); if(!Array.isArray(st.pins)) st.pins=[]; return st.pins; }
+
+async function addPin(label) {
+    const s=getSettings(); const { chat }=SillyTavern.getContext();
+    let excerpt='';
+    try { const sel=window.getSelection && String(window.getSelection()); if(sel && sel.trim().length>2) excerpt=sel.trim(); } catch(e){}
+    if(!excerpt){
+        for(let i=(chat?.length||0)-1;i>=0;i--){ const m=chat[i]; if(m && m.mes && m.mes.trim() && !m.is_system){ excerpt=m.mes.trim(); break; } }
+    }
+    if(!excerpt){ toastr.warning('Nothing to pin.','Summaryception'); return; }
+    const cap=s.pinMaxChars??1500; if(excerpt.length>cap) excerpt=excerpt.slice(0,cap)+'…';
+    getPins().push({ id:'pin_'+Date.now(), mesId:(chat?.length||1)-1, excerpt, label:(label||'').trim(), createdAt:Date.now() });
+    await saveChatStore(); updateInjection(true); renderPins();
+    toastr.success('Pinned ('+excerpt.length+' chars)','Summaryception',{timeOut:2000});
+}
+
+function renderPins() {
+    const el=$('#sc_pins_list'); if(!el.length) return;
+    const pins=getPins();
+    if(pins.length===0){ el.html('<div class="sc-hint">No pins yet. Select text (or nothing = last message) and pin it — pins are injected verbatim every turn, immune to summarization.</div>'); return; }
+    let total=0, html='';
+    for(const p of pins){ total+=p.excerpt.length;
+        html+='<div class="sc-pin-item" data-id="'+p.id+'"><span class="sc-pin-label">📌 '+escapeHtml(p.label||('msg #'+p.mesId))+' <small>('+p.excerpt.length+' ch)</small></span><span class="sc-pin-text">'+escapeHtml(p.excerpt.slice(0,160))+(p.excerpt.length>160?'…':'')+'</span><button class="sc-pin-unpin menu_button fa-solid fa-xmark" title="Unpin"></button></div>';
+    }
+    html+='<div class="sc-hint">Total: '+total+' chars (cap '+(getSettings().pinsMaxTotalChars??6000)+')</div>';
+    el.html(html);
+}
+
+function buildPinnedBlock() {
+    const s=getSettings(); const pins=getPins(); if(pins.length===0) return '';
+    const cap=s.pinsMaxTotalChars??6000; let used=0; const parts=[];
+    for(let i=pins.length-1;i>=0;i--){ const p=pins[i];   // newest kept first under cap
+        if(used+p.excerpt.length>cap){ log('Pins over cap — oldest pins truncated from injection.'); break; }
+        used+=p.excerpt.length; parts.unshift((p.label?('['+p.label+'] '):'')+p.excerpt);
+    }
+    return parts.length? '\n\n<pinned>\n'+parts.join('\n---\n')+'\n</pinned>\n' : '';
+}
+
+// ─── Verbatim Recall ─────────────────────────────────────────────────
+let _recallRemaining=0; let _lastRecallText='';
+
+function _mergeRanges(ranges, chatLen){
+    const cl=ranges.map(([a,b])=>[Math.max(0,a),Math.min(chatLen-1,b)]).filter(([a,b])=>b>=a);
+    cl.sort((x,y)=>x[0]-y[0]);
+    const out=[]; for(const r of cl){ if(out.length && r[0]<=out[out.length-1][1]+1){ out[out.length-1][1]=Math.max(out[out.length-1][1],r[1]); } else out.push([...r]); }
+    return out;
+}
+
+function clearRecall(){
+    try{ const {setExtensionPrompt}=SillyTavern.getContext(); const s=getSettings();
+        setExtensionPrompt(MODULE_NAME+'_recall','',s.recallPosition??1,s.recallDepth??6,false,s.recallRole??0);
+    }catch(e){}
+    _recallRemaining=0;
+}
+
+async function runRecall(query){
+    query=(query||'').trim(); if(!query){ toastr.warning('Give the recall a query.','Summaryception'); return; }
+    const s=getSettings(); const { chat }=SillyTavern.getContext();
+    const dump=buildMemoryDump();
+    if(!dump.snippets.length){ toastr.info('No memory snippets to recall from yet.','Summaryception'); return; }
+    const k=s.recallMaxSnippets??4;
+    const catalog=JSON.stringify(dump.snippets.map(x=>({id:x.id,text:x.text,detail:x.detail?String(x.detail).split('\n')[0]:undefined})));
+    const sys=(s.recallSystemPrompt||'').replace('{{k}}',String(k));
+    const user='QUERY: '+query+'\n\nCATALOG:\n'+catalog+'\n\nReturn ONLY the JSON array of ids.';
+    let ids=null;
+    for(let attempt=0;attempt<2 && !ids;attempt++){
+        try{ const raw=await callSummarizer('(recall select)','',{systemPrompt:sys,userPrompt:attempt?user+'\nSTRICT JSON ARRAY ONLY.':user,quiet:true});
+            const arr=extractJsonArray(raw); if(Array.isArray(arr)) ids=arr.filter(x=>typeof x==='string').slice(0,k);
+        }catch(e){ log('recall select failed:',e); }
+    }
+    if(!ids){ toastr.error('Recall selection failed — model did not return valid ids.','Summaryception'); return; }
+    if(!ids.length){ toastr.info('Recall: nothing relevant found for that query.','Summaryception'); return; }
+    const ranges=[]; const unrec=[];
+    for(const id of ids){ const r=resolveSnippetId(id); if(r && r.obj.turnRange) ranges.push({id,range:r.obj.turnRange}); else unrec.push(id); }
+    if(!ranges.length){ toastr.warning('Chosen snippets are unrecallable (legacy promoted — no turn range).','Summaryception',{timeOut:5000}); return; }
+    const merged=_mergeRanges(ranges.map(x=>x.range), chat.length);   // A1: clamp + merge
+    let block='[RECALLED SCENES — verbatim from earlier turns]\n'; let used=block.length; const cap=s.recallMaxChars??12000;
+    for(const [a,b] of merged){
+        const passage=buildPassageFromRange(chat,a,b); if(!passage.trim()) continue;
+        const head='\n▸ turns '+a+'–'+b+':\n';
+        if(used+head.length+passage.length>cap){ block+='\n▸ turns '+a+'–'+b+': (trimmed — over recall budget)\n'; break; }
+        block+=head+passage+'\n'; used+=head.length+passage.length;
+    }
+    _lastRecallText=block;
+    const {setExtensionPrompt}=SillyTavern.getContext();
+    setExtensionPrompt(MODULE_NAME+'_recall',block,s.recallPosition??1,s.recallDepth??6,false,s.recallRole??0);
+    _recallRemaining=Math.max(1,s.recallPersist??1);
+    toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
+}
+
+function onGenerationEnded(){ if(_recallRemaining>0){ _recallRemaining--; if(_recallRemaining<=0){ clearRecall(); log('Recall injection cleared (ephemeral).'); } } }
+
 function bindUIEvents() {
     $(document).on('change', '#sc_enabled', function () {
         getSettings().enabled = $(this).prop('checked');
@@ -2714,6 +2834,24 @@ function bindUIEvents() {
         $(target).val(defaultSettings[key]).trigger('input');
         toastr.success('Reset to default', 'Summaryception', { timeOut: 1500 });
     });
+
+    // ── Pins + Recall ──
+    $(document).on('click', '#sc_pin_add', () => addPin($('#sc_pin_label').val()||''));
+    $(document).on('click', '.sc-pin-unpin', async function(){
+        const id=$(this).closest('.sc-pin-item').data('id');
+        const pins=getPins(); const i=pins.findIndex(p=>p.id===id);
+        if(i>=0){ pins.splice(i,1); await saveChatStore(); updateInjection(true); renderPins(); }
+    });
+    $(document).on('click', '#sc_recall_go', () => runRecall($('#sc_recall_query').val()));
+    $(document).on('click', '#sc_recall_clear', () => { clearRecall(); toastr.info('Recall cleared.','Summaryception',{timeOut:1500}); });
+    $(document).on('click', '#sc_recall_to_notepad', async () => {
+        if(!_lastRecallText){ toastr.warning('Nothing recalled yet.','Summaryception'); return; }
+        const st=getChatStore(); st.notepad=(st.notepad?st.notepad+'\n\n':'')+_lastRecallText;
+        await saveChatStore(); $('#sc_notepad').val(st.notepad); updateInjection(true);
+        toastr.success('Recall appended to Notepad (permanent).','Summaryception');
+    });
+    $(document).on('input', '#sc_recall_k', function(){ getSettings().recallMaxSnippets=parseInt($(this).val())||4; saveSettings(); });
+    $(document).on('input', '#sc_recall_persist', function(){ getSettings().recallPersist=parseInt($(this).val())||1; saveSettings(); });
 
     $(document).on('change', '#sc_debug_mode', function () {
         getSettings().debugMode = $(this).prop('checked');
@@ -3438,12 +3576,14 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
         eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
         eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+        if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
+        else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
         registerSlashCommands();
 
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.9.2 (LO) loaded — defaults finalized (LO-proven values everywhere).');
+            console.log(LOG_PREFIX, 'v5.10.0 (LO) loaded — Pinned Memories + Verbatim Recall.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

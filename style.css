@@ -603,3 +603,10 @@ details.sc-collapse[open] > summary {
 }
 details.sc-collapse > *:not(summary) { margin-left: 10px; margin-right: 10px; }
 details.sc-collapse > *:last-child { margin-bottom: 10px; }
+
+/* ─── Pins ── */
+.sc-pin-item{display:flex;align-items:center;gap:8px;padding:5px 8px;margin:4px 0;border:1px solid rgba(255,255,255,.1);border-radius:5px;font-size:.85em}
+.sc-pin-label{flex-shrink:0;font-weight:600}
+.sc-pin-text{flex:1;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc-pin-unpin{color:#ff6b6b;opacity:.5;border:none;background:none}
+.sc-pin-unpin:hover{opacity:1}
