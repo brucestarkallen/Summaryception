@@ -29,7 +29,7 @@ const defaultSettings = Object.freeze({
     turnsPerSummary: 3,
     snippetsPerLayer: 30,
     snippetsPerPromotion: 2,
-    maxLayers: 5,
+    maxLayers: 9,
     injectionTemplate: '[Story memory continuation after brief plot essential — oldest → newest. Established canon; do not contradict.]\n{{summary}}',
 
     // ── Injection placement (previously hardcoded to IN_PROMPT / system) ──
