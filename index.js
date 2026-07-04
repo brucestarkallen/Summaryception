@@ -887,7 +887,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
 
             if (signal.aborted) {
                 log('Summarization aborted by user.');
-                toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
+                if (!opts.quiet) toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
                 return '';
             }
 
@@ -938,7 +938,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
 
                 if (signal.aborted || err.message === 'Aborted by user') {
                     log('Summarization aborted by user.');
-                    toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
+                    if (!opts.quiet) toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
                     return '';
                 }
 
@@ -970,7 +970,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
 
                 console.warn(LOG_PREFIX, `Attempt ${attempt + 1} failed (${status}). Retrying in ${delaySec}s...`, err.message || err);
 
-                toastr.warning(
+                if (!opts.quiet) toastr.warning(
                     `API error (${status}). Retrying in ${delaySec}s... (${attempt + 1}/${RETRY_CONFIG.maxRetries})`,
                     'Summaryception',
                     { timeOut: delay }
@@ -988,7 +988,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
 
         const status = lastError?.status || lastError?.response?.status || '';
         console.error(LOG_PREFIX, 'Summarization failed after all retries:', lastError);
-        toastr.error(
+        if (!opts.quiet) toastr.error(
             `Summarization failed after ${RETRY_CONFIG.maxRetries} retries${status ? ` (${status})` : ''}. Batch skipped — will retry on next trigger.`,
             'Summaryception',
             { timeOut: 8000 }
@@ -1025,6 +1025,7 @@ async function callAuditor(storyTxt, snippetText, contextStr) {
         systemPrompt: s.sisterSystemPrompt,
         userPrompt: s.sisterUserPrompt,
         snippet: snippetText,
+        quiet: true,   // auditor failures are logged, never shown as summarizer errors
     });
     return normalizeAuditorOutput(raw);
 }
@@ -1730,6 +1731,14 @@ function onMessageReceived(messageIndex) {
 function onChatChanged() {
     log('Chat changed.');
     catchupDismissed = false;
+    // Editor + audit state is PER-CHAT. Never let a memory snapshot, pending
+    // edits, or queued audits from the previous chat leak into this one —
+    // an Undo here with the old chat's snapshot would corrupt this chat's memory.
+    _editorPending = [];
+    _editorUndoSnapshot = null;
+    _auditQueue = [];
+    $('#sc_editor_undo').hide();
+    $('#sc_editor_review_list').empty();
     setTimeout(async () => {
         await repairIfBranched();
         updateInjection(true);   // force — new branch/chat needs re-injection past the cache
@@ -3426,7 +3435,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.8.5 (LO) loaded — merged rule-10 defaults (facts vs directives).');
+            console.log(LOG_PREFIX, 'v5.9.0 (LO) loaded — final audit: quiet auditor, per-chat editor state, decluttered UI.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

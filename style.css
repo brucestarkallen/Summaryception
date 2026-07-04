@@ -571,3 +571,35 @@
     opacity: 0.7;
 }
 .sc-prompt-reset:hover { opacity: 1; }
+
+/* ─── Collapsible sections (declutter) ────────────────────── */
+details.sc-collapse {
+    margin: 6px 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+details.sc-collapse > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+    margin: 0;
+}
+details.sc-collapse > summary::before {
+    content: '▸';
+    font-size: 0.8em;
+    opacity: 0.6;
+    transition: transform 0.15s;
+}
+details.sc-collapse[open] > summary::before { transform: rotate(90deg); }
+details.sc-collapse > summary::-webkit-details-marker { display: none; }
+details.sc-collapse[open] > summary {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    margin-bottom: 8px;
+}
+details.sc-collapse > *:not(summary) { margin-left: 10px; margin-right: 10px; }
+details.sc-collapse > *:last-child { margin-bottom: 10px; }

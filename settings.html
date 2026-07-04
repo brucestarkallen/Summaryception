@@ -43,16 +43,14 @@
                 </button>
             </div>
 
-            <hr class="sc-divider" />
 
             <!-- ═══ Snippet Browser ═══ -->
-            <h4 class="sc-section-title">🗂️ Snippet Browser</h4>
+            <details class="sc-collapse" open><summary class="sc-section-title">🗂️ Snippet Browser</summary>
             <div id="sc_snippet_browser" class="sc-snippet-browser"></div>
 
-            <hr class="sc-divider" />
 
             <!-- ═══ Preview ═══ -->
-            <h4 class="sc-section-title">👁️ Injection Preview</h4>
+            <details class="sc-collapse"><summary class="sc-section-title">👁️ Injection Preview</summary>
             <textarea id="sc_preview" class="text_pole sc-textarea sc-preview" rows="6" readonly></textarea>
             <div class="sc-button-row">
                 <button id="sc_refresh_preview" class="menu_button">
@@ -72,13 +70,11 @@
                 </button>
             </div>
 
-            <hr class="sc-divider" />
 
             <!-- ═══ Layer Stats ═══ -->
-            <h4 class="sc-section-title">📊 Layer Stats</h4>
+            <details class="sc-collapse"><summary class="sc-section-title">📊 Layer Stats</summary>
             <div id="sc_layer_stats" class="sc-stats-box"></div>
 
-            <hr class="sc-divider" />
 
             <!-- ═══ Advanced Settings ═══ -->
             <div class="inline-drawer">
@@ -237,7 +233,7 @@
                     </div>
 
                     <!-- Turn Settings -->
-                    <h4 class="sc-section-title">📖 Verbatim Turn Settings</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">📖 Verbatim Turn Settings</summary>
 
                     <div class="sc-row">
                         <label for="sc_verbatim_turns">
@@ -261,10 +257,9 @@
                         </div>
                     </div>
 
-                    <hr class="sc-divider" />
 
                     <!-- Layer Settings -->
-                    <h4 class="sc-section-title">🔄 Layer Settings (the "ception")</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">🔄 Layer Settings (the "ception")</summary>
 
                     <div class="sc-row">
                         <label for="sc_snippets_per_layer">
@@ -299,10 +294,9 @@
                         </div>
                     </div>
 
-                    <hr class="sc-divider" />
 
                     <!-- Prompts -->
-                    <h4 class="sc-section-title">✏️ Summarizer Prompts</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">✏️ Summarizer Prompts</summary>
 
                     <div class="sc-row">
                         <label for="sc_summarizer_system_prompt">
@@ -372,9 +366,8 @@
                         <button class="menu_button sc-prompt-reset" data-key="summarizerUserPrompt" data-target="#sc_summarizer_user_prompt">↺ Reset to Default</button>
                     </div>
 
-                    <hr class="sc-divider" />
 
-                    <h4 class="sc-section-title">🔍 Detail Auditor (sister)</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">🔍 Detail Auditor (sister)</summary>
 
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_sister_enabled">
@@ -413,7 +406,7 @@
                         <button class="menu_button sc-prompt-reset" data-key="injectionTemplate" data-target="#sc_injection_template">↺ Reset to Default</button>
                     </div>
 
-                    <h4 class="sc-section-title">📍 Injection Placement</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">📍 Injection Placement</summary>
 
                     <div class="sc-row">
                         <label for="sc_injection_position">
@@ -438,9 +431,8 @@
                         </div>
                     </div>
 
-                    <hr class="sc-divider" />
 
-                    <h4 class="sc-section-title">📝 Manual Notepad (this chat)</h4>
+                    <details class="sc-collapse" open><summary class="sc-section-title">📝 Manual Notepad (this chat)</summary>
 
                     <div class="sc-row">
                         <label for="sc_notepad">
@@ -450,9 +442,8 @@
                         <textarea id="sc_notepad" class="text_pole sc-textarea sc-textarea-tall" rows="6" placeholder="Lore this story must never forget — e.g. character names & canon, world rules, locations, ongoing plot facts."></textarea>
                     </div>
 
-                    <hr class="sc-divider" />
 
-                    <h4 class="sc-section-title">🩺 Continuity Editor (Co-Writer)</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">🩺 Continuity Editor (Co-Writer)</summary>
 
                     <div class="sc-row">
                         <label for="sc_editor_command">
@@ -490,9 +481,8 @@
                         <button class="menu_button sc-prompt-reset" data-key="editorUserPrompt" data-target="#sc_editor_user_prompt">↺ Reset to Default</button>
                     </div>
 
-                    <hr class="sc-divider" />
 
-                    <h4 class="sc-section-title">🔗 Copilot Bridge (Author's Note)</h4>
+                    <details class="sc-collapse"><summary class="sc-section-title">🔗 Copilot Bridge (Author's Note)</summary>
 
                     <div class="sc-row">
                         <small class="sc-hint">Copilot's built-in Summaryception integration already feeds it your snippets automatically (Copilot-only, no duplication to your roleplay AI) — but it never reads your notepad or detail notes. These buttons copy just that missing part (notepad + details) into the Author's Note so Copilot sees your canon too, then let you pull it back out. Your existing Author's Note is stashed in a non-injected slot and returns on Restore. While mirrored, this small block is briefly also sent to your roleplay AI (harmless — it's your own canon), so Restore when you're done.</small>
@@ -504,7 +494,6 @@
                         <button id="sc_clear_an" class="menu_button menu_button_danger">🗑️ Wipe Author's Note</button>
                     </div>
 
-                    <hr class="sc-divider" />
 
                     <!-- Strip Patterns -->
                     <div class="sc-row">
@@ -515,7 +504,6 @@
                         <textarea id="sc_strip_patterns" class="text_pole sc-textarea" rows="4"></textarea>
                     </div>
 
-                    <hr class="sc-divider" />
 
                     <!-- Debug -->
                     <div class="sc-row">
@@ -533,7 +521,6 @@
                         <small class="sc-hint">Requires Debug Mode to be enabled.</small>
                     </div>
 
-                    <hr class="sc-divider" />
 
                     <!-- Reset defaults -->
                     <div class="sc-button-row">
@@ -542,9 +529,20 @@
                         </button>
                     </div>
 
+                    </details>
+                    </details>
+                    </details>
+                    </details>
+                    </details>
+                    </details>
+                    </details>
+                    </details>
                 </div>
             </div>
 
+            </details>
+            </details>
+            </details>
         </div>
     </div>
 </div>
