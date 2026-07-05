@@ -3596,7 +3596,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.11.0 (LO) loaded — Auto-Recall (background, self-clearing).');
+            console.log(LOG_PREFIX, 'v5.11.1 (LO) loaded — UI flattened: every section its own card (no nesting).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

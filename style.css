@@ -572,37 +572,6 @@
 }
 .sc-prompt-reset:hover { opacity: 1; }
 
-/* ─── Collapsible sections (declutter) ────────────────────── */
-details.sc-collapse {
-    margin: 6px 0;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.02);
-}
-details.sc-collapse > summary {
-    cursor: pointer;
-    padding: 8px 10px;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    user-select: none;
-    margin: 0;
-}
-details.sc-collapse > summary::before {
-    content: '▸';
-    font-size: 0.8em;
-    opacity: 0.6;
-    transition: transform 0.15s;
-}
-details.sc-collapse[open] > summary::before { transform: rotate(90deg); }
-details.sc-collapse > summary::-webkit-details-marker { display: none; }
-details.sc-collapse[open] > summary {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    margin-bottom: 8px;
-}
-details.sc-collapse > *:not(summary) { margin-left: 10px; margin-right: 10px; }
-details.sc-collapse > *:last-child { margin-bottom: 10px; }
 
 /* ─── Pins ── */
 .sc-pin-item{display:flex;align-items:center;gap:8px;padding:5px 8px;margin:4px 0;border:1px solid rgba(255,255,255,.1);border-radius:5px;font-size:.85em}
@@ -610,3 +579,27 @@ details.sc-collapse > *:last-child { margin-bottom: 10px; }
 .sc-pin-text{flex:1;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc-pin-unpin{color:#ff6b6b;opacity:.5;border:none;background:none}
 .sc-pin-unpin:hover{opacity:1}
+
+/* ─── Collapsible sections (flat, Arbiter-style cards) ───────── */
+details.sc-collapse{
+    margin:10px 0;
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:8px;
+    background:rgba(255,255,255,.015);
+    overflow:hidden;
+}
+details.sc-collapse>summary{
+    cursor:pointer;list-style:none;user-select:none;
+    display:flex;align-items:center;gap:8px;
+    padding:12px 14px;margin:0;
+    font-size:1.02em;font-weight:600;
+}
+details.sc-collapse>summary::-webkit-details-marker{display:none}
+details.sc-collapse>summary::before{
+    content:'▸';font-size:.85em;opacity:.55;transition:transform .15s;
+}
+details.sc-collapse[open]>summary::before{transform:rotate(90deg)}
+details.sc-collapse[open]>summary{border-bottom:1px solid rgba(255,255,255,.09)}
+details.sc-collapse>:not(summary){margin-left:14px;margin-right:14px}
+details.sc-collapse>:not(summary):first-of-type{margin-top:12px}
+details.sc-collapse>:last-child{margin-bottom:14px}

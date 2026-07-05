@@ -45,12 +45,17 @@
 
 
             <!-- ═══ Snippet Browser ═══ -->
-            <details class="sc-collapse" open><summary class="sc-section-title">🗂️ Snippet Browser</summary>
+                                <details class="sc-collapse" open>
+                        <summary class="sc-section-title">🗂️ Snippet Browser</summary>
+
             <div id="sc_snippet_browser" class="sc-snippet-browser"></div>
 
 
             <!-- ═══ Preview ═══ -->
-            <details class="sc-collapse"><summary class="sc-section-title">👁️ Injection Preview</summary>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">👁️ Injection Preview</summary>
+
             <textarea id="sc_preview" class="text_pole sc-textarea sc-preview" rows="6" readonly></textarea>
             <div class="sc-button-row">
                 <button id="sc_refresh_preview" class="menu_button">
@@ -72,7 +77,10 @@
 
 
             <!-- ═══ Layer Stats ═══ -->
-            <details class="sc-collapse"><summary class="sc-section-title">📊 Layer Stats</summary>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">📊 Layer Stats</summary>
+
             <div id="sc_layer_stats" class="sc-stats-box"></div>
 
 
@@ -233,7 +241,10 @@
                     </div>
 
                     <!-- Turn Settings -->
-                    <details class="sc-collapse"><summary class="sc-section-title">📖 Verbatim Turn Settings</summary>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">📖 Verbatim Turn Settings</summary>
+
 
                     <div class="sc-row">
                         <label for="sc_verbatim_turns">
@@ -259,7 +270,10 @@
 
 
                     <!-- Layer Settings -->
-                    <details class="sc-collapse"><summary class="sc-section-title">🔄 Layer Settings (the "ception")</summary>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🔄 Layer Settings (the "ception")</summary>
+
 
                     <div class="sc-row">
                         <label for="sc_snippets_per_layer">
@@ -296,7 +310,10 @@
 
 
                     <!-- Prompts -->
-                    <details class="sc-collapse"><summary class="sc-section-title">✏️ Summarizer Prompts</summary>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">✏️ Summarizer Prompts</summary>
+
 
                     <div class="sc-row">
                         <label for="sc_summarizer_system_prompt">
@@ -365,9 +382,10 @@
                         <textarea id="sc_summarizer_user_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="10"></textarea>
                         <button class="menu_button sc-prompt-reset" data-key="summarizerUserPrompt" data-target="#sc_summarizer_user_prompt">↺ Reset to Default</button>
                     </div>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🔍 Detail Auditor (sister)</summary>
 
-
-                    <details class="sc-collapse"><summary class="sc-section-title">🔍 Detail Auditor (sister)</summary>
 
                     <div class="sc-row">
                         <label class="checkbox_label" for="sc_sister_enabled">
@@ -405,8 +423,10 @@
                         <textarea id="sc_injection_template" class="text_pole sc-textarea" rows="3"></textarea>
                         <button class="menu_button sc-prompt-reset" data-key="injectionTemplate" data-target="#sc_injection_template">↺ Reset to Default</button>
                     </div>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">📍 Injection Placement</summary>
 
-                    <details class="sc-collapse"><summary class="sc-section-title">📍 Injection Placement</summary>
 
                     <div class="sc-row">
                         <label for="sc_injection_position">
@@ -430,9 +450,10 @@
                             <span id="sc_injection_depth_val" class="sc-val">4</span>
                         </div>
                     </div>
+                    </details>
+                    <details class="sc-collapse" open>
+                        <summary class="sc-section-title">📝 Manual Notepad (this chat)</summary>
 
-
-                    <details class="sc-collapse" open><summary class="sc-section-title">📝 Manual Notepad (this chat)</summary>
 
                     <div class="sc-row">
                         <label for="sc_notepad">
@@ -441,9 +462,10 @@
                         </label>
                         <textarea id="sc_notepad" class="text_pole sc-textarea sc-textarea-tall" rows="6" placeholder="Lore this story must never forget — e.g. character names & canon, world rules, locations, ongoing plot facts."></textarea>
                     </div>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🩺 Continuity Editor (Co-Writer)</summary>
 
-
-                    <details class="sc-collapse"><summary class="sc-section-title">🩺 Continuity Editor (Co-Writer)</summary>
 
                     <div class="sc-row">
                         <label for="sc_editor_command">
@@ -480,21 +502,26 @@
                         <textarea id="sc_editor_user_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="10"></textarea>
                         <button class="menu_button sc-prompt-reset" data-key="editorUserPrompt" data-target="#sc_editor_user_prompt">↺ Reset to Default</button>
                     </div>
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">📌 Pinned Memories</summary>
 
-
-                    <details class="sc-collapse" open><summary class="sc-section-title">📌 Pinned Memories</summary>
                     <div class="sc-row"><small class="sc-hint">Verbatim excerpts injected every turn inside &lt;pinned&gt; — immune to summarization, promotion, and branch repair. Pin via the button (uses your text selection, or the last message) or <code>/sc-pin label</code>.</small></div>
                     <div class="sc-row"><input id="sc_pin_label" class="text_pole" type="text" placeholder="optional label" /> <button id="sc_pin_add" class="menu_button">📌 Pin</button></div>
                     <div id="sc_pins_list"></div>
                     </details>
-                    <details class="sc-collapse"><summary class="sc-section-title">🔎 Verbatim Recall</summary>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🔎 Verbatim Recall</summary>
+
                     <div class="sc-row"><small class="sc-hint">Two-phase lossless recall: an AI picks the relevant memory snippets for your query, then the ORIGINAL chat text behind them is fetched and injected for the next generation (ephemeral — auto-clears after it's used). Also via <code>/sc-recall query</code>. "→ Notepad" makes the last recall permanent.</small></div>
                     <div class="sc-row"><label class="checkbox_label"><input type="checkbox" id="sc_recall_auto" /><span>Auto-recall (background: your latest message becomes the query; the matching original scene is staged for your next reply — zero latency, self-clearing)</span></label></div>
                     <div class="sc-row"><input id="sc_recall_query" class="text_pole" type="text" placeholder="e.g. the bridge battle promise" /></div>
                     <div class="sc-row sc-editor-actions"><button id="sc_recall_go" class="menu_button">🔎 Recall</button><button id="sc_recall_clear" class="menu_button">Clear</button><button id="sc_recall_to_notepad" class="menu_button">→ Notepad</button></div>
                     <div class="sc-row"><label>Max snippets (K) <input id="sc_recall_k" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label> <label>Persist (messages) <input id="sc_recall_persist" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label></div>
                     </details>
-                    <details class="sc-collapse"><summary class="sc-section-title">🔗 Copilot Bridge (Author's Note)</summary>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🔗 Copilot Bridge (Author's Note)</summary>
+
 
                     <div class="sc-row">
                         <small class="sc-hint">Copilot's built-in Summaryception integration already feeds it your snippets automatically (Copilot-only, no duplication to your roleplay AI) — but it never reads your notepad or detail notes. These buttons copy just that missing part (notepad + details) into the Author's Note so Copilot sees your canon too, then let you pull it back out. Your existing Author's Note is stashed in a non-injected slot and returns on Restore. While mirrored, this small block is briefly also sent to your roleplay AI (harmless — it's your own canon), so Restore when you're done.</small>
@@ -539,22 +566,24 @@
                         <button id="sc_reset_defaults" class="menu_button">
                             <i class="fa-solid fa-arrow-rotate-left"></i> Reset to Defaults
                         </button>
+                    </details>
+
                     </div>
 
-                    </details>
-                    </details>
-                    </details>
-                    </details>
-                    </details>
-                    </details>
-                    </details>
-                    </details>
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
                 </div>
             </div>
 
-            </details>
-            </details>
-            </details>
+            
+            
+            
         </div>
     </div>
 </div>
