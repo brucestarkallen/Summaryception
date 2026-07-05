@@ -3607,7 +3607,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.11.2 (LO) loaded — fixed transparent catch-up modal + Not-now dismiss.');
+            console.log(LOG_PREFIX, 'v5.11.3 (LO) loaded — catch-up modal no longer clipped off top of screen.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
