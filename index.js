@@ -4137,9 +4137,9 @@ function bindUIEvents() {
 
     $(document).on('click', '#sc_reset_defaults', function () {
         if (!confirm(
-            'Reset all Advanced Settings to defaults?\n\n' +
-            'This will reset sliders, prompts, injection template, and strip patterns.\n' +
-            'It will NOT clear your summary memory or connection settings.'
+            'Reset ALL settings to recommended defaults?\n\n' +
+            'This resets every slider, prompt, template, and toggle (summarizer, auditor, ledger, editor, recall, injection) to the best-known defaults.\n' +
+            'It will NOT clear your summary memory / character ledger, and NOT touch your connection settings.'
         )) return;
 
         const s = getSettings();
@@ -4156,8 +4156,22 @@ function bindUIEvents() {
         s.summarizerUserPrompt = defaultSettings.summarizerUserPrompt;
         s.promptPreset = defaultSettings.promptPreset;
         s.injectionTemplate = defaultSettings.injectionTemplate;
+        s.notepadTemplate = defaultSettings.notepadTemplate;
         s.stripPatterns = [...defaultSettings.stripPatterns];
         s.summarizerResponseLength = defaultSettings.summarizerResponseLength;
+
+        // Reset Detail Auditor (sister) prompts
+        s.sisterEnabled = defaultSettings.sisterEnabled;
+        s.sisterSystemPrompt = defaultSettings.sisterSystemPrompt;
+        s.sisterUserPrompt = defaultSettings.sisterUserPrompt;
+        s.sisterInjectTemplate = defaultSettings.sisterInjectTemplate;
+
+        // Reset Continuity Editor prompts
+        s.editorSystemPrompt = defaultSettings.editorSystemPrompt;
+        s.editorUserPrompt = defaultSettings.editorUserPrompt;
+
+        // Reset Recall selector prompt
+        s.recallSystemPrompt = defaultSettings.recallSystemPrompt;
 
         // Reset injection-content toggles
         s.injectNotepad = defaultSettings.injectNotepad;
@@ -4181,13 +4195,13 @@ function bindUIEvents() {
         s.traceMode = defaultSettings.traceMode;
 
         saveSettings();
-        updateInjection();
+        updateInjection(true);
         updateUI();
 
         toastr.success(
-            'Advanced settings reset to defaults. Connection settings and summary memory were preserved.',
+            'All prompts, templates, and tuning reset to recommended defaults. Your memory, character ledger, and connection settings were preserved.',
             'Summaryception',
-            { timeOut: 4000 }
+            { timeOut: 4500 }
         );
     });
 }
@@ -4481,7 +4495,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.15.1 (LO) loaded — audit fixes: Import now restores the full memory (ledger + notepad + pins), not just snippets; chat-length tracker refreshed on generation start too, tightening deletion-resync precision. No functional regressions.');
+            console.log(LOG_PREFIX, 'v5.15.2 (LO) loaded — Reset All is now comprehensive: one click restores EVERY prompt/template/toggle (summarizer, auditor, ledger, editor, recall, injection) to the best-known defaults, preserving memory + connection. (Ledger injection is compact prose, never JSON.)');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
