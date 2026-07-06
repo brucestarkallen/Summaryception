@@ -2441,6 +2441,10 @@ function onChatChanged() {
 }
 
 function onGenerationStarted() {
+    // Keep the length tracker fresh — a user message is already in the chat by now,
+    // and MESSAGE_RECEIVED only fires for AI messages, so this closes that gap
+    // before any subsequent deletion is measured.
+    try { const { chat } = SillyTavern.getContext(); _prevChatLen = Array.isArray(chat) ? chat.length : _prevChatLen; } catch (_) {}
     // Force so the injection is guaranteed present at prompt-build time, even if
     // a branch/chat switch left it stale or cleared. This removes the need to
     // toggle enabled/pause or refresh the page after branching.
@@ -3909,6 +3913,11 @@ function bindUIEvents() {
                 store.layers = data.layers;
                 store.summarizedUpTo = data.summarizedUpTo ?? -1;
                 store.ghostedIndices = data.ghostedIndices || [];
+                // Restore the rest of memory too, so export → import is a faithful
+                // round-trip (older export files simply omit these — keep current).
+                if (typeof data.notepad === 'string') store.notepad = data.notepad;
+                if (data.ledger && typeof data.ledger === 'object' && !Array.isArray(data.ledger)) store.ledger = data.ledger;
+                if (Array.isArray(data.pins)) store.pins = data.pins;
 
                 if (store.summarizedUpTo >= 0) {
                     await ghostMessagesUpTo(store.summarizedUpTo);
@@ -4472,7 +4481,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'v5.15.0 (LO) loaded — message-deletion resync: deleting a mid-chat message now shifts stored index bookkeeping (summarizedUpTo, snippet turnRanges, ghostedIndices) so recall/regen/backfill keep reading the right source turns. Precise for single deletions, safe overrun-clamp fallback otherwise. Ledger untouched (name-keyed).');
+            console.log(LOG_PREFIX, 'v5.15.1 (LO) loaded — audit fixes: Import now restores the full memory (ledger + notepad + pins), not just snippets; chat-length tracker refreshed on generation start too, tightening deletion-resync precision. No functional regressions.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
