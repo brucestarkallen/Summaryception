@@ -82,7 +82,7 @@ const defaultSettings = Object.freeze({
     ledgerEnabled: true,
     ledgerActiveWindow: 12,        // recent messages scanned to decide who is "on screen"
     ledgerMaxActive: 6,            // max characters injected at once
-    ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — room for whereabouts-led state + compressed arc history without truncation; lower toward 700 if token budget is tight
+    ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — sized for a dense CURRENT card (behavioral anchor + whereabouts + compressed arc), not for saving tokens. The cap's real job is bounding accumulation so stale/redundant detail can't pile into noise that drifts the model; keep cards dense and current, not merely small.
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
     ledgerInjectTemplate: '\n\n<characters>\nWho these people are and where they stand right now — keep them consistent and in character; do not contradict:\n{{characters}}\n</characters>\n',
     ledgerSystemPrompt:
