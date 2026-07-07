@@ -82,7 +82,7 @@ const defaultSettings = Object.freeze({
     ledgerEnabled: true,
     ledgerActiveWindow: 12,        // recent messages scanned to decide who is "on screen"
     ledgerMaxActive: 6,            // max characters injected at once
-    ledgerMaxCharsPerChar: 700,    // per-character injection cap (chars)
+    ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — room for whereabouts-led state + compressed arc history without truncation; lower toward 700 if token budget is tight
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
     ledgerInjectTemplate: '\n\n<characters>\nWho these people are and where they stand right now — keep them consistent and in character; do not contradict:\n{{characters}}\n</characters>\n',
     ledgerSystemPrompt:
@@ -4555,7 +4555,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.16.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched.');
+            console.log(LOG_PREFIX, 'Summaryception v5.16.1 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
