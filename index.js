@@ -1253,6 +1253,18 @@ function resolveLedgerKey(ledger, name) {
     return name;                                          // ambiguous or none → keep separate
 }
 
+// Defensive normalization: strip any field label a sloppy scribe model may have
+// echoed into a VALUE (e.g. "Nature: terse", or a compounded "Nature: Nature: ...").
+// The store must hold the bare value only; labels are presentation-only, added by
+// formatLedgerEntry. Anchored to the start and only matches known labels, so real
+// values (even ones containing a mid-string colon) are left untouched.
+const _LEDGER_LABEL_RE = /^\s*(?:nature|now|open threads|open|arc|core|state|threads)\s*:\s*/i;
+function stripLeadingLabel(v) {
+    let s = String(v == null ? '' : v).trim();
+    for (let i = 0; i < 6 && _LEDGER_LABEL_RE.test(s); i++) s = s.replace(_LEDGER_LABEL_RE, '').trim();
+    return s;
+}
+
 // Merge scribe deltas into the store's ledger. Partial semantics: a field
 // present on the delta REPLACES that field (the scribe emits the full evolved
 // value); an omitted field is left untouched. `threads` present replaces the
@@ -1269,13 +1281,14 @@ function mergeLedgerDeltas(deltas) {
         const key = resolveLedgerKey(store.ledger, rawName);
         const entry = store.ledger[key] || {};
         let touched = false;
-        if (typeof d.core === 'string' && d.core.trim())   { entry.core  = d.core.trim();  touched = true; }
-        if (typeof d.state === 'string' && d.state.trim()) { entry.state = d.state.trim(); touched = true; }
-        if (typeof d.arc === 'string' && d.arc.trim())     { entry.arc   = d.arc.trim();   touched = true; }
+        if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { entry.core  = v; touched = true; } }
+        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; touched = true; } }
+        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);   if (v) { entry.arc   = v; touched = true; } }
         if (Array.isArray(d.threads)) {
             entry.threads = d.threads
                 .filter(t => typeof t === 'string' && t.trim())
-                .map(t => t.trim());
+                .map(t => stripLeadingLabel(t))
+                .filter(Boolean);
             touched = true;
         }
         if (touched) {
@@ -4495,7 +4508,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.APP_READY, () => {
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.15.3 loaded — full README added (architecture + fork differences + maintainer notes); display name cleaned. No functional changes.');
+            console.log(LOG_PREFIX, 'Summaryception v5.15.4 loaded — ledger values are hardened against label-echo: if the scribe ever puts a field label inside a value ("Nature: ..."), it is stripped before storage so nothing compounds. Storage was already clean; this guarantees it regardless of scribe model.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
