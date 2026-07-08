@@ -879,6 +879,13 @@ async function repairIfBranched() {
         ? Math.max(...survivors.map(sn => sn.turnRange[1]))
         : -1;
 
+    // Snippets (and their attached audit notes) were just trimmed to the branch. The
+    // character ledger CANNOT be trimmed the same way — it's cumulative, keyed by name
+    // with no per-turn history, so it still holds states/arcs/threads earned on the
+    // abandoned timeline. Rewind the live pointer so the live pass re-derives current
+    // state forward on THIS branch; older arcs/threads may linger (surfaced in the toast).
+    if (typeof store.ledgerLiveIdx === 'number') store.ledgerLiveIdx = store.summarizedUpTo;
+
     // ── 4. Un-ghost everything past the (new) summarized boundary, so no turn is
     //       ever both hidden AND unsummarized. This restores the verbatim window
     //       and rescues any turns orphaned by a straddling snippet. ──
@@ -904,9 +911,9 @@ async function repairIfBranched() {
 
     log(`Branch repair complete. summarizedUpTo: ${oldSummarizedUpTo} → ${store.summarizedUpTo}, un-ghosted ${unghosted} turn(s).`);
     toastr.info(
-        `Branch repaired — rewound the summary to turn ${store.summarizedUpTo} and restored ${unghosted} recent turn(s) to verbatim. They'll be re-summarized as this branch grows.`,
+        `Branch repaired — rewound the summary to turn ${store.summarizedUpTo} and restored ${unghosted} recent turn(s) to verbatim. Snippets and their audit notes past the branch were dropped. The character ledger keeps what characters had already become (it doesn't auto-rewind); if this branch diverges a lot, use Clear Ledger + Build ledger from history for a clean rebuild.`,
         'Summaryception — Branch Repair',
-        { timeOut: 6000 }
+        { timeOut: 9000 }
     );
 }
 
@@ -1675,7 +1682,7 @@ async function backfillLedgerFromHistory() {
                 if (consec >= 3) { toastr.error('3 consecutive failures — pausing. Progress saved.', 'Summaryception', { timeOut: 7000 }); break; }
             }
             done++;
-            await saveChatStore();   // per-batch: an interruption loses at most the current pass
+            if (done % 6 === 0) await saveChatStore();   // throttle: the full-chat write is the per-batch cost — save every few passes; the end-of-run save persists the rest
             const pct = Math.round((done / batches.length) * 100);
             $(toast).find('.toast-message').text(`Building ledger: ${done} / ${batches.length} passes (${pct}%)${failed ? ` | ${failed} failed` : ''}\nClick ✕ to stop`);
         }
@@ -1781,7 +1788,7 @@ async function backfillAuditsForLayer0() {
                 if (consec >= 3) { toastr.error('3 consecutive failures — pausing. Progress saved.', 'Summaryception', { timeOut: 7000 }); break; }
             }
             done++;
-            await saveChatStore();   // per-batch: an interruption loses at most the current snippet
+            if (done % 6 === 0) await saveChatStore();   // throttle: the full-chat write is the per-batch cost — save every few snippets; the end-of-run save persists the rest
             const pct = Math.round((done / targets.length) * 100);
             $(toast).find('.toast-message').text(`Auditing: ${done} / ${targets.length} (${pct}%) | +${added} notes${failed ? ` | ${failed} failed` : ''}\nClick ✕ to stop`);
         }
@@ -2072,7 +2079,11 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         queueLedgerUpdate(storyTxt, contextStr);           // non-blocking: scribe runs in background
 
         await maybePromoteLayer(0);
-        await saveChatStore();
+        // In the bulk path the range /hide above already wrote the chat (with the new
+        // summary + ghost state) this batch, and layer promotion re-derives on load — so
+        // when ghosting is on we skip the extra full-chat write here and let runCatchup
+        // flush once at the end. With ghosting off there's no /hide save, so keep it.
+        if (s.disableGhosting) await saveChatStore();
 
         trace('<<< EXITING summarizeOneBatchFromTurns - SUCCESS');
         return true;
@@ -2191,6 +2202,8 @@ async function runCatchup(visibleTurns, overflow) {
             );
         }
 
+        try { await saveChatStore(); } catch (_) {}   // single end-of-run flush (per-batch bulk writes are skipped when /hide already persisted them)
+        updateInjection(true);
         updateUI();
 
     } finally {
@@ -2675,6 +2688,9 @@ function reindexAfterDeletion(store, D) {
     if (typeof store.summarizedUpTo === 'number' && store.summarizedUpTo >= D) {
         store.summarizedUpTo = store.summarizedUpTo - 1;
     }
+    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= D) {
+        store.ledgerLiveIdx = store.ledgerLiveIdx - 1;   // keep the live pointer aligned after a deletion
+    }
     if (Array.isArray(store.layers)) {
         for (const layer of store.layers) {
             if (!Array.isArray(layer)) continue;
@@ -2702,6 +2718,7 @@ function clampStoreToLength(store, newLen) {
     if (!store) return;
     const max = (newLen | 0) - 1;
     if (typeof store.summarizedUpTo === 'number' && store.summarizedUpTo > max) store.summarizedUpTo = max;
+    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > max) store.ledgerLiveIdx = max;
     if (Array.isArray(store.layers)) {
         for (const layer of store.layers) {
             if (!Array.isArray(layer)) continue;
@@ -4879,7 +4896,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.21.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits.');
+            console.log(LOG_PREFIX, 'Summaryception v5.22.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
