@@ -29,7 +29,7 @@ function extractTopLevel(name) {
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint',
-    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags'];
+    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -49,7 +49,7 @@ return {
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint,
-  normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags,
+  normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange,
 };
 `;
 const L = new Function(sandbox)();
@@ -456,6 +456,22 @@ section('Continuity — reconcileSnippetFlags (re-check clears fixed, keeps vali
     const r4 = L.reconcileSnippetFlags(store2, [10, 12], [{ issue: 'Z', fix: 'z', kind: 'continuity' }]);
     eq(r4.added, 0, 'dismissed Z not added even though re-reported');
     eq(store2.continuityFlags.length, 0, 'dismissed Z stays gone');
+}
+
+// ─────────────────────
+section('Continuity — _findSnippetByTurnRange');
+{
+    const store = {
+        layers: [
+            [{ turnRange: [0, 2], text: 'a' }, { turnRange: [3, 5], text: 'b' }],
+            [{ turnRange: [6, 10], text: 'c' }],
+        ],
+    };
+    eq(L._findSnippetByTurnRange(store, [3, 5]).snippet.text, 'b', 'finds snippet in layer 0');
+    eq(L._findSnippetByTurnRange(store, [6, 10]).snippet.text, 'c', 'finds snippet in a higher layer');
+    eq(L._findSnippetByTurnRange(store, [3, 4]), null, 'no exact match -> null');
+    eq(L._findSnippetByTurnRange(store, null), null, 'null turnRange -> null');
+    eq(L._findSnippetByTurnRange({}, [0, 2]), null, 'no layers -> null');
 }
 
 // ─────────────────────────────────────────────────────────────────────
