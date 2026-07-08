@@ -56,6 +56,17 @@ const defaultSettings = Object.freeze({
     //    snippet. Empty (NONE) for routine batches. Never touches the snippet itself. ──
     sisterEnabled: true,
     sisterInjectTemplate: '\n\n<details>\nSpecifics behind recent events (canon — do not contradict):\n{{details}}\n</details>\n',
+
+    // ── Continuity Auditor: a focused pass that checks each snippet against BOTH its
+    //    source passage (drift) and the established record (contradictions), and files
+    //    concise flags into a visible work-queue you or the copilot resolve. ──
+    continuityEnabled: false,      // opt-in (adds a background LLM pass per snippet)
+    continuityNudge: false,        // global "nudge the story" toggle: inject unresolved fixes as OOC corrections so the Storyteller self-corrects
+    continuityNudgeMax: 6,         // cap how many unresolved fixes are injected at once
+    continuitySystemPrompt:
+        `Role: continuity auditor for an ongoing collaborative fiction. You receive the exact recent PASSAGE, the compact SNIPPET written from it, and the established RECORD (character ledger, notepad, earlier summaries). Your ONLY job is to catch genuine continuity problems of two kinds: (1) DRIFT — the SNIPPET distorts, misattributes, or drops something materially important from the PASSAGE; (2) CONTINUITY — the PASSAGE or SNIPPET contradicts the established RECORD: a character in the wrong place, someone knowing or referencing something they never witnessed, a broken timeline or sequence, an inconsistent relationship or stat, or a confused/renamed entity. Report ONLY real contradictions or material distortions — never style, pacing, speculation, or trivial omissions, and never processing directives. Do NOT invent facts; base every finding strictly on the given text. If everything is consistent, output exactly: NONE. Otherwise output ONLY a compact JSON array, each element {"issue":"<one concise sentence naming what contradicts what>","fix":"<one concise sentence stating the correction>","kind":"drift"|"continuity"}. No preamble, no markdown, no commentary.`,
+    continuityUserPrompt:
+        `<player_name>{{player_name}}</player_name>\n<record>{{context_str}}</record>\n<passage>{{story_txt}}</passage>\n<snippet>{{snippet}}</snippet>\n\n<snippet> is the compact memory line recorded for <passage>. <record> is what the story has already established elsewhere.\n\nCheck for exactly two things:\n1) DRIFT — does <snippet> distort, misattribute, or omit something materially important that IS in <passage>?\n2) CONTINUITY — does anything in <passage> or <snippet> CONTRADICT <record> — wrong location/presence, knowledge a character could not have, broken timeline, inconsistent relationship/stat, confused identity?\n\nFlag ONLY genuine problems, grounded in the text. Ignore style, pacing, and trivial detail. Do not invent.\n\nIf all consistent, output exactly:\nNONE\n\nOtherwise output ONLY a JSON array, e.g.:\n[{"issue":"Snippet says Alexia boarded the train, but the record places her at the academy","fix":"Alexia is at the academy, not on the train","kind":"continuity"}]`,
     // ── Pinned Memories + Verbatim Recall ──
     pinMaxChars: 1500,
     pinsMaxTotalChars: 6000,
@@ -457,6 +468,13 @@ function getChatStore() {
     if (!_lg || typeof _lg !== 'object' || Array.isArray(_lg)) {
         chatMetadata[MODULE_NAME].ledger = {};
     }
+    // Continuity flags — the continuity auditor's findings as a visible work-queue:
+    // { id, turnRange:[s,e], issue, fix, kind:'drift'|'continuity', createdAt, status:'open' }.
+    // Dismissed signatures are remembered so they're never re-raised; resolved flags are
+    // logged briefly (so nothing silently vanishes).
+    if (!Array.isArray(chatMetadata[MODULE_NAME].continuityFlags)) chatMetadata[MODULE_NAME].continuityFlags = [];
+    if (!Array.isArray(chatMetadata[MODULE_NAME].continuityDismissed)) chatMetadata[MODULE_NAME].continuityDismissed = [];
+    if (!Array.isArray(chatMetadata[MODULE_NAME].continuityResolved)) chatMetadata[MODULE_NAME].continuityResolved = [];
     return chatMetadata[MODULE_NAME];
 }
 
@@ -907,6 +925,10 @@ async function repairIfBranched() {
     // ── 5. Trim the ghost tracking to only valid, still-summarized indices. ──
     store.ghostedIndices = (store.ghostedIndices || [])
         .filter(idx => idx < chatLength && idx <= store.summarizedUpTo);
+    // Drop continuity flags that referenced turns past the branch (their snippets are gone);
+    // if the same issue still exists it'll be re-flagged when the branch re-summarizes.
+    store.continuityFlags = (store.continuityFlags || []).filter(f =>
+        f && (!Array.isArray(f.turnRange) || (f.turnRange[0] >= 0 && f.turnRange[1] <= store.summarizedUpTo)));
 
     await saveChatStore();
     log(`Branch repair complete. summarizedUpTo: ${oldSummarizedUpTo} → ${store.summarizedUpTo}, un-ghosted ${unghosted} turn(s).`);
@@ -1299,6 +1321,69 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
             restorePromptToggles(snapshot);
         }
     }
+}
+
+// ─── Continuity Auditor helpers (pure — unit-tested) ─────────────────
+// Parse the checker's output into flag objects. Accepts a JSON array (optionally
+// fenced or embedded in noise), a single object, or the literal NONE. Never throws.
+function normalizeContinuityOutput(raw) {
+    let t = (raw || '').trim();
+    if (!t) return [];
+    t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    if (/^\(?\s*none\s*\)?[.!]?$/i.test(t)) return [];
+    let arr = null;
+    try { arr = JSON.parse(t); } catch (_) {
+        const m = t.match(/\[[\s\S]*\]/);
+        if (m) { try { arr = JSON.parse(m[0]); } catch (_) {} }
+    }
+    if (!Array.isArray(arr)) {
+        if (arr && typeof arr === 'object') arr = [arr];
+        else return [];
+    }
+    const out = [];
+    for (const it of arr) {
+        if (!it || typeof it !== 'object') continue;
+        const issue = String(it.issue == null ? '' : it.issue).trim();
+        const fix = String(it.fix == null ? '' : it.fix).trim();
+        if (!issue && !fix) continue;
+        let kind = String(it.kind == null ? '' : it.kind).trim().toLowerCase();
+        if (kind !== 'drift' && kind !== 'continuity') kind = 'continuity';
+        out.push({ issue: issue || fix, fix: fix || issue, kind });
+    }
+    return out;
+}
+
+// Stable dedup/dismiss signature — issue text (normalized) + kind. Deliberately
+// excludes turnRange so a dismissal survives reindexing after edits/branches.
+function _continuitySig(flag) {
+    if (!flag || typeof flag !== 'object') return '';
+    const base = String(flag.issue == null ? '' : flag.issue).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!base) return '';
+    return ((flag.kind === 'drift') ? 'd|' : 'c|') + base;
+}
+
+// Add new flags for a snippet's turnRange, skipping ones already open (by sig) and any
+// the user dismissed. Returns how many were added.
+function mergeContinuityFlags(store, turnRange, newFlags) {
+    if (!store || !Array.isArray(newFlags)) return 0;
+    if (!Array.isArray(store.continuityFlags)) store.continuityFlags = [];
+    if (!Array.isArray(store.continuityDismissed)) store.continuityDismissed = [];
+    const dismissed = new Set(store.continuityDismissed);
+    const openSigs = new Set(store.continuityFlags.filter(f => f && f.status !== 'resolved').map(_continuitySig));
+    let added = 0;
+    for (const nf of newFlags) {
+        const sig = _continuitySig(nf);
+        if (!sig || dismissed.has(sig) || openSigs.has(sig)) continue;
+        store.continuityFlags.push({
+            id: 'cf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7),
+            turnRange: Array.isArray(turnRange) ? [turnRange[0], turnRange[1]] : null,
+            issue: nf.issue, fix: nf.fix, kind: nf.kind,
+            createdAt: Date.now(), status: 'open',
+        });
+        openSigs.add(sig);
+        added++;
+    }
+    return added;
 }
 
 // ─── Detail Auditor ("sister") ───────────────────────────────────────
@@ -1968,6 +2053,181 @@ async function backfillAuditsForLayer0() {
     }
 }
 
+// ─── Continuity Auditor engine ───────────────────────────────────────
+async function callContinuityChecker(storyTxt, snippetText, recordStr) {
+    const s = getSettings();
+    const raw = await callSummarizer(storyTxt, recordStr, {
+        systemPrompt: s.continuitySystemPrompt,
+        userPrompt: s.continuityUserPrompt,
+        snippet: snippetText,
+        quiet: true,   // continuity failures are logged, never surfaced as summarizer errors
+    });
+    return normalizeContinuityOutput(raw);
+}
+
+// The established record to check a snippet against: manual notepad + character ledger
+// + the story-so-far gist. Bounded via the ledger cap.
+function buildContinuityRecord() {
+    const s = getSettings();
+    const store = getChatStore();
+    const parts = [];
+    const nb = (store.notepad || '').trim();
+    if (nb) parts.push('NOTEPAD (manual canon):\n' + nb);
+    let led = '';
+    try { led = serializeLedgerForScribe(store.ledger, s.ledgerContextMaxChars); } catch (_) {}
+    if (led && led.trim()) parts.push('CHARACTER LEDGER:\n' + led.trim());
+    let gist = '';
+    try { gist = buildFullContext(0); } catch (_) {}
+    if (gist && gist.trim()) parts.push('STORY SO FAR:\n' + gist.trim());
+    return parts.join('\n\n') || '(nothing established yet)';
+}
+
+let _continuityQueue = [];
+let _continuityActive = false;
+
+// Queue a continuity check for the snippet just pushed to Layer 0. Fire-and-forget.
+function queueContinuityCheck(storyTxt, snippetText) {
+    const s = getSettings();
+    if (!s.continuityEnabled) return;
+    const store = getChatStore();
+    const layer0 = store.layers && store.layers[0];
+    if (!layer0 || layer0.length === 0) return;
+    _continuityQueue.push({ snip: layer0[layer0.length - 1], storyTxt, snippetText, epoch: _chatEpoch });
+    processContinuityQueue();
+}
+
+async function processContinuityQueue() {
+    if (_continuityActive) return;
+    _continuityActive = true;
+    try {
+        while (_continuityQueue.length > 0) {
+            const job = _continuityQueue.shift();
+            try {
+                if (job.epoch !== _chatEpoch) continue;   // chat switched before we got to it
+                const recordStr = buildContinuityRecord();
+                const flags = await callContinuityChecker(job.storyTxt, job.snippetText, recordStr);
+                if (job.epoch !== _chatEpoch) continue;    // switched during the call
+                const store = getChatStore();
+                const layer0 = store.layers && store.layers[0];
+                if (!layer0 || !layer0.includes(job.snip)) { log('Continuity: snippet no longer in Layer 0 — result discarded.'); continue; }
+                if (typeof job.snippetText === 'string' && job.snip.text !== job.snippetText) { log('Continuity: snippet changed externally mid-check — result discarded.'); continue; }
+                if (flags.length > 0 && job.snip.turnRange) {
+                    const added = mergeContinuityFlags(store, job.snip.turnRange, flags);
+                    if (added > 0) {
+                        await saveChatStore();
+                        updateInjection();
+                        try { renderLedger(); } catch (_) {}
+                        toastr.warning(`Continuity: ${added} issue${added === 1 ? '' : 's'} flagged for review.`, 'Summaryception', { timeOut: 5000 });
+                        log(`Continuity (background): ${added} flag(s) added.`);
+                    }
+                } else {
+                    log('Continuity (background): snippet consistent — no flags.');
+                }
+            } catch (e) {
+                log('Continuity check failed for one snippet (non-fatal):', e);
+            }
+        }
+    } finally {
+        _continuityActive = false;
+    }
+}
+
+// Whole-story continuity sweep: check every snippet against its source + the record.
+async function backfillContinuityForLayer0() {
+    const s = getSettings();
+    if (!s.continuityEnabled) { toastr.warning('Enable the Continuity Auditor first.', 'Summaryception'); return; }
+    if (isSummarizing) { toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
+    if (_continuityActive || _ledgerActive || _auditActive) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
+    const store = getChatStore();
+    const targets = [];   // snippet OBJECTS, so a mid-run deletion can't shift us onto the wrong one
+    for (const layer of (store.layers || [])) {
+        if (!Array.isArray(layer)) continue;
+        for (const sn of layer) { if (sn && sn.turnRange && sn.text) targets.push(sn); }
+    }
+    if (targets.length === 0) { toastr.info('No snippets to check yet.', 'Summaryception', { timeOut: 4000 }); return; }
+    if (!confirm(
+        `Check continuity across ${targets.length} snippet(s)?\n\n` +
+        `Runs one check per snippet (~${targets.length} background LLM calls), comparing each to its source passage and the established record. Any problems land in the Continuity list — nothing is changed automatically. You can stop anytime; progress is kept.`
+    )) return;
+
+    const { chat } = SillyTavern.getContext();
+    const startEpoch = _chatEpoch;
+    let done = 0, flagged = 0, failed = 0, cancelled = false, consec = 0;
+    const toast = toastr.info(`Checking continuity: 0 / ${targets.length}`, 'Summaryception Continuity', {
+        timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
+        onCloseClick: () => { cancelled = true; abortSummarization(); },
+    });
+    isSummarizing = true;
+    try {
+        for (const sn of targets) {
+            if (cancelled || _chatEpoch !== startEpoch) break;
+            if (!sn.turnRange) { done++; continue; }
+            const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
+            if (!storyTxt.trim()) { done++; continue; }
+            try {
+                const recordStr = buildContinuityRecord();
+                const flags = await callContinuityChecker(storyTxt, sn.text, recordStr);
+                if (_chatEpoch !== startEpoch) break;
+                if (typeof sn.text === 'string' && flags.length > 0) flagged += mergeContinuityFlags(store, sn.turnRange, flags);
+                consec = 0;
+            } catch (e) {
+                failed++; consec++;
+                log('Continuity backfill: snippet failed:', e);
+                if (consec >= 3) { toastr.error('3 consecutive failures — pausing. Progress saved.', 'Summaryception', { timeOut: 7000 }); break; }
+            }
+            done++;
+            if (done % 6 === 0) await saveChatStore();
+            const pct = Math.round((done / targets.length) * 100);
+            $(toast).find('.toast-message').text(`Checking continuity: ${done} / ${targets.length} (${pct}%) | ${flagged} flagged${failed ? ` | ${failed} failed` : ''}\nClick ✕ to stop`);
+        }
+        toastr.clear(toast);
+        if (_chatEpoch !== startEpoch) {
+            toastr.warning(`Stopped — you switched chats. The original chat kept its progress (${flagged} flagged).`, 'Summaryception', { timeOut: 6000 });
+        } else {
+            await saveChatStore();
+            updateInjection(true);
+            try { renderLedger(); } catch (_) {}
+            if (cancelled) toastr.warning(`Stopped at ${done}/${targets.length}. ${flagged} issue(s) flagged. Progress saved.`, 'Summaryception', { timeOut: 5000 });
+            else toastr.success(`Continuity check done — ${flagged} issue${flagged === 1 ? '' : 's'} flagged across ${done} snippet(s)${failed ? `, ${failed} failed` : ''}.`, 'Summaryception', { timeOut: 6000 });
+        }
+    } finally {
+        isSummarizing = false;
+    }
+}
+
+// Copilot/UI actions. Resolve = fixed (logged briefly, then gone). Dismiss = false
+// alarm (remembered so it's never re-raised). Both are deliberate — the auditor itself
+// never deletes a flag.
+async function resolveContinuityFlag(id) {
+    const store = getChatStore();
+    const list = store.continuityFlags || [];
+    const i = list.findIndex(f => f && f.id === id);
+    if (i < 0) return false;
+    const f = list[i];
+    list.splice(i, 1);
+    if (!Array.isArray(store.continuityResolved)) store.continuityResolved = [];
+    store.continuityResolved.unshift({ issue: f.issue, fix: f.fix, kind: f.kind, resolvedAt: Date.now() });
+    store.continuityResolved = store.continuityResolved.slice(0, 20);
+    await saveChatStore(); updateInjection(); try { renderLedger(); } catch (_) {}
+    log(`Continuity: flag ${id} resolved.`);
+    return true;
+}
+
+async function dismissContinuityFlag(id) {
+    const store = getChatStore();
+    const list = store.continuityFlags || [];
+    const i = list.findIndex(f => f && f.id === id);
+    if (i < 0) return false;
+    const f = list[i];
+    list.splice(i, 1);
+    if (!Array.isArray(store.continuityDismissed)) store.continuityDismissed = [];
+    const sig = _continuitySig(f);
+    if (sig && !store.continuityDismissed.includes(sig)) store.continuityDismissed.push(sig);
+    await saveChatStore(); updateInjection(); try { renderLedger(); } catch (_) {}
+    log(`Continuity: flag ${id} dismissed.`);
+    return true;
+}
+
 // ─── Core: Summarize Oldest Verbatim Turns ──────────────────────────
 
 async function maybeSummarizeTurns() {
@@ -2117,6 +2377,7 @@ async function summarizeOneBatch(visibleTurns) {
 
         // Sister pass: check the snippet for dropped specifics; attach a detail note if any.
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
+        queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
         // Ledger pass: evolve the per-character psychological model from this passage.
         queueLedgerUpdate(storyTxt, contextStr);           // non-blocking: scribe runs in background
 
@@ -2236,6 +2497,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
 
         // Sister pass: check the snippet for dropped specifics; attach a detail note if any.
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
+        queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
         // Ledger pass: evolve the per-character psychological model from this passage.
         queueLedgerUpdate(storyTxt, contextStr);           // non-blocking: scribe runs in background
 
@@ -2787,13 +3049,26 @@ function assembleSummaryBlock() {
 
     // Optional sections gated by their own injection toggles (independent of the
     // background passes, which keep running so the data stays maintained).
+    // Continuity corrections — unresolved flags, injected as OOC directives so the
+    // Storyteller self-corrects while a human/copilot reconciles the stored record.
+    // Off by default; capped by continuityNudgeMax.
+    let continuityPart = '';
+    if (s.continuityNudge && Array.isArray(store.continuityFlags)) {
+        const open = store.continuityFlags.filter(f => f && f.status === 'open' && f.fix && String(f.fix).trim());
+        if (open.length > 0) {
+            const cap = (typeof s.continuityNudgeMax === 'number' && s.continuityNudgeMax > 0) ? s.continuityNudgeMax : 6;
+            const lines = open.slice(0, cap).map(f => '- ' + String(f.fix).trim());
+            continuityPart = '\n\n<continuity_corrections>\nOut-of-character — a human is reconciling the record; keep the story consistent with these established facts and do not contradict them:\n' + lines.join('\n') + '\n</continuity_corrections>\n';
+        }
+    }
+
     const pinnedPart = (s.injectPinned !== false) ? buildPinnedBlock() : '';
     const charPart   = (s.injectLedger !== false) ? buildCharacterBlock() : '';
 
     // Stable canon first (notepad → pinned → active-cast character state), then the
     // narrative (summary gist → recent-detail specifics). Grouping "who these people
     // are" ahead of "what happened" frames the scene for the storyteller.
-    return notesPart + pinnedPart + charPart + summaryPart + detailPart;
+    return notesPart + pinnedPart + charPart + summaryPart + detailPart + continuityPart;
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
@@ -2852,6 +3127,18 @@ function reindexAfterDeletion(store, D) {
     if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= D) {
         store.ledgerLiveIdx = store.ledgerLiveIdx - 1;   // keep the live pointer aligned after a deletion
     }
+    if (Array.isArray(store.continuityFlags)) {
+        store.continuityFlags = store.continuityFlags.filter(f => {
+            if (!f) return false;
+            if (!Array.isArray(f.turnRange)) return true;
+            let a = f.turnRange[0], b = f.turnRange[1];
+            if (a > D) a -= 1;
+            if (b >= D) b -= 1;
+            if (a > b || b < 0) return false;   // the flag's source is gone — drop it
+            f.turnRange = [a, b];
+            return true;
+        });
+    }
     if (Array.isArray(store.layers)) {
         for (const layer of store.layers) {
             if (!Array.isArray(layer)) continue;
@@ -2880,6 +3167,15 @@ function clampStoreToLength(store, newLen) {
     const max = (newLen | 0) - 1;
     if (typeof store.summarizedUpTo === 'number' && store.summarizedUpTo > max) store.summarizedUpTo = max;
     if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > max) store.ledgerLiveIdx = max;
+    if (Array.isArray(store.continuityFlags)) {
+        store.continuityFlags = store.continuityFlags.filter(f => {
+            if (!f) return false;
+            if (!Array.isArray(f.turnRange)) return true;
+            if (f.turnRange[0] > max) return false;
+            if (f.turnRange[1] > max) f.turnRange[1] = max;
+            return true;
+        });
+    }
     if (Array.isArray(store.layers)) {
         for (const layer of store.layers) {
             if (!Array.isArray(layer)) continue;
@@ -5067,11 +5363,20 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
         registerSlashCommands();
 
+        try {
+            (typeof window !== 'undefined' ? window : globalThis).summaryceptionContinuity = {
+                list: () => { try { return JSON.parse(JSON.stringify(getChatStore().continuityFlags || [])); } catch (_) { return []; } },
+                resolve: (id) => resolveContinuityFlag(id),
+                dismiss: (id) => dismissContinuityFlag(id),
+                recheck: () => backfillContinuityForLayer0(),
+            };
+            log('Continuity copilot API ready at window.summaryceptionContinuity (list/resolve/dismiss/recheck).');
+        } catch (_) {}
         eventSource.on(event_types.APP_READY, () => {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.24.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step.');
+            console.log(LOG_PREFIX, 'Summaryception v5.25.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

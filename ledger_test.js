@@ -28,7 +28,8 @@ function extractTopLevel(name) {
 
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
-    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint'];
+    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint',
+    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -48,6 +49,7 @@ return {
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint,
+  normalizeContinuityOutput, _continuitySig, mergeContinuityFlags,
 };
 `;
 const L = new Function(sandbox)();
@@ -385,6 +387,46 @@ section('_pickCheckpoint — nearest snapshot at/before target');
     eq(L._pickCheckpoint(cks, -1), null, 'nothing at/before a negative target');
     eq(L._pickCheckpoint([], 10), null, 'empty list -> null');
     eq(L._pickCheckpoint([{ atTurn: 10 }, { atTurn: 2 }, { atTurn: 7 }], 8).atTurn, 7, 'unsorted list handled');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+section('Continuity — normalizeContinuityOutput');
+{
+    eq(L.normalizeContinuityOutput('NONE').length, 0, 'NONE -> empty');
+    eq(L.normalizeContinuityOutput('').length, 0, 'empty -> empty');
+    const a = L.normalizeContinuityOutput('[{"issue":"Alexia on train","fix":"she is at the academy","kind":"continuity"}]');
+    eq(a.length, 1, 'one flag parsed');
+    eq(a[0].kind, 'continuity', 'kind preserved');
+    const b = L.normalizeContinuityOutput('```json\n[{"issue":"x","fix":"y","kind":"drift"}]\n```');
+    eq(b.length, 1, 'fenced json parsed');
+    eq(b[0].kind, 'drift', 'drift kind preserved');
+    const c = L.normalizeContinuityOutput('here you go [{"issue":"z","fix":"w"}] thanks');
+    eq(c.length, 1, 'salvaged array from surrounding noise');
+    eq(c[0].kind, 'continuity', 'kind defaults to continuity');
+    const d = L.normalizeContinuityOutput('{"issue":"solo","fix":"obj"}');
+    eq(d.length, 1, 'single object coerced to array');
+    eq(L.normalizeContinuityOutput('[{"kind":"drift"}]').length, 0, 'object with no issue/fix dropped');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+section('Continuity — _continuitySig + mergeContinuityFlags');
+{
+    eq(L._continuitySig({ issue: 'Alexia On  TRAIN', kind: 'continuity' }),
+       L._continuitySig({ issue: 'alexia on train', kind: 'continuity' }),
+       'sig normalizes case + whitespace');
+    ok(L._continuitySig({ issue: 'x', kind: 'drift' }) !== L._continuitySig({ issue: 'x', kind: 'continuity' }),
+       'sig distinguishes kind');
+    eq(L._continuitySig({ kind: 'drift' }), '', 'no issue -> empty sig');
+    const store = { continuityFlags: [], continuityDismissed: [] };
+    eq(L.mergeContinuityFlags(store, [3, 5], [{ issue: 'A', fix: 'a', kind: 'continuity' }]), 1, 'adds a new flag');
+    eq(L.mergeContinuityFlags(store, [3, 5], [{ issue: 'A', fix: 'a', kind: 'continuity' }]), 0, 'dedups an identical open flag');
+    eq(store.continuityFlags.length, 1, 'only one flag stored');
+    store.continuityDismissed.push(L._continuitySig({ issue: 'B', kind: 'continuity' }));
+    eq(L.mergeContinuityFlags(store, [1, 2], [{ issue: 'B', fix: 'b', kind: 'continuity' }]), 0, 'skips a dismissed sig');
+    eq(L.mergeContinuityFlags(store, [6, 7], [{ issue: 'C', fix: 'c', kind: 'drift' }]), 1, 'adds a genuinely different flag');
+    eq(store.continuityFlags.length, 2, 'two flags total');
+    ok(store.continuityFlags[0].id && store.continuityFlags[0].status === 'open' && store.continuityFlags[0].turnRange[0] === 3,
+       'stored flag has id, open status, and turnRange');
 }
 
 // ─────────────────────────────────────────────────────────────────────
