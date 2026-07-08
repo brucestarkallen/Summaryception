@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
-    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange'];
+    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -36,6 +36,7 @@ const sandbox = `
 let __settings = {};
 let __store = { ledger: {} };
 let __chat = [];
+let _rosterTick = 0;
 function getSettings(){ return __settings; }
 function getChatStore(){ return __store; }
 const SillyTavern = { getContext(){ return { chat: __chat }; } };
@@ -46,7 +47,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
-  subst, _storeHasContent, _computeLiveLedgerRange,
+  subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster,
 };
 `;
 const L = new Function(sandbox)();
@@ -326,6 +327,27 @@ section('buildCharacterBlock — roster (off-screen cast never vanishes)');
     const b2 = L.buildCharacterBlock();
     const inRoster = (b2.match(/;/g) || []).length;
     ok(b2.includes('Others in this story'), 'roster still present at cap=1');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+section('_selectRoster — capped rotating roster');
+{
+    const cast = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];   // most-recent first
+    eq(L._selectRoster(['A', 'B', 'C'], 6, 0), ['A', 'B', 'C'], 'cast <= cap: show everyone (no rotation)');
+    eq(L._selectRoster([], 6, 0), [], 'empty cast → empty');
+    eq(L._selectRoster(['A', 'B'], 0, 5), [], 'cap 0 → empty');
+    // cast > cap: warm = ceil(cap/2) anchored, cold rotates
+    eq(L._selectRoster(cast, 6, 0), ['A', 'B', 'C', 'D', 'E', 'F'], 'tick 0: warm A,B,C + cold D,E,F');
+    eq(L._selectRoster(cast, 6, 1), ['A', 'B', 'C', 'E', 'F', 'G'], 'tick 1: cold window advances to E,F,G');
+    eq(L._selectRoster(cast, 6, 2), ['A', 'B', 'C', 'F', 'G', 'H'], 'tick 2: cold window advances to F,G,H');
+    const t0 = L._selectRoster(cast, 6, 0), t1 = L._selectRoster(cast, 6, 1), t2 = L._selectRoster(cast, 6, 2);
+    ok(['A', 'B', 'C'].every(n => t0.includes(n) && t1.includes(n) && t2.includes(n)), 'warm (recent) anchored every tick');
+    ok(new Set(t1).size === t1.length, 'no duplicate entries in a pick');
+    const seen = new Set();
+    for (let k = 0; k < 5; k++) L._selectRoster(cast, 6, k).forEach(n => seen.add(n));
+    ok(['D', 'E', 'F', 'G', 'H'].every(n => seen.has(n)), 'all cold characters cycle through within a full rotation');
+    // tick wraps cleanly (no crash / stable set) at large tick
+    eq(L._selectRoster(cast, 6, 5), L._selectRoster(cast, 6, 0), 'tick wraps at coldPool length (5) back to start');
 }
 
 // ─────────────────────────────────────────────────────────────────────

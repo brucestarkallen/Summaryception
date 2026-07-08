@@ -87,7 +87,8 @@ const defaultSettings = Object.freeze({
     ledgerLiveUpdate: true,        // update the ledger over the recent (not-yet-summarized) window every turn, not only when a batch is summarized — keeps "Now"/arcs/threads tracking the current scene instead of lagging ~verbatimTurns behind
     ledgerLiveEveryTurns: 1,       // run the live pass every N assistant turns (1 = every turn = freshest)
     ledgerInjectRoster: true,      // also inject a compact one-line-per-character roster of EVERYONE off-screen, so long-absent characters are never forgotten and return consistently
-    ledgerRosterMax: 40,           // cap on roster entries (most-recently-updated first)
+    ledgerRosterMax: 12,           // cap on how many off-screen characters the roster lists at once (most-recently-updated first)
+    ledgerRosterRotate: true,      // when the off-screen cast exceeds the cap: keep the most-recent anchored and ROTATE the rest through the remaining slots one step per turn, so a small cap still refreshes everyone over time
     ledgerInjectTemplate: '\n\n<characters>\nWho these people are and where they stand right now — keep them consistent and in character; do not contradict:\n{{characters}}\n</characters>\n',
     ledgerSystemPrompt:
         `You are the character-continuity mind for an ongoing work of collaborative fiction — part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON — consistent in voice, values, and behavior — while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.
@@ -1500,6 +1501,7 @@ function mergeLedgerDeltas(deltas) {
 // covers turns AFTER summarizedUpTo and advances a persisted pointer (ledgerLiveIdx)
 // so no turn is reprocessed. Same queue, same guards; failures are non-fatal.
 let _turnsSinceLive = 0;
+let _rosterTick = 0;   // advances once per turn so the off-screen roster rotates
 
 // Pure: which [start,end] turn range the live pass should cover, or null if nothing
 // new. Skips already-summarized turns; resyncs if the pointer is stale-high (e.g.
@@ -2446,6 +2448,25 @@ function formatLedgerEntry(name, entry, capChars) {
 // the storyteller always has their behavioral anchor and current state on hand,
 // which is what keeps a tsundere from suddenly screaming and a volatile mood
 // from evaporating between turns.
+// Pure: choose which off-screen characters the roster lists THIS turn. If the whole
+// off-screen cast fits under the cap, list everyone. Otherwise anchor the most-recent
+// (likeliest to return) and rotate the remaining slots through the rest of the cast,
+// advancing one step per turn (`tick`) so no one is forgotten for long. `sorted` is
+// names, most-recent first. Deterministic given (sorted, cap, tick).
+function _selectRoster(sorted, cap, tick) {
+    if (!Array.isArray(sorted) || cap <= 0 || sorted.length === 0) return [];
+    if (sorted.length <= cap) return sorted.slice();
+    const warm = Math.max(1, Math.ceil(cap / 2));
+    const warmSet = sorted.slice(0, warm);
+    const coldPool = sorted.slice(warm);
+    const coldSlots = cap - warmSet.length;
+    if (coldSlots <= 0 || coldPool.length === 0) return warmSet;
+    const t = (((tick | 0) % coldPool.length) + coldPool.length) % coldPool.length;
+    const cold = [];
+    for (let i = 0; i < Math.min(coldSlots, coldPool.length); i++) cold.push(coldPool[(t + i) % coldPool.length]);
+    return warmSet.concat(cold);
+}
+
 function buildCharacterBlock() {
     const s = getSettings();
     if (!s.ledgerEnabled) return '';
@@ -2492,15 +2513,18 @@ function buildCharacterBlock() {
     let rosterLine = '';
     if (s.ledgerInjectRoster !== false) {
         const shownNames = new Set(shown.map(a => a.name));
-        const rosterCap = Math.max(0, s.ledgerRosterMax ?? 40);
-        const others = names
+        const rosterCap = Math.max(0, s.ledgerRosterMax ?? 12);
+        const offscreen = names
             .filter(n => !shownNames.has(n))
             .map(n => ({ name: n, entry: ledger[n], u: (ledger[n] && ledger[n].updatedAt) || 0 }))
             .filter(o => o.entry && typeof o.entry === 'object')
-            .sort((a, b) => b.u - a.u)
-            .slice(0, rosterCap);
-        const items = others.map(({ name, entry }) => {
-            let core = (typeof entry.core === 'string') ? entry.core.trim().replace(/\s+/g, ' ') : '';
+            .sort((a, b) => b.u - a.u);
+        const rotate = s.ledgerRosterRotate !== false;
+        const picked = _selectRoster(offscreen.map(o => o.name), rosterCap, rotate ? _rosterTick : 0);
+        const entryByName = new Map(offscreen.map(o => [o.name, o.entry]));
+        const items = picked.map((name) => {
+            const entry = entryByName.get(name);
+            let core = (entry && typeof entry.core === 'string') ? entry.core.trim().replace(/\s+/g, ' ') : '';
             if (core) { const cut = core.search(/[.;]\s/); if (cut > 0) core = core.slice(0, cut); }
             if (core.length > 100) core = core.slice(0, 99).replace(/\s+\S*$/, '').trimEnd() + '…';
             return core ? (name + ' — ' + core) : name;
@@ -2700,6 +2724,7 @@ function onMessageReceived(messageIndex) {
             setTimeout(async () => {
                 await maybeSummarizeTurns();
                 maybeQueueLiveLedger();   // live ledger: keep recent character states current, independent of summarization cadence
+                _rosterTick++;            // advance roster rotation one step per turn
                 updateInjection();
                 updateUI();
             }, 500);
@@ -2907,8 +2932,9 @@ function updateUI() {
         $('#sc_ledger_live_every').val(s.ledgerLiveEveryTurns ?? 1);
         $('#sc_ledger_live_every_val').text(s.ledgerLiveEveryTurns ?? 1);
         $('#sc_ledger_roster').prop('checked', s.ledgerInjectRoster !== false);
-        $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? 40);
-        $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? 40);
+        $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? 12);
+        $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? 12);
+        $('#sc_ledger_roster_rotate').prop('checked', s.ledgerRosterRotate !== false);
         $('#sc_ledger_max_chars_val').text(s.ledgerMaxCharsPerChar ?? 600);
         $('#sc_editor_system_prompt').val(s.editorSystemPrompt);
         $('#sc_editor_user_prompt').val(s.editorUserPrompt);
@@ -3919,6 +3945,11 @@ function bindUIEvents() {
         saveSettings();
         updateInjection(true);
     });
+    $(document).on('change', '#sc_ledger_roster_rotate', function () {
+        getSettings().ledgerRosterRotate = $(this).prop('checked');
+        saveSettings();
+        updateInjection(true);
+    });
     $(document).on('input', '#sc_ledger_system_prompt', function () {
         getSettings().ledgerSystemPrompt = $(this).val();
         saveSettings();
@@ -4809,7 +4840,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.18.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster so off-screen characters are never forgotten.');
+            console.log(LOG_PREFIX, 'Summaryception v5.19.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

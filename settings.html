@@ -556,9 +556,17 @@
                             <small class="sc-hint">Max off-screen characters listed in the roster (most-recently-updated first). 0 disables the roster.</small>
                         </label>
                         <div class="sc-slider-row">
-                            <input type="range" id="sc_ledger_roster_max" min="0" max="80" step="5" />
-                            <span id="sc_ledger_roster_max_val" class="sc-val">40</span>
+                            <input type="range" id="sc_ledger_roster_max" min="0" max="60" step="1" />
+                            <span id="sc_ledger_roster_max_val" class="sc-val">12</span>
                         </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_ledger_roster_rotate">
+                            <input type="checkbox" id="sc_ledger_roster_rotate" />
+                            <span>Rotate the roster</span>
+                        </label>
+                        <small class="sc-hint">When there are more off-screen characters than the cap, keep the most-recently-seen anchored and <strong>cycle</strong> the rest through the remaining slots each turn — so a small cap still refreshes everyone over time (leaner injection, better signal). Off = just show the most-recent up to the cap.</small>
                     </div>
 
                     <div class="sc-row">
