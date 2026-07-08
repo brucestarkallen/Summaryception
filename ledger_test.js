@@ -29,7 +29,7 @@ function extractTopLevel(name) {
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint',
-    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange'];
+    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -49,7 +49,7 @@ return {
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint,
-  normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange,
+  normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
 };
 `;
 const L = new Function(sandbox)();
@@ -487,6 +487,23 @@ section('Continuity — _findSnippetByTurnRange');
     eq(L._findSnippetByTurnRange(store, [3, 4]), null, 'no exact match -> null');
     eq(L._findSnippetByTurnRange(store, null), null, 'null turnRange -> null');
     eq(L._findSnippetByTurnRange({}, [0, 2]), null, 'no layers -> null');
+}
+
+// ─────────────────────
+section('Continuity — _findSnippetsCovering (which snippet owns an edited message)');
+{
+    const store = {
+        layers: [
+            [{ turnRange: [0, 2], text: 'a' }, { turnRange: [3, 5], text: 'b' }],
+            [{ turnRange: [6, 10], text: 'c' }],
+        ],
+    };
+    eq(L._findSnippetsCovering(store, 4).length, 1, 'index 4 -> one snippet');
+    eq(L._findSnippetsCovering(store, 4)[0].text, 'b', 'index 4 is inside [3,5]');
+    eq(L._findSnippetsCovering(store, 3)[0].text, 'b', 'range inclusive at the start');
+    eq(L._findSnippetsCovering(store, 8)[0].text, 'c', 'index 8 is inside [6,10]');
+    eq(L._findSnippetsCovering(store, 99).length, 0, 'beyond all snippets -> none (recent verbatim, ignored)');
+    eq(L._findSnippetsCovering({}, 1).length, 0, 'no layers -> none');
 }
 
 // ─────────────────────────────────────────────────────────────────────

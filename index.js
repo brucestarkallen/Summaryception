@@ -2110,6 +2110,9 @@ function buildContinuityRecord() {
 
 let _continuityQueue = [];
 let _continuityActive = false;
+let _editRecheckTimer = null;      // debounce for re-checking snippets after message edits
+let _editRecheckActive = false;
+const _pendingEditedIdx = new Set();
 
 // Queue a continuity check for the snippet just pushed to Layer 0. Fire-and-forget.
 function queueContinuityCheck(storyTxt, snippetText) {
@@ -2358,6 +2361,69 @@ async function applyAllContinuityFixes() {
     } else {
         toastr.warning('Chat changed — stopped applying fixes; progress kept.', 'Summaryception', { timeOut: 5000 });
     }
+}
+
+// Which snippets' source ranges cover a given message index. Pure.
+function _findSnippetsCovering(store, idx) {
+    const out = [];
+    if (!store || !Array.isArray(store.layers) || typeof idx !== 'number') return out;
+    for (const layer of store.layers) {
+        if (!Array.isArray(layer)) continue;
+        for (const sn of layer) {
+            if (sn && Array.isArray(sn.turnRange) && idx >= sn.turnRange[0] && idx <= sn.turnRange[1]) out.push(sn);
+        }
+    }
+    return out;
+}
+
+// Re-check ONE snippet against its (possibly just-edited) source + the record, reconcile
+// its flags, and auto-fix snippet-level ones if the toggle is on.
+async function recheckSnippet(sn) {
+    if (!sn || !Array.isArray(sn.turnRange)) return;
+    const { chat } = SillyTavern.getContext();
+    const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
+    if (!storyTxt.trim()) return;
+    const flags = await callContinuityChecker(storyTxt, sn.text, buildContinuityRecord());
+    const store = getChatStore();
+    if (!store.layers || !store.layers.some(l => Array.isArray(l) && l.includes(sn))) return;   // snippet gone
+    reconcileSnippetFlags(store, sn.turnRange, flags);
+    if (getSettings().continuityAutoFix) {
+        const mine = (store.continuityFlags || []).filter(f => f && f.status === 'open' && f.where === 'snippet' && Array.isArray(f.turnRange) && f.turnRange[0] === sn.turnRange[0] && f.turnRange[1] === sn.turnRange[1]);
+        for (const f of mine) { try { await applyContinuityFix(f.id); } catch (_) {} }
+    }
+    await saveChatStore(); updateInjection(); try { renderLedger(); } catch (_) {}
+}
+
+// Debounced flush: re-check every snippet touched by a recently-edited message, oldest first.
+async function flushEditedRecheck() {
+    if (_editRecheckActive) return;
+    const s = getSettings();
+    if (!s.continuityEnabled) { _pendingEditedIdx.clear(); return; }
+    if (isSummarizing || _continuityActive) { clearTimeout(_editRecheckTimer); _editRecheckTimer = setTimeout(flushEditedRecheck, 1500); return; }   // wait for other passes
+    _editRecheckActive = true;
+    try {
+        const store = getChatStore();
+        const idxs = Array.from(_pendingEditedIdx); _pendingEditedIdx.clear();
+        const seen = new Set(), affected = [];
+        for (const idx of idxs) for (const sn of _findSnippetsCovering(store, idx)) { if (!seen.has(sn)) { seen.add(sn); affected.push(sn); } }
+        affected.sort((a, b) => a.turnRange[0] - b.turnRange[0]);   // oldest -> newest
+        for (const sn of affected) { try { await recheckSnippet(sn); } catch (e) { log('edit-recheck: one snippet failed:', e); } }
+        if (affected.length) log(`Continuity: re-checked ${affected.length} snippet(s) after message edit(s).`);
+    } finally { _editRecheckActive = false; }
+}
+
+// MESSAGE_EDITED handler — only summarized messages (those inside a snippet range) matter;
+// edits to recent verbatim turns have no snippet and are ignored. Coalesced via debounce.
+function onMessageEdited(mesId) {
+    try {
+        if (!getSettings().continuityEnabled) return;
+        const idx = Number(mesId);
+        if (!Number.isFinite(idx)) return;
+        if (_findSnippetsCovering(getChatStore(), idx).length === 0) return;   // not summarized yet — nothing to re-check
+        _pendingEditedIdx.add(idx);
+        clearTimeout(_editRecheckTimer);
+        _editRecheckTimer = setTimeout(flushEditedRecheck, 1500);
+    } catch (_) {}
 }
 
 // ─── Core: Summarize Oldest Verbatim Turns ──────────────────────────
@@ -5491,6 +5557,8 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         if (event_types.CHAT_RENAMED) eventSource.on(event_types.CHAT_RENAMED, () => setTimeout(async () => { if (maybeRecoverStore()) { try { await saveChatStore(); } catch (_) {} try { updateInjection(true); updateUI(); } catch (_) {} } }, 300));
         eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
         if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
+        if (event_types.MESSAGE_EDITED) eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
+        else if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
         registerSlashCommands();
@@ -5501,6 +5569,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
                 resolve: (id) => resolveContinuityFlag(id),
                 dismiss: (id) => dismissContinuityFlag(id),
                 recheck: () => backfillContinuityForLayer0(),
+                recheckMessage: (idx) => { try { const arr = _findSnippetsCovering(getChatStore(), Number(idx)); return Promise.all(arr.map(sn => recheckSnippet(sn))).then(() => arr.length); } catch (_) { return 0; } },
                 apply: (id) => applyContinuityFix(id),
                 applyAll: () => applyAllContinuityFixes(),
                 enable: (on) => { getSettings().continuityEnabled = (on !== false); saveSettings(); return getSettings().continuityEnabled; },
@@ -5513,7 +5582,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.28.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message.');
+            console.log(LOG_PREFIX, 'Summaryception v5.29.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
