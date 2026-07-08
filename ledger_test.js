@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
-    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst'];
+    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -46,7 +46,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
-  subst,
+  subst, _storeHasContent,
 };
 `;
 const L = new Function(sandbox)();
@@ -298,6 +298,22 @@ section('subst — $-sequence safety (regression: String.replace(token, string) 
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+section('_storeHasContent — backup/recovery gating');
+{
+    ok(L._storeHasContent(null) === false, 'null -> no content');
+    ok(L._storeHasContent(undefined) === false, 'undefined -> no content');
+    ok(L._storeHasContent({}) === false, 'empty object -> no content');
+    ok(L._storeHasContent({ layers: [], ledger: {}, notepad: '', pins: [] }) === false, 'fully-empty store -> no content');
+    ok(L._storeHasContent({ layers: [[]] }) === false, 'empty layer array -> no content');
+    ok(L._storeHasContent({ layers: [[{ text: 'x' }]] }) === true, 'a snippet -> has content');
+    ok(L._storeHasContent({ ledger: { Emilia: { core: 'x' } } }) === true, 'a ledger entry -> has content');
+    ok(L._storeHasContent({ notepad: '  hi  ' }) === true, 'non-empty notepad -> has content');
+    ok(L._storeHasContent({ notepad: '    ' }) === false, 'whitespace-only notepad -> no content');
+    ok(L._storeHasContent({ pins: [{ id: 'p1' }] }) === true, 'a pin -> has content');
+    ok(L._storeHasContent({ ledger: [] }) === false, 'ledger as array (malformed) -> no content');
+}
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }

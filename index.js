@@ -456,6 +456,131 @@ function getChatStore() {
 
 async function saveChatStore() {
     await SillyTavern.getContext().saveMetadata();
+    try { backupStore(); } catch (_) {}
+}
+
+// ─── Crash-proof store backup / recovery ─────────────────────────────
+// The store lives in chat_metadata. A chat rename (or any reload path that
+// repopulates chat_metadata from a stale/empty on-disk file) can drop it, and
+// SillyTavern's saveMetadata silently no-ops if it times out waiting for another
+// save — so the store CAN be lost. As a safety net we mirror every NON-EMPTY
+// store into localStorage (global, survives all chat operations, never bloats the
+// synced settings), keyed by BOTH the chat's stable integrity id AND a content
+// signature of its opening messages (both survive rename; the signature survives
+// even a full metadata wipe, since the messages are unchanged by a rename). On
+// chat load, if the store is empty but a matching backup exists, we transparently
+// restore it. An intentional "clear memory" drops the backup so a wipe is never
+// undone. All paths are wrapped and non-fatal.
+const _BAK_PREFIX = 'summaryception_bak::';
+const _BAK_MAX = 8;
+let _lastBackupAt = 0;
+
+function _storeHasContent(st) {
+    if (!st || typeof st !== 'object') return false;
+    if (Array.isArray(st.layers) && st.layers.some(l => Array.isArray(l) && l.length > 0)) return true;
+    if (st.ledger && typeof st.ledger === 'object' && !Array.isArray(st.ledger) && Object.keys(st.ledger).length > 0) return true;
+    if (typeof st.notepad === 'string' && st.notepad.trim().length > 0) return true;
+    if (Array.isArray(st.pins) && st.pins.length > 0) return true;
+    return false;
+}
+
+// Backup keys that survive a rename: the ST integrity UUID (kept in metadata,
+// copied with the file) and a hash of the opening messages (survives even a full
+// metadata wipe, since a rename does not alter the messages themselves).
+function _chatBackupKeys() {
+    const out = { ik: null, sk: null };
+    try {
+        const ctx = SillyTavern.getContext();
+        const cm = ctx.chatMetadata, chat = ctx.chat;
+        if (cm && cm.integrity) out.ik = _BAK_PREFIX + 'i:' + cm.integrity;
+        if (Array.isArray(chat) && chat.length > 0) {
+            const pick = (m) => m ? (String(m.send_date == null ? '' : m.send_date) + '|' + String(m.name == null ? '' : m.name) + '|' + String(m.mes == null ? '' : m.mes).slice(0, 100)) : '';
+            let firstAsst = null;
+            for (const m of chat) { if (m && !m.is_user) { firstAsst = m; break; } }
+            const raw = pick(chat[0]) + '||' + pick(firstAsst);
+            let h = 5381;
+            for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) & 0xFFFFFFFF;
+            out.sk = _BAK_PREFIX + 'c:' + (h >>> 0).toString(36) + '_' + raw.length;
+        }
+    } catch (_) {}
+    return out;
+}
+
+function _pruneBackups() {
+    try {
+        if (typeof localStorage === 'undefined') return;
+        const entries = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k || k.indexOf(_BAK_PREFIX) !== 0) continue;
+            let at = 0;
+            try { at = (JSON.parse(localStorage.getItem(k)) || {}).at || 0; } catch (_) {}
+            entries.push([k, at]);
+        }
+        if (entries.length <= _BAK_MAX) return;
+        entries.sort((a, b) => a[1] - b[1]);
+        for (const pair of entries.slice(0, entries.length - _BAK_MAX)) localStorage.removeItem(pair[0]);
+    } catch (_) {}
+}
+
+function backupStore() {
+    try {
+        if (typeof localStorage === 'undefined') return;
+        const st = getChatStore();
+        if (!_storeHasContent(st)) return;                // never back up an empty store
+        const now = Date.now();
+        if (now - _lastBackupAt < 1500) return;           // throttle rapid-fire saves (e.g. catchup)
+        _lastBackupAt = now;
+        const ctx = SillyTavern.getContext();
+        const keys = _chatBackupKeys();
+        if (!keys.ik && !keys.sk) return;
+        const payload = JSON.stringify({ store: st, len: Array.isArray(ctx.chat) ? ctx.chat.length : 0, at: now });
+        const put = (k) => {
+            if (!k) return;
+            try { localStorage.setItem(k, payload); }
+            catch (_) { _pruneBackups(); try { localStorage.setItem(k, payload); } catch (_) {} }
+        };
+        put(keys.ik); put(keys.sk);
+        _pruneBackups();
+    } catch (e) { try { log('backupStore failed (non-fatal):', e); } catch (_) {} }
+}
+
+function dropBackupsForCurrentChat() {
+    try {
+        if (typeof localStorage === 'undefined') return;
+        const keys = _chatBackupKeys();
+        if (keys.ik) localStorage.removeItem(keys.ik);
+        if (keys.sk) localStorage.removeItem(keys.sk);
+    } catch (_) {}
+}
+
+// Restore the store from a matching backup IFF the current store is empty and the
+// chat has messages (never resurrect memory into a genuinely new/emptied chat).
+// Returns true if a recovery happened; the caller persists + refreshes.
+function maybeRecoverStore() {
+    try {
+        if (typeof localStorage === 'undefined') return false;
+        const st = getChatStore();
+        if (_storeHasContent(st)) return false;           // nothing lost
+        const ctx = SillyTavern.getContext();
+        const chat = ctx.chat, cm = ctx.chatMetadata;
+        if (!cm || !Array.isArray(chat) || chat.length === 0) return false;
+        const keys = _chatBackupKeys();
+        let snap = null;
+        for (const k of [keys.ik, keys.sk]) {
+            if (!k) continue;
+            try { const s = JSON.parse(localStorage.getItem(k) || 'null'); if (s && _storeHasContent(s.store)) { snap = s; break; } } catch (_) {}
+        }
+        if (!snap) return false;
+        // Guard: don't restore a long backup into a very different / emptied chat.
+        // (Content-hash collisions are near-impossible; shrinkage is the tell.)
+        if (typeof snap.len === 'number' && snap.len > 0 && chat.length < Math.floor(snap.len * 0.5)) return false;
+        cm[MODULE_NAME] = JSON.parse(JSON.stringify(snap.store));
+        getChatStore();   // normalize schema on the restored object
+        try { log('Recovered Summaryception memory from local backup (chat len ' + chat.length + ', backup ' + snap.len + ').'); } catch (_) {}
+        try { toastr.success('Recovered Summaryception memory (' + chat.length + ' turns) from local backup after chat reload/rename.', 'Summaryception', { timeOut: 6000 }); } catch (_) {}
+        return true;
+    } catch (e) { try { log('maybeRecoverStore failed (non-fatal):', e); } catch (_) {} return false; }
 }
 
 function getPlayerName() {
@@ -2505,6 +2630,7 @@ function onChatChanged() {
     clearRecall();
     setTimeout(renderPins, 300);
     setTimeout(async () => {
+        if (maybeRecoverStore()) { try { await saveChatStore(); } catch (_) {} }
         await repairIfBranched();
         updateInjection(true);   // force — new branch/chat needs re-injection past the cache
         updateUI();
@@ -2580,6 +2706,7 @@ function registerSlashCommands() {
                 chatMetadata[MODULE_NAME] = store;
 
                 await saveChatStore();
+                dropBackupsForCurrentChat();
                 try {
                     const ctx2 = SillyTavern.getContext();
                     if (ctx2.saveChat) await ctx2.saveChat();
@@ -3893,6 +4020,7 @@ function bindUIEvents() {
         } catch (e) {
             log('Could not save chat:', e);
         }
+        dropBackupsForCurrentChat();
         updateInjection();
         updateUI();
         toastr.success('Memory cleared & messages unghosted', 'Summaryception');
@@ -4557,6 +4685,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         // where an early chat event is missed.
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
         eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+        if (event_types.CHAT_RENAMED) eventSource.on(event_types.CHAT_RENAMED, () => setTimeout(async () => { if (maybeRecoverStore()) { try { await saveChatStore(); } catch (_) {} try { updateInjection(true); updateUI(); } catch (_) {} } }, 300));
         eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
         if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
@@ -4567,7 +4696,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.16.2 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched.');
+            console.log(LOG_PREFIX, 'Summaryception v5.17.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
