@@ -2467,6 +2467,50 @@ function _selectRoster(sorted, cap, tick) {
     return warmSet.concat(cold);
 }
 
+// Character pins — a per-chat set of ledger names the user wants ALWAYS present in the
+// roster, even when off-screen (uncapped, exempt from rotation). Distinct from
+// store.pins (verbatim-quote memories). Never redundant with the full cards: a pinned
+// on-screen character shows as a full card and is excluded from the roster below.
+function getLedgerPins() {
+    const st = getChatStore();
+    if (!Array.isArray(st.ledgerPins)) st.ledgerPins = [];
+    return st.ledgerPins;
+}
+function isLedgerPinned(name) {
+    const t = String(name).toLowerCase();
+    return getLedgerPins().some(p => String(p).toLowerCase() === t);
+}
+function toggleLedgerPin(name) {
+    if (name === undefined || name === null) return;
+    const pins = getLedgerPins();
+    const t = String(name).toLowerCase();
+    const i = pins.findIndex(p => String(p).toLowerCase() === t);
+    if (i >= 0) pins.splice(i, 1); else pins.push(String(name));
+    saveChatStore();
+    updateInjection(true);
+    try { renderLedger(); } catch (_) {}
+}
+
+// Pure: final off-screen roster line-up. Pinned characters come first and ALWAYS
+// appear (uncapped, not subject to rotation); the rest of the cast fills the rotating
+// warm/cold slots up to `cap`. Deduped so nothing is listed twice. `offscreen` already
+// excludes the on-screen full-card cast, so a pinned on-screen character is simply
+// absent here (they are a full card elsewhere) — no conflict, no redundancy.
+function _composeRoster(offscreen, pinnedNames, cap, tick, rotate) {
+    if (!Array.isArray(offscreen)) return [];
+    const pinnedSet = new Set((pinnedNames || []).map(n => String(n).toLowerCase()));
+    const pinnedOff = offscreen.filter(n => pinnedSet.has(String(n).toLowerCase()));
+    const unpinned = offscreen.filter(n => !pinnedSet.has(String(n).toLowerCase()));
+    const picked = _selectRoster(unpinned, cap, rotate ? tick : 0);
+    const seen = new Set();
+    const out = [];
+    for (const n of pinnedOff.concat(picked)) {
+        const k = String(n).toLowerCase();
+        if (!seen.has(k)) { seen.add(k); out.push(n); }
+    }
+    return out;
+}
+
 function buildCharacterBlock() {
     const s = getSettings();
     if (!s.ledgerEnabled) return '';
@@ -2520,7 +2564,7 @@ function buildCharacterBlock() {
             .filter(o => o.entry && typeof o.entry === 'object')
             .sort((a, b) => b.u - a.u);
         const rotate = s.ledgerRosterRotate !== false;
-        const picked = _selectRoster(offscreen.map(o => o.name), rosterCap, rotate ? _rosterTick : 0);
+        const picked = _composeRoster(offscreen.map(o => o.name), getLedgerPins(), rosterCap, _rosterTick, rotate);
         const entryByName = new Map(offscreen.map(o => [o.name, o.entry]));
         const items = picked.map((name) => {
             const entry = entryByName.get(name);
@@ -2529,7 +2573,7 @@ function buildCharacterBlock() {
             if (core.length > 100) core = core.slice(0, 99).replace(/\s+\S*$/, '').trimEnd() + '…';
             return core ? (name + ' — ' + core) : name;
         }).filter(Boolean);
-        if (items.length > 0) rosterLine = 'Others in this story (off-screen now — keep them alive and consistent for when they return): ' + items.join('; ') + '.';
+        if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen — they have their own lives and can re-enter the story whenever it fits naturally; bring them back when the moment calls for it, and keep each true to who they are: ' + items.join('; ') + '.';
     }
 
     if (blocks.length === 0 && !rosterLine) return '';
@@ -3073,10 +3117,13 @@ function renderLedger() {
             return `<div class="sc-ledger-field"><span class="sc-ledger-flabel">${label}</span> ${escapeHtml(String(val).trim())}</div>`;
         };
 
+        const _pinnedSet = new Set(getLedgerPins().map(p => String(p).toLowerCase()));
         let html = '';
         entries.forEach(({ name, entry }, i) => {
             const isActive = recentLower && characterAliases(name).some(a => wordPresentInText(recentLower, a));
             const badge = isActive ? '<span class="sc-ledger-badge">on screen</span>' : '';
+            const pinned = _pinnedSet.has(name.toLowerCase());
+            const pinBadge = pinned ? '<span class="sc-ledger-badge sc-ledger-pinbadge">pinned</span>' : '';
             let threadsHtml = '';
             if (Array.isArray(entry.threads) && entry.threads.length) {
                 const items = entry.threads.filter(t => t && String(t).trim())
@@ -3084,7 +3131,8 @@ function renderLedger() {
                 if (items) threadsHtml = `<div class="sc-ledger-field"><span class="sc-ledger-flabel">Open threads</span><ul class="sc-ledger-threads">${items}</ul></div>`;
             }
             html += `<div class="sc-ledger-card" data-idx="${i}">
-                <div class="sc-ledger-head"><span class="sc-ledger-name">${escapeHtml(name)}</span>${badge}
+                <div class="sc-ledger-head"><span class="sc-ledger-name">${escapeHtml(name)}</span>${badge}${pinBadge}
+                    <button class="sc-ledger-pin menu_button fa-solid fa-thumbtack${pinned ? ' sc-pinned' : ''}" title="${pinned ? 'Unpin — allow rotation' : 'Pin — always keep in context, even when off-screen'}"></button>
                     <button class="sc-ledger-del menu_button fa-solid fa-xmark" title="Delete this character from the ledger"></button>
                 </div>
                 ${field('Nature', entry.core)}
@@ -3965,10 +4013,18 @@ function bindUIEvents() {
         const store = getChatStore();
         if (store.ledger && Object.prototype.hasOwnProperty.call(store.ledger, name)) {
             delete store.ledger[name];
+            // dropping a character also drops any pin on them, so no orphan pins linger
+            const pins = getLedgerPins();
+            const pi = pins.findIndex(p => String(p).toLowerCase() === String(name).toLowerCase());
+            if (pi >= 0) pins.splice(pi, 1);
             saveChatStore();
             updateInjection(true);
             renderLedger();
         }
+    });
+    $(document).on('click', '.sc-ledger-pin', function () {
+        const idx = $(this).closest('.sc-ledger-card').data('idx');
+        toggleLedgerPin(_ledgerOrder[idx]);
     });
     $(document).on('click', '#sc_ledger_clear', async function () {
         if (!confirm('Clear the entire character ledger for THIS chat?\n\nThis removes all recorded character nature, current state, arc, and open threads. It rebuilds automatically as the story continues.')) return;
@@ -4840,7 +4896,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.19.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten.');
+            console.log(LOG_PREFIX, 'Summaryception v5.20.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits.');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

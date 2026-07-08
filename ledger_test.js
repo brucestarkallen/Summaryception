@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
-    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster'];
+    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -47,7 +47,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
-  subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster,
+  subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster,
 };
 `;
 const L = new Function(sandbox)();
@@ -257,7 +257,7 @@ section('buildCharacterBlock — active-cast detection & caps (end-to-end inject
     {
         const b = L.buildCharacterBlock();
         ok(b.includes('Stella'), 'off-screen ledger character still injected via roster');
-        ok(b.includes('Others in this story'), 'roster header present for off-screen cast');
+        ok(b.includes('Other people in this world'), 'roster header present for off-screen cast');
         ok(!b.includes('anxious'), 'roster is identity-only — off-screen volatile state NOT injected');
     }
 
@@ -321,12 +321,12 @@ section('buildCharacterBlock — roster (off-screen cast never vanishes)');
     ok(b.includes('Professor Halden'), 'off-screen professor kept alive in the roster');
     ok(b.includes('Kai'), 'off-screen rival kept alive in the roster');
     ok(!b.includes('absent from the room') && !b.includes('went home early'), 'roster entries are identity-only, not volatile state');
-    ok(b.indexOf('Mira') < b.indexOf('Others in this story'), 'active full cards come before the roster');
+    ok(b.indexOf('Mira') < b.indexOf('Other people in this world'), 'active full cards come before the roster');
     // roster respects the cap
     L.__setSettings(Object.assign({}, defaultSettings, { ledgerRosterMax: 1 }));
     const b2 = L.buildCharacterBlock();
     const inRoster = (b2.match(/;/g) || []).length;
-    ok(b2.includes('Others in this story'), 'roster still present at cap=1');
+    ok(b2.includes('Other people in this world'), 'roster still present at cap=1');
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -348,6 +348,30 @@ section('_selectRoster — capped rotating roster');
     ok(['D', 'E', 'F', 'G', 'H'].every(n => seen.has(n)), 'all cold characters cycle through within a full rotation');
     // tick wraps cleanly (no crash / stable set) at large tick
     eq(L._selectRoster(cast, 6, 5), L._selectRoster(cast, 6, 0), 'tick wraps at coldPool length (5) back to start');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+section('_composeRoster — pins: always present, uncapped, no rotation, no dup');
+{
+    const cast = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];   // off-screen, most-recent first
+    eq(L._composeRoster(cast, [], 6, 0, true), L._selectRoster(cast, 6, 0), 'no pins: identical to plain rotation');
+    // pin a cold character rotation would NOT pick at tick 0 → still present, and first
+    const r = L._composeRoster(cast, ['H'], 6, 0, true);
+    ok(r.includes('H'), 'pinned cold character present even when rotation would skip it');
+    ok(r[0] === 'H', 'pinned characters listed first');
+    ok(new Set(r).size === r.length, 'no duplicate entries');
+    // pin a character rotation WOULD also pick (D at tick 0) → appears exactly once
+    const r2 = L._composeRoster(cast, ['D'], 6, 0, true);
+    ok(r2.filter(n => n === 'D').length === 1, 'pinned + rotation-picked character appears exactly once (no dup)');
+    // pins are uncapped: three pins under a cap of 2 → all three still present
+    const r3 = L._composeRoster(cast, ['F', 'G', 'H'], 2, 0, true);
+    ok(['F', 'G', 'H'].every(n => r3.includes(n)), 'all pins present even when they exceed the cap');
+    // rotation still runs over the NON-pinned remainder alongside pins
+    ok(r3.length > 3, 'non-pinned rotation slots still filled alongside pins');
+    // a pin for someone NOT off-screen (on-screen/absent) never appears in the roster
+    ok(!L._composeRoster(['A', 'B'], ['Zed'], 6, 0, true).includes('Zed'), 'pin for an on-screen/absent character does not surface in the roster (no redundancy with full cards)');
+    // case-insensitive pin match against the ledger name
+    ok(L._composeRoster(['Akane', 'Bob'], ['akane'], 6, 0, true).includes('Akane'), 'pin matches ledger name case-insensitively');
 }
 
 // ─────────────────────────────────────────────────────────────────────

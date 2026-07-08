@@ -638,3 +638,8 @@ details.sc-collapse>:last-child{margin-bottom:14px}
 .sc-ledger-flabel{font-weight:600;opacity:.6;margin-right:4px}
 .sc-ledger-threads{margin:2px 0 2px 0;padding-left:18px}
 .sc-ledger-threads li{margin:1px 0}
+
+/* Character-ledger pins */
+.sc-ledger-pin { opacity: 0.55; }
+.sc-ledger-pin.sc-pinned { opacity: 1; color: #f0b429; }
+.sc-ledger-pinbadge { background: rgba(240,180,41,0.18); color: #f0b429; border-radius: 4px; padding: 0 5px; margin-left: 4px; font-size: 0.85em; }
