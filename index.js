@@ -3629,6 +3629,15 @@ function updateUI() {
         $('#sc_sister_system_prompt').val(s.sisterSystemPrompt);
         $('#sc_sister_user_prompt').val(s.sisterUserPrompt);
         $('#sc_ledger_enabled').prop('checked', s.ledgerEnabled !== false);
+        $('#sc_continuity_enabled').prop('checked', s.continuityEnabled === true);
+        $('#sc_continuity_autofix').prop('checked', s.continuityAutoFix === true);
+        $('#sc_continuity_nudge').prop('checked', s.continuityNudge === true);
+        $('#sc_continuity_nudge_max').val(s.continuityNudgeMax ?? 6);
+        $('#sc_continuity_nudge_max_val').text(s.continuityNudgeMax ?? 6);
+        if (s.continuitySystemPrompt !== undefined) $('#sc_continuity_system_prompt').val(s.continuitySystemPrompt);
+        if (s.continuityUserPrompt !== undefined) $('#sc_continuity_user_prompt').val(s.continuityUserPrompt);
+        if (s.continuityFixSystemPrompt !== undefined) $('#sc_continuity_fix_system_prompt').val(s.continuityFixSystemPrompt);
+        if (s.continuityFixUserPrompt !== undefined) $('#sc_continuity_fix_user_prompt').val(s.continuityFixUserPrompt);
         $('#sc_ledger_system_prompt').val(s.ledgerSystemPrompt);
         $('#sc_ledger_user_prompt').val(s.ledgerUserPrompt);
         $('#sc_ledger_active_window').val(s.ledgerActiveWindow ?? 12);
@@ -3749,8 +3758,47 @@ function updateCustomPromptSlots() {
 // DOM attribute. Rebuilt on every renderLedger call, kept in lockstep with the DOM.
 let _ledgerOrder = [];
 
+function _resolvedLogHtml(resolved) {
+    if (!resolved || resolved.length === 0) return '';
+    const items = resolved.slice(0, 8).map(r => `<li>${escapeHtml((r.applied ? '✔ fixed: ' : '✔ resolved: ') + (r.fix || r.issue || ''))}</li>`).join('');
+    return `<details class="sc-cf-resolved"><summary class="sc-muted">Recently resolved (${resolved.length})</summary><ul>${items}</ul></details>`;
+}
+
+function renderContinuity() {
+    try {
+        const $box = $('#sc_continuity_view');
+        if ($box.length === 0) return;
+        const store = getChatStore();
+        const flags = (store.continuityFlags || []).filter(f => f && f.status === 'open');
+        const resolved = store.continuityResolved || [];
+        if (flags.length === 0) {
+            const note = resolved.length ? ` <span class="sc-muted">— ${resolved.length} recently resolved</span>` : '';
+            $box.html(`<div class="sc-muted">No open continuity issues.${note}</div>` + _resolvedLogHtml(resolved));
+            return;
+        }
+        const sorted = flags.slice().sort((a, b) => ((a.turnRange && a.turnRange[0]) || 0) - ((b.turnRange && b.turnRange[0]) || 0));
+        let html = '';
+        for (const f of sorted) {
+            const isSnippet = f.where === 'snippet';
+            const badge = `<span class="sc-cf-badge ${isSnippet ? 'sc-cf-snippet' : 'sc-cf-source'}">${isSnippet ? 'snippet-fixable' : 'source · message edit'}</span>`;
+            const tr = Array.isArray(f.turnRange) ? `turns ${f.turnRange[0]}–${f.turnRange[1]}` : '';
+            const applyBtn = isSnippet
+                ? `<button class="menu_button sc-cf-apply" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-wand-magic-sparkles"></i> Apply</button>`
+                : `<button class="menu_button sc-cf-copilot" title="The source message is wrong — fix it via the copilot or manually; auto-fix never edits messages" disabled><i class="fa-solid fa-robot"></i> Copilot / message</button>`;
+            html += `<div class="sc-cf-card">`
+                + `<div class="sc-cf-head">${badge}<span class="sc-cf-turns">${tr}</span></div>`
+                + `<div class="sc-cf-issue">${escapeHtml(f.issue || '')}</div>`
+                + `<div class="sc-cf-fix"><span class="sc-cf-fixlabel">Fix:</span> ${escapeHtml(f.fix || '')}</div>`
+                + `<div class="sc-cf-actions">${applyBtn}<button class="menu_button sc-cf-dismiss" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-xmark"></i> Dismiss</button></div>`
+                + `</div>`;
+        }
+        $box.html(html + _resolvedLogHtml(resolved));
+    } catch (e) { try { log('renderContinuity failed (non-fatal):', e); } catch (_) {} }
+}
+
 function renderLedger() {
     try {
+        try { renderContinuity(); } catch (_) {}
         const $box = $('#sc_ledger_view');
         if ($box.length === 0) return;
         const store = getChatStore();
@@ -4708,6 +4756,27 @@ function bindUIEvents() {
     // ── Backfill / Maintenance ──
     $(document).on('click', '#sc_ledger_build', function () { backfillLedgerFromHistory(); });
     $(document).on('click', '#sc_audit_all', function () { backfillAuditsForLayer0(); });
+    // ── Continuity Auditor UI ──
+    $(document).on('click', '#sc_continuity_recheck', function () { backfillContinuityForLayer0(); });
+    $(document).on('click', '#sc_continuity_applyall', function () { applyAllContinuityFixes(); });
+    $(document).on('click', '#sc_continuity_view .sc-cf-apply', async function () {
+        const id = $(this).data('id'); if (!id) return;
+        $(this).prop('disabled', true).text('Applying…');
+        try { const ok = await applyContinuityFix(String(id)); if (!ok) toastr.info('Nothing to change, or source-level (left for the copilot).', 'Summaryception', { timeOut: 3500 }); }
+        finally { try { renderContinuity(); } catch (_) {} }
+    });
+    $(document).on('click', '#sc_continuity_view .sc-cf-dismiss', async function () {
+        const id = $(this).data('id'); if (!id) return;
+        try { await dismissContinuityFlag(String(id)); } finally { try { renderContinuity(); } catch (_) {} }
+    });
+    $(document).on('change', '#sc_continuity_enabled', function () { getSettings().continuityEnabled = $(this).prop('checked'); saveSettings(); });
+    $(document).on('change', '#sc_continuity_autofix', function () { getSettings().continuityAutoFix = $(this).prop('checked'); saveSettings(); });
+    $(document).on('change', '#sc_continuity_nudge', function () { getSettings().continuityNudge = $(this).prop('checked'); saveSettings(); updateInjection(true); });
+    $(document).on('input', '#sc_continuity_nudge_max', function () { const v = parseInt($(this).val(), 10) || 6; getSettings().continuityNudgeMax = v; $('#sc_continuity_nudge_max_val').text(v); saveSettings(); });
+    $(document).on('change', '#sc_continuity_system_prompt', function () { getSettings().continuitySystemPrompt = $(this).val(); saveSettings(); });
+    $(document).on('change', '#sc_continuity_user_prompt', function () { getSettings().continuityUserPrompt = $(this).val(); saveSettings(); });
+    $(document).on('change', '#sc_continuity_fix_system_prompt', function () { getSettings().continuityFixSystemPrompt = $(this).val(); saveSettings(); });
+    $(document).on('change', '#sc_continuity_fix_user_prompt', function () { getSettings().continuityFixUserPrompt = $(this).val(); saveSettings(); });
 
     // ── Continuity Editor (Co-Writer / Master Novelist) ──
     $(document).on('click', '#sc_editor_review', runContinuityEditorReview);
@@ -5582,7 +5651,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.29.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own.');
+            console.log(LOG_PREFIX, 'Summaryception v5.30.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

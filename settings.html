@@ -82,6 +82,72 @@
             <div class="sc-row"><small class="sc-hint sc-muted">Build Ledger replays the whole story in <code>Turns per Summary Batch</code>-sized passes and <strong>merges</strong> into the current ledger (Clear Ledger first for a clean rebuild). Backfill Missing Details audits only snippets that don't have a note yet — existing notes are untouched. Also available as <code>/sc-ledger-build</code> and <code>/sc-audit-all</code>.</small></div>
 
 
+            <!-- ═══ Continuity Auditor ═══ -->
+                    </details>
+                    <details class="sc-collapse">
+                        <summary class="sc-section-title">🕵️ Continuity Auditor</summary>
+
+            <div class="sc-row"><small class="sc-hint">Checks each snippet against its <strong>source passage</strong> (drift) and the <strong>established record</strong> (contradictions), and lists real problems below — a clean story shows nothing. <strong>Apply</strong> rewrites a snippet-level fix; <strong>Dismiss</strong> silences a false alarm (it won't return). Source-level errors — where the message itself is wrong — are left for your copilot to fix at the message.</small></div>
+            <div id="sc_continuity_view" class="sc-continuity-view"></div>
+            <div class="sc-button-row">
+                <button id="sc_continuity_recheck" class="menu_button"><i class="fa-solid fa-magnifying-glass"></i> Re-check All</button>
+                <button id="sc_continuity_applyall" class="menu_button"><i class="fa-solid fa-wand-magic-sparkles"></i> Apply All Fixes</button>
+            </div>
+            <div class="sc-row"><small class="sc-hint sc-muted">Re-check re-verifies every snippet and reconciles the list (clears issues you've fixed). Apply All rewrites snippet-level fixes oldest→newest. Also drivable by the copilot via <code>window.summaryceptionContinuity</code>.</small></div>
+
+            <div class="sc-row">
+                <label class="checkbox_label" for="sc_continuity_enabled">
+                    <input type="checkbox" id="sc_continuity_enabled" />
+                    <span>Enable the Continuity Auditor</span>
+                </label>
+                <small class="sc-hint">Checks each new snippet, and re-checks a snippet when its source message is edited. Off by default — adds a background LLM pass per snippet.</small>
+            </div>
+
+            <div class="sc-row">
+                <label class="checkbox_label" for="sc_continuity_autofix">
+                    <input type="checkbox" id="sc_continuity_autofix" />
+                    <span>Auto-fix snippet-level issues</span>
+                </label>
+                <small class="sc-hint">Apply snippet-level fixes automatically (oldest→newest) as they're found, instead of leaving flags. Only ever rewrites a snippet to match its source (never your story messages), so it can't cause a drift loop. Source-level issues still go to the copilot.</small>
+            </div>
+
+            <div class="sc-row">
+                <label class="checkbox_label" for="sc_continuity_nudge">
+                    <input type="checkbox" id="sc_continuity_nudge" />
+                    <span>Nudge the story (inject open corrections)</span>
+                </label>
+                <small class="sc-hint">Ride unresolved fixes along as an out-of-character correction block so the Storyteller stays consistent while issues are reconciled. Each correction disappears the moment its flag is resolved.</small>
+            </div>
+
+            <div class="sc-row">
+                <label for="sc_continuity_nudge_max">
+                    <span>Max corrections injected</span>
+                    <small class="sc-hint">Cap how many unresolved fixes ride along at once.</small>
+                </label>
+                <div class="sc-slider-row">
+                    <input type="range" id="sc_continuity_nudge_max" min="1" max="20" step="1" />
+                    <span id="sc_continuity_nudge_max_val" class="sc-val">6</span>
+                </div>
+            </div>
+
+            <div class="sc-row">
+                <label for="sc_continuity_system_prompt"><span>Checker — system prompt</span></label>
+                <textarea id="sc_continuity_system_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="8"></textarea>
+            </div>
+            <div class="sc-row">
+                <label for="sc_continuity_user_prompt"><span>Checker — user prompt</span></label>
+                <textarea id="sc_continuity_user_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="8"></textarea>
+            </div>
+            <div class="sc-row">
+                <label for="sc_continuity_fix_system_prompt"><span>Fixer — system prompt</span></label>
+                <textarea id="sc_continuity_fix_system_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="5"></textarea>
+            </div>
+            <div class="sc-row">
+                <label for="sc_continuity_fix_user_prompt"><span>Fixer — user prompt</span></label>
+                <textarea id="sc_continuity_fix_user_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="4"></textarea>
+            </div>
+
+
             <!-- ═══ Preview ═══ -->
                     </details>
                     <details class="sc-collapse">
