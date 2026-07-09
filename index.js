@@ -879,7 +879,13 @@ async function repairIfBranched() {
     const summaryOverruns = store.summarizedUpTo >= chatLength;
     const snippetOverruns = !!layer0 && layer0.some(sn => sn.turnRange && sn.turnRange[1] >= chatLength);
     const verbatimGhosted = store.summarizedUpTo >= verbatimStartIdx;
-    if (!summaryOverruns && !snippetOverruns && !verbatimGhosted) return;   // healthy — leave it alone
+    // The cumulative ledger can be "ahead" even when NOTHING is summarized yet — a short
+    // chat (under verbatimTurns) has no snippets or ghosts, but the live pass fills the
+    // ledger every turn. If ledgerLiveIdx sits past the new (shorter) chat end, the branch
+    // left ledger content from turns that no longer exist, so repair + the rewind below must
+    // run even without a snippet/summary overrun.
+    const ledgerAhead = (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= chatLength);
+    if (!summaryOverruns && !snippetOverruns && !verbatimGhosted && !ledgerAhead) return;   // healthy — leave it alone
 
     const oldSummarizedUpTo = store.summarizedUpTo;
     log(`Repair triggered (overrun=${summaryOverruns || snippetOverruns}, verbatimGhosted=${verbatimGhosted}). summarizedUpTo=${oldSummarizedUpTo}, chatLength=${chatLength}, verbatimStartIdx=${verbatimStartIdx}. Repairing...`);
@@ -1798,6 +1804,24 @@ async function tryAutoRewindLedger(targetTurn, label) {
         const s = getSettings();
         if (s.ledgerAutoRewind === false) return false;
         if (typeof targetTurn !== 'number' || targetTurn < 0) return false;
+        const _st0 = getChatStore();
+        const noSummaryHistory = !(typeof _st0.summarizedUpTo === 'number' && _st0.summarizedUpTo >= 0)
+            || !(_st0.layers && _st0.layers[0] && _st0.layers[0].some(sn => sn && sn.turnRange));
+        if (targetTurn === 0 || noSummaryHistory) {
+            // Branching/trimming to the very start (turn 0), or into a chat with no
+            // summarized history: there's nothing worth preserving. CLEAR the cumulative
+            // ledger and let the live pass re-derive the few remaining verbatim turns —
+            // restoring a stale checkpoint here is exactly what left the old ledger behind.
+            const epoch = _chatEpoch;
+            _ledgerQueue = [];
+            _st0.ledger = {};
+            _st0.ledgerLiveIdx = -1;
+            await saveChatStore();
+            if (_chatEpoch !== epoch) return true;
+            try { updateInjection(true); renderLedger(); } catch (_) {}
+            toastr.info(`Ledger cleared for this ${label} — re-deriving from the remaining turns.`, 'Summaryception', { timeOut: 4500 });
+            return true;
+        }
         const ckpt = _pickCheckpoint(listLedgerCheckpoints(), targetTurn);
         if (!ckpt) {
             // No snapshot that far back — but stay autonomous. If there's a ledger worth
@@ -5663,7 +5687,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.31.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.32.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
