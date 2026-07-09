@@ -1050,6 +1050,34 @@ function buildPassageFromRange(chat, startIdx, endIdx) {
  * @param {number} downToLayer - Include this layer and all layers above it
  * @returns {string} - Combined context string, or '(none yet)'
  */
+const LEDGER_GIST_CAP = 4000;   // char budget for the story-gist grounding handed to the ledger scribe (was the WHOLE story on every call — slow + rate-limit-prone on long chats)
+
+// Bounded, PAST-only story gist for the ledger scribe: the most recent Layer-0 snippet
+// texts that END before `beforeTurnIdx` (or all, if omitted), newest-first up to `cap`
+// chars. Keeps per-call prompts small so long chats don't blow token/rate limits, and
+// avoids leaking FUTURE summaries into an in-progress rebuild. The ledger itself carries
+// the accumulated state, so a bounded recent gist is enough grounding.
+function buildLedgerContext(beforeTurnIdx, cap) {
+    const store = getChatStore();
+    const budget = (typeof cap === 'number' && cap > 0) ? cap : LEDGER_GIST_CAP;
+    const l0 = (store.layers && store.layers[0]) ? store.layers[0] : [];
+    const eligible = [];
+    for (const sn of l0) {
+        if (!sn || !sn.text) continue;
+        if (typeof beforeTurnIdx === 'number' && Array.isArray(sn.turnRange) && sn.turnRange[1] >= beforeTurnIdx) continue;
+        eligible.push(sn.text);
+    }
+    const chosen = [];
+    let total = 0;
+    for (let i = eligible.length - 1; i >= 0; i--) {
+        const t = eligible[i];
+        if (total + t.length > budget && chosen.length > 0) break;
+        chosen.unshift(t);
+        total += t.length;
+    }
+    return chosen.length ? chosen.join(' ') : '(none yet)';
+}
+
 function buildFullContext(downToLayer = 0) {
     const store = getChatStore();
     const parts = [];
@@ -1700,7 +1728,7 @@ function queueLiveLedgerUpdate() {
         if (!range) return false;
         const storyTxt = buildPassageFromRange(chat, range[0], range[1]);
         if (!storyTxt.trim()) return false;
-        const contextStr = buildFullContext(0);
+        const contextStr = buildLedgerContext(range[0], LEDGER_GIST_CAP);   // bounded recent gist (was the whole story every turn)
         _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, live: true, liveEnd: range[1] });
         processLedgerQueue();   // fire and forget
         return true;
@@ -1992,8 +2020,9 @@ async function backfillLedgerFromHistory(opts) {
     _ledgerQueue = [];   // we drive the scribe directly here; drop pending background jobs (store was cleared above)
     const startEpoch = _chatEpoch;   // if the user switches chats mid-run, abandon — never write another chat's ledger
 
-    let done = 0, failed = 0, cancelled = false, consec = 0;
-    const contextStr = buildFullContext(0);   // whole-story gist as grounding (stable during backfill)
+    let done = 0, failed = 0, cancelled = false, consec = 0, _bfCkpt = -999;
+    // Grounding gist is built per-batch below (bounded + past-only) — sending the whole
+    // story on every pass was the main cost on long chats.
     const toast = toastr.info(`${auto ? 'Auto-rebuilding' : 'Building'} ledger: 0 / ${batches.length} passes`, 'Summaryception Ledger', {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
@@ -2006,9 +2035,11 @@ async function backfillLedgerFromHistory(opts) {
             if (!storyTxt.trim()) { done++; continue; }
             try {
                 const ledgerStr = serializeLedgerForScribe(store.ledger, s.ledgerContextMaxChars);
+                const contextStr = buildLedgerContext(b.passageStart, LEDGER_GIST_CAP);   // bounded + past-only — don't send the whole gist every pass (long chats hit token limits -> 429 waits)
                 const deltas = await callLedgerScribe(storyTxt, contextStr, ledgerStr);
                 if (_chatEpoch !== startEpoch) break;   // switched during the call — discard, never merge into the wrong chat
                 if (deltas) mergeLedgerDeltas(deltas);
+                if (b.endIdx >= _bfCkpt + CKPT_EVERY) { try { saveLedgerCheckpoint(b.endIdx); } catch (_) {} _bfCkpt = b.endIdx; }   // checkpoint AS we rebuild, so a later branch can cheaply rewind instead of full-rebuilding again
                 consec = 0;
             } catch (e) {
                 failed++; consec++;
@@ -2026,6 +2057,7 @@ async function backfillLedgerFromHistory(opts) {
         } else {
             await saveChatStore();
             store.ledgerLiveIdx = turns.length ? turns[turns.length - 1].index : (typeof store.ledgerLiveIdx === 'number' ? store.ledgerLiveIdx : -1);
+            _lastCkptTurn = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : _bfCkpt;   // align live checkpoint throttle with what we just built
             updateInjection(true);
             try { renderLedger(); } catch (_) {}
             const nChars = Object.keys(store.ledger).length;
@@ -5778,7 +5810,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.33.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.34.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
