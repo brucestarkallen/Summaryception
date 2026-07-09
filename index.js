@@ -1211,6 +1211,8 @@ function cleanSummarizerOutput(raw) {
 // ─── Core: Summarization State ───────────────────────────────────────
 
 let isSummarizing = false;
+let _lastCallMs = 0;            // last model call wall-clock (ms) — surfaced on-screen for mobile
+let _lastCallRespChars = 0;    // last model call response size (chars)
 let catchupDismissed = false;
 let currentAbortController = null;
 
@@ -1302,7 +1304,9 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
                 ]);
 
                 trace('  sendSummarizerRequest returned:', result?.substring?.(0, 50));
-                console.log(`${LOG_PREFIX} ⏱ model call: ${((Date.now() - _callStart) / 1000).toFixed(1)}s | prompt ${prompt.length} chars (~${Math.round(prompt.length/4)} tok) | response ${(result || '').length} chars (~${Math.round((result || '').length/4)} tok)`);
+                _lastCallMs = Date.now() - _callStart;
+                _lastCallRespChars = (result || '').length;
+                console.log(`${LOG_PREFIX} ⏱ model call: ${(_lastCallMs / 1000).toFixed(1)}s | prompt ${prompt.length} chars (~${Math.round(prompt.length/4)} tok) | response ${_lastCallRespChars} chars (~${Math.round(_lastCallRespChars/4)} tok)`);
 
                 let trimmed = (result || '').trim();
                 trimmed = cleanSummarizerOutput(trimmed);
@@ -2051,7 +2055,7 @@ async function backfillLedgerFromHistory(opts) {
             done++;
             if (done % 6 === 0) await saveChatStore();   // throttle: the full-chat write is the per-batch cost — save every few passes; the end-of-run save persists the rest
             const pct = Math.round((done / batches.length) * 100);
-            $(toast).find('.toast-message').text(`Building ledger: ${done} / ${batches.length} passes (${pct}%)${failed ? ` | ${failed} failed` : ''}\nClick ✕ to stop`);
+            $(toast).find('.toast-message').text(`Building ledger: ${done} / ${batches.length} passes (${pct}%)${failed ? ` | ${failed} failed` : ''}\nlast pass: ${(_lastCallMs / 1000).toFixed(0)}s · ${_lastCallRespChars} char response\nClick ✕ to stop`);
         }
         toastr.clear(toast);
         if (_chatEpoch !== startEpoch) {
@@ -5812,7 +5816,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.35.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.36.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
