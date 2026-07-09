@@ -708,6 +708,34 @@ async function ghostMessage(messageIndex) {
     log(`Ghosted message at index ${messageIndex}${s.disableGhosting ? ' (hiding disabled)' : ''}`);
 }
 
+// Un-ghost any message WE ghosted (sc_ghosted) that is no longer covered by the summary
+// (index > summarizedUpTo) — e.g. after snippets were cleared or edited so the summary
+// pointer dropped but the messages stayed hidden. Without this they remain invisible and
+// Force Summarize reports "nothing to summarize". Returns how many were healed.
+async function healOrphanGhosts() {
+    const ctx = SillyTavern.getContext();
+    const { chat } = ctx;
+    if (!Array.isArray(chat)) return 0;
+    const store = getChatStore();
+    const upTo = (typeof store.summarizedUpTo === 'number') ? store.summarizedUpTo : -1;
+    const orphans = [];
+    for (let i = 0; i < chat.length; i++) {
+        if (chat[i]?.extra?.sc_ghosted && i > upTo) orphans.push(i);
+    }
+    for (const i of orphans) {
+        try {
+            if (chat[i]?.extra?.sc_ghosted) delete chat[i].extra.sc_ghosted;
+            await ctx.executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
+        } catch (e) { log(`healOrphanGhosts: failed to unhide ${i}:`, e); }
+    }
+    if (orphans.length > 0) {
+        store.ghostedIndices = (store.ghostedIndices || []).filter(idx => idx <= upTo);
+        await saveChatStore();
+        log(`healOrphanGhosts: restored ${orphans.length} orphaned ghost(s) to verbatim.`);
+    }
+    return orphans.length;
+}
+
 async function unghostAllMessages() {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
@@ -5000,6 +5028,66 @@ function bindUIEvents() {
         toastr.success('Memory cleared & messages unghosted', 'Summaryception');
     });
 
+    // Rebuild every snippet from the beginning: un-ghost all, clear snippets, re-summarize
+    // the whole chat from turn 0. Ledger and notepad are kept.
+    $(document).on('click', '#sc_rebuild_snippets', async function () {
+        const s = getSettings();
+        if (!s.enabled) { toastr.warning('Enable Summaryception first.'); return; }
+        if (isSummarizing) { toastr.warning('Already summarizing. Please wait.'); return; }
+        if (!confirm('Rebuild ALL snippets from the start?\n\nThis un-ghosts every message, clears the existing snippets, and re-summarizes the whole chat from turn 0. Your character ledger and notepad are kept.')) return;
+        $(this).prop('disabled', true).text(' Working…');
+        try {
+            try { await unghostAllMessages(); } catch (e) { log('rebuild: unghost issue (continuing):', e); }
+            const store = getChatStore();
+            store.layers.length = 0;
+            store.summarizedUpTo = -1;
+            store.ghostedIndices = [];
+            await saveChatStore();
+            const { chat } = SillyTavern.getContext();
+            const allAssistantTurns = getAssistantTurns(chat);
+            const visibleTurns = allAssistantTurns.filter(t => !chat[t.index].extra?.sc_ghosted);
+            if (visibleTurns.length <= s.verbatimTurns) {
+                toastr.info('Snippets cleared — not enough turns beyond the verbatim window to summarize yet.', 'Summaryception', { timeOut: 4000 });
+            } else {
+                const overflow = visibleTurns.length - s.verbatimTurns;
+                toastr.info(`Rebuilding: ${overflow} turn(s) to re-summarize from the start…`, 'Summaryception', { timeOut: 2500 });
+                await runCatchup(visibleTurns, overflow);
+            }
+            updateInjection();
+        } finally {
+            $(this).prop('disabled', false).html('<i class="fa-solid fa-arrows-rotate"></i> Rebuild All Snippets');
+            updateUI();
+        }
+    });
+
+    // Clear EVERYTHING Summaryception generated for this chat: snippets, ledger, pins, and
+    // continuity flags, and un-ghost all messages. The hand-typed notepad is kept.
+    $(document).on('click', '#sc_clear_all', async function () {
+        if (!confirm('Clear ALL Summaryception memory for this chat?\n\nRemoves snippets, the character ledger, pinned quotes/characters, and continuity flags, and un-ghosts every message. Your hand-typed notepad is kept. This cannot be undone.')) return;
+        try { await unghostAllMessages(); } catch (e) { toastr.warning('Some messages could not be unghosted, but memory will still be cleared.', 'Summaryception'); }
+        const store = getChatStore();
+        store.layers.length = 0;
+        store.summarizedUpTo = -1;
+        store.ghostedIndices = [];
+        store.ledger = {};
+        store.ledgerLiveIdx = -1;
+        if (Array.isArray(store.ledgerPins)) store.ledgerPins = [];
+        if (Array.isArray(store.pins)) store.pins = [];
+        store.continuityFlags = [];
+        store.continuityDismissed = [];
+        store.continuityResolved = [];
+        try { _ledgerQueue = []; } catch (_) {}
+        const { chatMetadata } = SillyTavern.getContext();
+        chatMetadata[MODULE_NAME] = store;
+        await saveChatStore();
+        try { const ctx = SillyTavern.getContext(); if (ctx.saveChat) await ctx.saveChat(); } catch (e) { log('clear-all: save issue:', e); }
+        dropBackupsForCurrentChat();
+        updateInjection();
+        updateUI();
+        try { renderLedger(); } catch (_) {}
+        toastr.success('All memory cleared — snippets, ledger, pins, and flags (notepad kept).', 'Summaryception');
+    });
+
     $(document).on('click', '#sc_force_summarize', async function () {
         const s = getSettings();
         if (!s.enabled) {
@@ -5016,6 +5104,9 @@ function bindUIEvents() {
         $(this).prop('disabled', true).text(' Working…');
         try {
             catchupDismissed = false;
+
+            const _healed = await healOrphanGhosts();   // rescue snippets-cleared-but-still-hidden turns first
+            if (_healed > 0) toastr.info(`Restored ${_healed} orphaned turn(s) to verbatim before summarizing.`, 'Summaryception', { timeOut: 3000 });
 
             const { chat } = SillyTavern.getContext();
             const allAssistantTurns = getAssistantTurns(chat);
@@ -5687,7 +5778,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.32.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.33.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
