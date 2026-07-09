@@ -1889,7 +1889,7 @@ async function replayLedgerDelta(fromExclusive, toInclusive) {
     const storyTxt = buildPassageFromRange(chat, fromExclusive + 1, Math.min(toInclusive, chat.length - 1));
     if (!storyTxt.trim()) return;
     const s = getSettings();
-    const contextStr = buildFullContext(0);
+    const contextStr = buildLedgerContext(fromExclusive + 1, LEDGER_GIST_CAP);   // bounded, past-only (was whole-gist)
     const ledgerStr = serializeLedgerForScribe(getChatStore().ledger, s.ledgerContextMaxChars);
     const deltas = await callLedgerScribe(storyTxt, contextStr, ledgerStr);
     if (deltas) mergeLedgerDeltas(deltas);
@@ -2129,7 +2129,7 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
     try {
         const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
         if (!storyTxt.trim()) { toastr.error('Source turns are empty.', 'Summaryception'); return; }
-        const contextStr = buildFullContext(0);
+        const contextStr = buildLedgerContext(sn.turnRange[0], LEDGER_GIST_CAP);   // bounded, past-only (was whole-gist)
         toastr.info(`Reading scene ${sn.turnRange[0]}–${sn.turnRange[1]} into the ledger…`, 'Summaryception', { timeOut: 3000, progressBar: true });
         const deltas = await callLedgerScribe(storyTxt, contextStr, serializeLedgerForScribe(store.ledger, s.ledgerContextMaxChars));
         if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — scene not applied.', 'Summaryception', { timeOut: 3000 }); return; }
@@ -2713,7 +2713,7 @@ async function summarizeOneBatch(visibleTurns) {
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
         queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
         // Ledger pass: evolve the per-character psychological model from this passage.
-        queueLedgerUpdate(storyTxt, contextStr);           // non-blocking: scribe runs in background
+        queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP));   // ledger gets a bounded, past-only gist (summarizer above keeps the full context)
 
         log(`Layer 0 now has ${store.layers[0].length} snippets`);
 
@@ -2833,7 +2833,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
         queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
         // Ledger pass: evolve the per-character psychological model from this passage.
-        queueLedgerUpdate(storyTxt, contextStr);           // non-blocking: scribe runs in background
+        queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP));   // ledger gets a bounded, past-only gist (summarizer above keeps the full context)
 
         await maybePromoteLayer(0);
         // In the bulk path the range /hide above already wrote the chat (with the new
@@ -5853,7 +5853,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { patchLedgerPrompt(); } catch (_) {}
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.38.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.39.0 loaded — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
