@@ -537,7 +537,7 @@ async function saveChatStore() {
 // restore it. An intentional "clear memory" drops the backup so a wipe is never
 // undone. All paths are wrapped and non-fatal.
 const _BAK_PREFIX = 'summaryception_bak::';
-const _BAK_MAX = 8;
+const _BAK_MAX = 16;   // localStorage KEYS (each chat writes 2: integrity + content-sig) — 16 keys = the 8 most recent chats actually protected
 let _lastBackupAt = 0;
 
 function _storeHasContent(st) {
@@ -654,6 +654,38 @@ function getPlayerName() {
 }
 
 // ─── Message Hiding (Ghosting via native /hide /unhide) ──────────────
+
+// Pure: collapse a list of message indices into sorted, deduped, contiguous
+// [start,end] ranges. Shared by the hide AND unhide paths — each slash call
+// writes the whole chat file, so O(messages) per-index calls is exactly the
+// crawl that made bulk operations minutes-long on mobile; O(runs) is the fix.
+function _contiguousRanges(indices) {
+    const list = Array.from(new Set(indices)).filter(i => typeof i === 'number' && Number.isFinite(i) && i >= 0).sort((a, b) => a - b);
+    if (list.length === 0) return [];
+    const ranges = [];
+    let start = list[0], prev = list[0];
+    for (let k = 1; k < list.length; k++) {
+        if (list[k] === prev + 1) { prev = list[k]; continue; }
+        ranges.push([start, prev]); start = list[k]; prev = list[k];
+    }
+    ranges.push([start, prev]);
+    return ranges;
+}
+
+// Un-hide a set of message indices in contiguous /unhide a-b calls — one chat
+// save per RUN instead of one per message (mirror of the range /hide below).
+async function unhideIndicesInRanges(indices) {
+    const ranges = _contiguousRanges(indices);
+    if (ranges.length === 0) return 0;
+    const ctx = SillyTavern.getContext();
+    for (const [a, b] of ranges) {
+        const cmd = (a === b) ? `/unhide ${a}` : `/unhide ${a}-${b}`;
+        try { await ctx.executeSlashCommandsWithOptions(cmd, { showOutput: false }); }
+        catch (e) { log(`Failed to unhide range ${a}-${b}:`, e); }
+    }
+    return ranges.length;
+}
+
 async function repairGhostingForRange(startIdx, endIdx) {
     trace('>>> ENTERING repairGhostingForRange');
     trace(' startIdx:', startIdx, 'endIdx:', endIdx);
@@ -758,12 +790,8 @@ async function healOrphanGhosts() {
     for (let i = 0; i < chat.length; i++) {
         if (chat[i]?.extra?.sc_ghosted && i > upTo) orphans.push(i);
     }
-    for (const i of orphans) {
-        try {
-            if (chat[i]?.extra?.sc_ghosted) delete chat[i].extra.sc_ghosted;
-            await ctx.executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-        } catch (e) { log(`healOrphanGhosts: failed to unhide ${i}:`, e); }
-    }
+    for (const i of orphans) { if (chat[i]?.extra?.sc_ghosted) delete chat[i].extra.sc_ghosted; }
+    await unhideIndicesInRanges(orphans);   // O(runs) chat saves, not O(messages)
     if (orphans.length > 0) {
         store.ghostedIndices = (store.ghostedIndices || []).filter(idx => idx <= upTo);
         await saveChatStore();
@@ -803,35 +831,17 @@ async function unghostAllMessages() {
         }
     );
 
-    let processed = 0;
-    for (const idx of toUnhide) {
-        if (idx >= 0 && idx < chat.length) {
-            // Clear our ghost flag
-            if (chat[idx]?.extra?.sc_ghosted) {
-                delete chat[idx].extra.sc_ghosted;
-            }
-
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${idx}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to unhide message ${idx}:`, e);
-            }
-        }
-
-        processed++;
-        if (processed % 10 === 0) {
-            const pct = Math.round((processed / toUnhide.length) * 100);
-            $(progressToast).find('.toast-message').text(
-                `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
-            );
-        }
+    const valid = toUnhide.filter(idx => idx >= 0 && idx < chat.length);
+    for (const idx of valid) {
+        if (chat[idx]?.extra?.sc_ghosted) delete chat[idx].extra.sc_ghosted;
     }
+    const runs = await unhideIndicesInRanges(valid);   // O(runs) chat saves — the per-message loop was one full chat-file write EACH
 
     // Clear the tracking array
     store.ghostedIndices = [];
 
     toastr.clear(progressToast);
-    log(`Unghosted ${toUnhide.length} messages (only Summaryception-hidden ones)`);
+    log(`Unghosted ${valid.length} messages in ${runs} range call(s) (only Summaryception-hidden ones)`);
 }
 
 async function ghostMessagesUpTo(endIndex) {
@@ -866,13 +876,7 @@ async function ghostMessagesUpTo(endIndex) {
     }
 
     // Collapse the indices into contiguous [start,end] ranges.
-    const ranges = [];
-    let start = toHide[0], prev = toHide[0];
-    for (let k = 1; k < toHide.length; k++) {
-        if (toHide[k] === prev + 1) { prev = toHide[k]; continue; }
-        ranges.push([start, prev]); start = toHide[k]; prev = toHide[k];
-    }
-    ranges.push([start, prev]);
+    const ranges = _contiguousRanges(toHide);
 
     const progressToast = ranges.length > 3 ? toastr.info(
         'Hiding summarized messages…', 'Summaryception — Ghosting',
@@ -983,19 +987,13 @@ async function repairIfBranched() {
     // ── 4. Un-ghost everything past the (new) summarized boundary, so no turn is
     //       ever both hidden AND unsummarized. This restores the verbatim window
     //       and rescues any turns orphaned by a straddling snippet. ──
-    let unghosted = 0;
+    const _orphaned = [];
     for (let i = store.summarizedUpTo + 1; i < chatLength; i++) {
         const m = chat[i];
-        if (m?.extra?.sc_ghosted) {
-            delete m.extra.sc_ghosted;
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to unhide message ${i}:`, e);
-            }
-            unghosted++;
-        }
+        if (m?.extra?.sc_ghosted) { delete m.extra.sc_ghosted; _orphaned.push(i); }
     }
+    await unhideIndicesInRanges(_orphaned);   // O(runs) chat saves, not one per message
+    const unghosted = _orphaned.length;
 
     // ── 5. Trim the ghost tracking to only valid, still-summarized indices. ──
     store.ghostedIndices = (store.ghostedIndices || [])
@@ -1072,7 +1070,10 @@ function buildPassageFromRange(chat, startIdx, endIdx) {
         const isUserHidden = (m.is_system || m.is_hidden) && !m.extra?.sc_ghosted;
         if (isUserHidden) continue;
 
-        const speaker = m.is_user ? 'Player' : 'Assistant';
+        // Keep the character's NAME on non-user lines: the ledger is keyed by name and
+        // group scenes have multiple speakers — a flat 'Assistant:' label forces every
+        // downstream pass (summarizer/scribe/auditor) to guess who is talking.
+        const speaker = m.is_user ? 'Player' : ((m.name && String(m.name).trim()) ? String(m.name).trim() : 'Assistant');
         lines.push(`${speaker}: ${m.mes.trim()}`);
     }
     return lines.join('\n');
@@ -1126,7 +1127,7 @@ function buildFullContext(downToLayer = 0) {
         }
     }
 
-    return parts.length > 0 ? parts.join(' ') : '(none yet)';
+    return parts.length > 0 ? parts.join('\n') : '(none yet)';   // one snippet per line — join(' ') mashed separate scene summaries into a run-on, degrading every prompt that consumes the gist
 }
 
 // ─── Prompt Toggle Management ────────────────────────────────────────
@@ -1250,13 +1251,22 @@ let isSummarizing = false;
 let _lastCallMs = 0;            // last model call wall-clock (ms) — surfaced on-screen for mobile
 let _lastCallRespChars = 0;    // last model call response size (chars)
 let catchupDismissed = false;
+let _catchupDialogOpen = false;   // the backlog modal awaits user input with isSummarizing=false — without this flag every message during that wait stacked ANOTHER dialog
 let currentAbortController = null;
+// Every in-flight model call registers its OWN controller here. A single shared
+// `currentAbortController` slot gets clobbered when a background pass (ledger /
+// auditor / continuity) starts while a foreground batch is mid-flight: the last
+// caller overwrites the handle, the first caller's `finally` nulls it, and the
+// Abort button ends up cancelling the wrong call — or nothing.
+const _activeAborters = new Set();
 
 function abortSummarization() {
-    if (currentAbortController) {
-        currentAbortController.abort();
-        log('Abort signal sent.');
+    if (_activeAborters.size > 0) {
+        for (const c of _activeAborters) { try { c.abort(); } catch (_) {} }
+        _activeAborters.clear();
+        log('Abort signal sent to all in-flight calls.');
     }
+    currentAbortController = null;
     isSummarizing = false;
 }
 
@@ -1300,8 +1310,10 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
     const snapshot = isDefaultMode ? snapshotPromptToggles() : null;
     if (isDefaultMode) disableAllPromptToggles();
 
-    currentAbortController = new AbortController();
-    const { signal } = currentAbortController;
+    const _controller = new AbortController();
+    _activeAborters.add(_controller);
+    currentAbortController = _controller;   // legacy handle points at the newest call
+    const { signal } = _controller;
 
     let lastError = null;
 
@@ -1328,16 +1340,26 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
 
                 const timeoutMs = 120000;
                 const _callStart = Date.now();
-                const result = await Promise.race([
-                    sendSummarizerRequest(s, sysPrompt, prompt),
-                    new Promise((_, reject) => {
-                        const timer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
-                        signal.addEventListener('abort', () => {
-                            clearTimeout(timer);
-                            reject(new Error('Aborted by user'));
-                        });
-                    }),
-                ]);
+                // The loser of this race must never become an unhandled rejection,
+                // and the 120s timer must not outlive a fast success (zombie timer
+                // firing a rejection into the void every single call).
+                let _toTimer = null;
+                const _reqP = sendSummarizerRequest(s, sysPrompt, prompt);
+                _reqP.catch(() => {});   // handled via the race; this guards the late-loss case
+                const _toP = new Promise((_, reject) => {
+                    _toTimer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
+                    signal.addEventListener('abort', () => {
+                        clearTimeout(_toTimer);
+                        reject(new Error('Aborted by user'));
+                    }, { once: true });
+                });
+                _toP.catch(() => {});    // same guard for the timeout side
+                let result;
+                try {
+                    result = await Promise.race([_reqP, _toP]);
+                } finally {
+                    clearTimeout(_toTimer);
+                }
 
                 trace('  sendSummarizerRequest returned:', result?.substring?.(0, 50));
                 _lastCallMs = Date.now() - _callStart;
@@ -1409,7 +1431,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
                     signal.addEventListener('abort', () => {
                         clearTimeout(timer);
                         resolve();
-                    });
+                    }, { once: true });
                 });
             }
         }
@@ -1425,7 +1447,8 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
         return '';
 
     } finally {
-        currentAbortController = null;
+        _activeAborters.delete(_controller);
+        if (currentAbortController === _controller) currentAbortController = null;
         if (isDefaultMode && snapshot) {
             restorePromptToggles(snapshot);
         }
@@ -1998,12 +2021,17 @@ async function tryAutoRewindLedger(targetTurn, label) {
     } catch (e) { try { log('tryAutoRewindLedger failed (non-fatal):', e); } catch (_) {} return false; }
 }
 
-function queueLedgerUpdate(storyTxt, contextStr) {
+function queueLedgerUpdate(storyTxt, contextStr, endIdx) {
     const s = getSettings();
     if (!s.ledgerEnabled) return;
     const store = getChatStore();
     if (!store.ledger || typeof store.ledger !== 'object') store.ledger = {};
-    _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch });
+    // endIdx (when known) rides as liveEnd so the job advances ledgerLiveIdx and
+    // checkpoints on completion — without it, live-off installs never saved a
+    // single checkpoint, so every branch rewind fell through to a full rebuild.
+    const job = { storyTxt, contextStr, epoch: _chatEpoch };
+    if (typeof endIdx === 'number' && endIdx >= 0) { job.live = true; job.liveEnd = endIdx; }
+    _ledgerQueue.push(job);
     processLedgerQueue();   // fire and forget — deliberately NOT awaited
 }
 
@@ -2633,10 +2661,14 @@ async function maybeSummarizeTurns() {
     const backlogThreshold = s.turnsPerSummary * 2;
 
     if (overflow > backlogThreshold && !catchupDismissed) {
+        if (_catchupDialogOpen) return;   // a dialog is already on screen — don't stack another
         log(`Large backlog detected: ${overflow} turns over limit`);
 
         const batchesNeeded = Math.ceil(overflow / s.turnsPerSummary);
-        const choice = await showCatchupDialog(overflow, batchesNeeded);
+        _catchupDialogOpen = true;
+        let choice;
+        try { choice = await showCatchupDialog(overflow, batchesNeeded); }
+        finally { _catchupDialogOpen = false; }
 
         if (choice === 'skip') {
             const cutoff = visibleTurns[visibleTurns.length - s.verbatimTurns - 1];
@@ -2759,8 +2791,15 @@ async function summarizeOneBatch(visibleTurns) {
         // Sister pass: check the snippet for dropped specifics; attach a detail note if any.
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
         queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
-        // Ledger pass: evolve the per-character psychological model from this passage.
-        queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP));   // ledger gets a bounded, past-only gist (summarizer above keeps the full context)
+        // Ledger pass: evolve the per-character psychological model from this passage —
+        // but ONLY if the live pass hasn't already covered these turns. With live
+        // updates on (the default, every turn), ledgerLiveIdx sits at the chat head,
+        // so scribing the batch again here was a 100% redundant LLM call per batch.
+        if (!(s.ledgerLiveUpdate !== false && typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= endIdx)) {
+            queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP), endIdx);   // bounded, past-only gist
+        } else {
+            log('Ledger: batch turns already covered by the live pass — no extra scribe call.');
+        }
 
         log(`Layer 0 now has ${store.layers[0].length} snippets`);
 
@@ -2879,8 +2918,13 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         // Sister pass: check the snippet for dropped specifics; attach a detail note if any.
         queueAuditDetail(storyTxt, summary, contextStr);   // non-blocking: audit runs in background
         queueContinuityCheck(storyTxt, summary);           // non-blocking: continuity check runs in background
-        // Ledger pass: evolve the per-character psychological model from this passage.
-        queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP));   // ledger gets a bounded, past-only gist (summarizer above keeps the full context)
+        // Ledger pass — same live-coverage gate as the single-batch path: with live
+        // updates on, every catch-up batch was ALSO a redundant scribe call.
+        if (!(s.ledgerLiveUpdate !== false && typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= endIdx)) {
+            queueLedgerUpdate(storyTxt, buildLedgerContext(passageStart, LEDGER_GIST_CAP), endIdx);   // bounded, past-only gist
+        } else {
+            log('Ledger: batch turns already covered by the live pass — no extra scribe call.');
+        }
 
         await maybePromoteLayer(0);
         // In the bulk path the range /hide above already wrote the chat (with the new
@@ -3128,7 +3172,7 @@ async function maybePromoteLayer(layerIndex) {
     }
 
     const toMerge = layer.splice(0, s.snippetsPerPromotion);
-    const storyTxt = toMerge.map(sn => sn.text).join(' ');
+    const storyTxt = toMerge.map(sn => sn.text).join('\n\n');   // paragraph breaks — the meta-summarizer must see where one scene summary ends and the next begins
     const contextStr = buildFullContext(layerIndex + 1);
 
     toastr.info(
@@ -3411,7 +3455,7 @@ function assembleSummaryBlock() {
             for (const sn of store.layers[0]) snippets.push(sn.text);
         }
         if (snippets.length > 0) {
-            summaryPart = subst(s.injectionTemplate, '{{summary}}', snippets.join(' '));
+            summaryPart = subst(s.injectionTemplate, '{{summary}}', snippets.join('\n'));   // one snippet per line (was join(' ') — a single run-on wall)
         }
     }
 
@@ -3638,6 +3682,9 @@ function onChatChanged() {
     _editorUndoSnapshot = null;
     _auditQueue = [];
     _ledgerQueue = [];
+    _continuityQueue = [];
+    _pendingEditedIdx.clear();               // indices from the OLD chat — meaningless (and dangerous) in this one
+    clearTimeout(_editRecheckTimer);         // a pending debounce would re-check the WRONG chat's snippets
     _chatEpoch++;   // invalidate any ledger update still in flight for the previous chat
     $('#sc_editor_undo').hide();
     $('#sc_editor_review_list').empty();
@@ -5900,7 +5947,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { patchLedgerPrompt(); } catch (_) {}
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.41.0 loaded — branch/trim ledger rewinds are now instant: the checkpoint restores immediately and the delta re-derives as bounded background passes (resumable if interrupted) instead of one blocking scribe call with a sticky toast; old checkpoints are thinned geometrically rather than dropped, so deep branches rewind from a nearby snapshot instead of triggering a full rebuild. — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.42.0 loaded — deep-audit release: per-call abort controllers (Abort now stops the RIGHT call even with background passes in flight), the 120s watchdog no longer leaks zombie timers/unhandled rejections, batch summaries skip the redundant ledger scribe when the live pass already covered those turns (one full LLM call saved per batch), live-off installs now checkpoint from batch jobs (branch rewind no longer full-rebuilds for them), ALL unhide paths (Clear Memory, branch repair, orphan heal) use contiguous range calls — one chat save per run instead of one per message, pending edit-rechecks and continuity jobs are cleared on chat switch (no more cross-chat snippet contamination), the backlog dialog can no longer stack copies of itself, passages keep each speaker\'s NAME (group scenes stop being anonymous "Assistant:" lines), and snippet boundaries survive into the gist/injection/promotion prompts instead of collapsing into a run-on. Prior (5.41): branch/trim ledger rewinds are instant: the checkpoint restores immediately and the delta re-derives as bounded background passes (resumable if interrupted) instead of one blocking scribe call with a sticky toast; old checkpoints are thinned geometrically rather than dropped, so deep branches rewind from a nearby snapshot instead of triggering a full rebuild. — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
-    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps',
+    'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
 
 const body = names.map(extractTopLevel).join('\n\n');
@@ -48,7 +48,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
-  subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps,
+  subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
 };
 `;
@@ -387,6 +387,25 @@ section('_pickCheckpoint — nearest snapshot at/before target');
     eq(L._pickCheckpoint(cks, -1), null, 'nothing at/before a negative target');
     eq(L._pickCheckpoint([], 10), null, 'empty list -> null');
     eq(L._pickCheckpoint([{ atTurn: 10 }, { atTurn: 2 }, { atTurn: 7 }], 8).atTurn, 7, 'unsorted list handled');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+section('_contiguousRanges — O(runs) hide/unhide batching');
+{
+    eq(JSON.stringify(L._contiguousRanges([0,1,2,3])), JSON.stringify([[0,3]]), 'one contiguous run');
+    eq(JSON.stringify(L._contiguousRanges([5,6,9,10,11,20])), JSON.stringify([[5,6],[9,11],[20,20]]), 'gaps split runs; singleton kept');
+    eq(JSON.stringify(L._contiguousRanges([3,1,2,1,0])), JSON.stringify([[0,3]]), 'unsorted + duplicate input normalized');
+    eq(L._contiguousRanges([]).length, 0, 'empty -> empty');
+    eq(JSON.stringify(L._contiguousRanges([-2,-1,0,1])), JSON.stringify([[0,1]]), 'negative indices filtered out');
+    eq(JSON.stringify(L._contiguousRanges([7])), JSON.stringify([[7,7]]), 'single index -> single-point range');
+    // a 280-message unghost collapses to ONE call instead of 280 chat-file writes
+    const big = []; for (let i = 0; i <= 279; i++) big.push(i);
+    eq(JSON.stringify(L._contiguousRanges(big)), JSON.stringify([[0,279]]), '280 messages -> 1 range call');
+    // every input index is covered by exactly one range, nothing extra
+    const scattered = [0,1,4,5,6,9,50,51,52,53,99];
+    const rs = L._contiguousRanges(scattered);
+    const covered = new Set(); for (const [a,b] of rs) for (let i=a;i<=b;i++) covered.add(i);
+    ok(scattered.every(i => covered.has(i)) && covered.size === scattered.length, 'ranges cover exactly the input set');
 }
 
 // ─────────────────────────────────────────────────────────────────────
