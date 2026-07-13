@@ -1762,17 +1762,21 @@ function stripLeadingLabel(v) {
 // present on the delta REPLACES that field (the scribe emits the full evolved
 // value); an omitted field is left untouched. `threads` present replaces the
 // open list; [] clears it. Returns the count of characters changed.
-function mergeLedgerDeltas(deltas) {
+function mergeLedgerDeltas(deltas, target) {
     if (!Array.isArray(deltas) || deltas.length === 0) return 0;
-    const store = getChatStore();
-    if (!store.ledger || typeof store.ledger !== 'object') store.ledger = {};
+    let ledger = target;
+    if (!ledger || typeof ledger !== 'object') {
+        const store = getChatStore();
+        if (!store.ledger || typeof store.ledger !== 'object') store.ledger = {};
+        ledger = store.ledger;
+    }
     let changed = 0;
     for (const d of deltas) {
         if (!d || typeof d !== 'object') continue;
         const rawName = typeof d.name === 'string' ? d.name.trim() : '';
         if (!rawName) continue;
-        const key = resolveLedgerKey(store.ledger, rawName);
-        const entry = store.ledger[key] || {};
+        const key = resolveLedgerKey(ledger, rawName);
+        const entry = ledger[key] || {};
         let touched = false;
         if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { entry.core  = v; touched = true; } }
         if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; touched = true; } }
@@ -1786,7 +1790,7 @@ function mergeLedgerDeltas(deltas) {
         }
         if (touched) {
             entry.updatedAt = Date.now();
-            store.ledger[key] = entry;
+            ledger[key] = entry;
             changed++;
         }
     }
@@ -1838,16 +1842,17 @@ function queueLiveLedgerUpdate() {
         const range = _computeLiveLedgerRange(store.summarizedUpTo, store.ledgerLiveIdx, latestIdx);
         if (!range) return false;
         const _step = Math.max(1, (s.turnsPerSummary | 0) || 5);
+        const _staging = !!(store.ledgerRebuild && store.ledgerRebuild.staging);   // an active staged catch-up owns the pointer — route into staging, never the live ledger
         if (range[1] - range[0] + 1 > _step * 3) {
             // The gap is far bigger than a normal turn-to-turn window (interrupted
             // rebuild, long-idle pointer): one giant passage would blow the prompt.
             // Same bounded background chunks a rewind uses; liveIdx advances per chunk.
-            return queueLedgerReplay(range[0] - 1, range[1]) > 0;
+            return queueLedgerReplay(range[0] - 1, range[1], { staging: _staging }) > 0;
         }
         const storyTxt = buildPassageFromRange(chat, range[0], range[1]);
         if (!storyTxt.trim()) return false;
         const contextStr = buildLedgerContext(range[0], LEDGER_GIST_CAP);   // bounded recent gist (was the whole story every turn)
-        _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: range[1] });
+        _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: range[1], staging: _staging });
         processLedgerQueue();   // fire and forget
         return true;
     } catch (e) { try { log('queueLiveLedgerUpdate failed (non-fatal):', e); } catch (_) {} return false; }
@@ -1928,14 +1933,15 @@ function _pruneCheckpoints(sig, keep, sparseEvery) {
     } catch (_) {}
 }
 
-function saveLedgerCheckpoint(atTurn) {
+function saveLedgerCheckpoint(atTurn, ledgerOverride) {
     try {
         if (typeof localStorage === 'undefined' || typeof atTurn !== 'number' || atTurn < 0) return;
         const sig = _chatSig();
         if (!sig) return;
         const store = getChatStore();
-        if (!store.ledger || typeof store.ledger !== 'object' || Object.keys(store.ledger).length === 0) return;
-        const payload = JSON.stringify({ atTurn, ledger: store.ledger, savedAt: Date.now() });
+        const src = (ledgerOverride && typeof ledgerOverride === 'object') ? ledgerOverride : store.ledger;
+        if (!src || typeof src !== 'object' || Object.keys(src).length === 0) return;
+        const payload = JSON.stringify({ atTurn, ledger: src, savedAt: Date.now() });
         const key = _CKPT_PREFIX + sig + '::' + atTurn;
         try { localStorage.setItem(key, payload); }
         catch (_) { _pruneCheckpoints(sig, Math.max(2, Math.floor(CKPT_KEEP / 2)), 0); try { localStorage.setItem(key, payload); } catch (_) {} }
@@ -1990,13 +1996,13 @@ function _pickCheckpoint(list, targetTurn) {
     return best;
 }
 
-function maybeCheckpointLedger() {
+function maybeCheckpointLedger(ledgerOverride) {
     try {
         const idx = getChatStore().ledgerLiveIdx;
         if (typeof idx !== 'number' || idx < 0) return;
         if (idx < _lastCkptTurn + CKPT_EVERY) return;   // throttle by cadence
         _lastCkptTurn = idx;
-        saveLedgerCheckpoint(idx);
+        saveLedgerCheckpoint(idx, ledgerOverride);
     } catch (_) {}
 }
 
@@ -2028,7 +2034,7 @@ function queueLedgerRebuild(targetTurn) {
             const storyTxt = buildPassageFromRange(chat, b.passageStart, Math.min(b.endIdx, targetTurn));
             if (!storyTxt.trim()) continue;
             const contextStr = buildLedgerContext(b.passageStart, LEDGER_GIST_CAP);
-            _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: Math.min(b.endIdx, targetTurn) });
+            _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: Math.min(b.endIdx, targetTurn), staging: true });
             queued++;
         }
         if (queued > 0) processLedgerQueue();   // fire and forget — the queue serializes
@@ -2042,11 +2048,12 @@ function queueLedgerRebuild(targetTurn) {
 // so an interrupted replay resumes from the last finished chunk instead of restarting.
 // The queue already carries the epoch guard and serializes against live passes.
 // Returns the number of jobs queued.
-function queueLedgerReplay(fromExclusive, toInclusive) {
+function queueLedgerReplay(fromExclusive, toInclusive, opts) {
     try {
         const { chat } = SillyTavern.getContext();
         if (!Array.isArray(chat) || chat.length === 0) return 0;
         const s = getSettings();
+        const staging = !!(opts && opts.staging);
         const end = Math.min(toInclusive, chat.length - 1);
         const chunks = _computeReplayChunks(fromExclusive, end, (s.turnsPerSummary | 0) || 5);
         let queued = 0;
@@ -2054,7 +2061,7 @@ function queueLedgerReplay(fromExclusive, toInclusive) {
             const storyTxt = buildPassageFromRange(chat, a, b);
             if (!storyTxt.trim()) continue;   // empty span — a later chunk's liveEnd covers the gap
             const contextStr = buildLedgerContext(a, LEDGER_GIST_CAP);   // bounded, past-only
-            _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: b });
+            _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: b, staging });
             queued++;
         }
         if (queued > 0) processLedgerQueue();   // fire and forget — the queue serializes
@@ -2100,19 +2107,25 @@ async function tryAutoRewindLedger(targetTurn, label) {
             const cur = getChatStore();
             const hasLedger = cur.ledger && typeof cur.ledger === 'object' && Object.keys(cur.ledger).length > 0;
             if (!hasLedger) return true;   // nothing stale to fix — live pass fills it forward
+            // STAGING rebuild: the existing ledger keeps serving injection EXACTLY as
+            // it is (imperfect beats absent) while the clean rebuild accumulates in
+            // ledgerStaging. The swap happens atomically at completion; a failure or
+            // an app-kill keeps the old ledger and resumes from the last finished
+            // chunk. Nothing is deleted before its replacement exists.
             _ledgerQueue = [];
-            _ledgerGen++;                  // invalidate any in-flight job — it saw the pre-trim ledger
-            cur.ledger = {};
-            cur.ledgerLiveIdx = -1;
-            _lastCkptTurn = -1;            // re-arm checkpointing from zero
+            _ledgerGen++;                  // invalidate any in-flight job — it saw the pre-trim timeline
+            cur.ledgerStaging = {};
+            cur.ledgerLiveIdx = -1;        // tracks STAGING progress until the swap
+            _lastCkptTurn = -1;            // re-arm checkpointing (staging snapshots) from zero
             const jobs = queueLedgerRebuild(targetTurn);
-            cur.ledgerRebuild = jobs > 0 ? { target: targetTurn } : null;   // persisted: an app-kill mid-rebuild resumes at reopen
+            cur.ledgerRebuild = jobs > 0 ? { target: targetTurn, staging: true, attempts: 0 } : null;   // persisted: resumes at reopen
+            if (jobs === 0) cur.ledgerStaging = null;
             await saveChatStore();
             try { updateInjection(true); renderLedger(); } catch (_) {}
             toastr.info(
                 jobs > 0
-                    ? `No ledger snapshot exists that far back — rebuilding it for this ${label} in ${jobs} background pass${jobs === 1 ? '' : 'es'} (snapshots save along the way, so this won't repeat). Keep playing.`
-                    : `Ledger cleared for this ${label} — the live pass re-derives from the remaining turns.`,
+                    ? `No ledger snapshot exists that far back — rebuilding a fresh one for this ${label} in ${jobs} background pass${jobs === 1 ? '' : 'es'}. Your current ledger entries stay live until the rebuild lands. Keep playing.`
+                    : `Nothing to rebuild for this ${label} — the live pass covers the remaining turns.`,
                 'Summaryception', { timeOut: 6500 });
             return true;
         }
@@ -2155,6 +2168,23 @@ function queueLedgerUpdate(storyTxt, contextStr, endIdx) {
     processLedgerQueue();   // fire and forget — deliberately NOT awaited
 }
 
+// A catch-up chunk that fails must never let LATER chunks advance the pointer
+// past its hole (turns silently skipped forever = drifting 'Now'). Drop the rest
+// of the pipeline, count the attempt on the persisted marker, and let the resume
+// path retry from the last COMPLETED chunk.
+function _abortCatchupPipeline(reason) {
+    try {
+        _ledgerQueue = [];
+        _ledgerGen++;
+        const st = getChatStore();
+        if (st.ledgerRebuild && typeof st.ledgerRebuild === 'object') {
+            st.ledgerRebuild.attempts = (st.ledgerRebuild.attempts | 0) + 1;
+            saveChatStore().catch(() => {});
+            log(`Ledger catch-up paused (${reason}) — attempt ${st.ledgerRebuild.attempts}; will resume from the last completed chunk.`);
+        }
+    } catch (_) {}
+}
+
 async function processLedgerQueue() {
     if (_ledgerActive) return;
     _ledgerActive = true;
@@ -2163,7 +2193,12 @@ async function processLedgerQueue() {
             const job = _ledgerQueue.shift();
             try {
                 const s = getSettings();
-                const ledgerStr = serializeLedgerForScribe(getChatStore().ledger, s.ledgerContextMaxChars);
+                const _store0 = getChatStore();
+                // Staging jobs read from and write to the staging ledger; the LIVE
+                // ledger keeps serving injection untouched until the swap.
+                if (job.staging && (!_store0.ledgerStaging || typeof _store0.ledgerStaging !== 'object')) _store0.ledgerStaging = {};
+                const _base = job.staging ? _store0.ledgerStaging : _store0.ledger;
+                const ledgerStr = serializeLedgerForScribe(_base, s.ledgerContextMaxChars);
                 const deltas = await callLedgerScribe(job.storyTxt, job.contextStr, ledgerStr);
                 // Chat-switch guard: a result computed for the previous chat must
                 // never be written into this one.
@@ -2175,13 +2210,30 @@ async function processLedgerQueue() {
                     log('Ledger (background): ledger was rewound/trimmed mid-update — stale result discarded.');
                     continue;
                 }
-                if (!deltas) { log('Ledger (background): no parseable output — skipped.'); continue; }
-                const changed = mergeLedgerDeltas(deltas);
+                if (!deltas) {
+                    // Unparseable scribe output on a pointer-advancing chunk: stop the
+                    // pipeline HERE rather than skip the hole and drift.
+                    if (job.live && typeof job.liveEnd === 'number') { _abortCatchupPipeline('unparseable scribe output'); continue; }
+                    log('Ledger (background): no parseable output — skipped.');
+                    continue;
+                }
+                const _tgt = job.staging ? (getChatStore().ledgerStaging || (getChatStore().ledgerStaging = {})) : undefined;
+                const changed = mergeLedgerDeltas(deltas, _tgt);
                 if (job.live && typeof job.liveEnd === 'number') {
                     const _st = getChatStore();
                     if (typeof _st.ledgerLiveIdx !== 'number' || job.liveEnd > _st.ledgerLiveIdx) _st.ledgerLiveIdx = job.liveEnd;
-                    if (_st.ledgerRebuild && typeof _st.ledgerRebuild.target === 'number' && _st.ledgerLiveIdx >= _st.ledgerRebuild.target) _st.ledgerRebuild = null;   // catch-up complete
-                    maybeCheckpointLedger();
+                    if (_st.ledgerRebuild && typeof _st.ledgerRebuild.target === 'number' && _st.ledgerLiveIdx >= _st.ledgerRebuild.target) {
+                        // Catch-up complete. If it was a STAGING rebuild, swap the clean
+                        // result in atomically — the old ledger served injection until
+                        // this exact moment, so there was never an empty window.
+                        if (job.staging && _st.ledgerStaging && Object.keys(_st.ledgerStaging).length > 0) {
+                            _st.ledger = _st.ledgerStaging;
+                            toastr.success('Ledger rebuild complete — the fresh, branch-accurate ledger is now live.', 'Summaryception', { timeOut: 5000 });
+                        }
+                        _st.ledgerStaging = null;
+                        _st.ledgerRebuild = null;
+                    }
+                    maybeCheckpointLedger(job.staging ? _tgt : undefined);
                 }
                 if (changed > 0) {
                     await saveChatStore();
@@ -2194,6 +2246,9 @@ async function processLedgerQueue() {
                 }
             } catch (e) {
                 log('Ledger (background) failed for one batch — ledger unchanged:', e);
+                // Pointer-advancing chunk threw (network/abort): same rule — never
+                // let later chunks hop the hole.
+                if (job.live && typeof job.liveEnd === 'number') _abortCatchupPipeline('request failed');
             }
         }
     } finally {
@@ -3827,15 +3882,30 @@ function onChatChanged() {
         try {
             const st = getChatStore();
             if (st.ledgerRebuild && typeof st.ledgerRebuild.target === 'number' && _ledgerQueue.length === 0 && !_ledgerActive) {
-                const { chat } = SillyTavern.getContext();
-                const li = (typeof st.ledgerLiveIdx === 'number') ? st.ledgerLiveIdx : -1;
-                const tgt = Math.min(st.ledgerRebuild.target, (Array.isArray(chat) ? chat.length : 1) - 1);
-                if (li < tgt) {
-                    const n = queueLedgerReplay(li, tgt);
-                    if (n > 0) toastr.info(`Resuming ledger catch-up — ${n} background pass${n === 1 ? '' : 'es'} remaining.`, 'Summaryception', { timeOut: 4000 });
-                    else st.ledgerRebuild = null;
+                const attempts = st.ledgerRebuild.attempts | 0;
+                if (attempts >= 5) {
+                    // Five failed rounds: something is persistently wrong (model emitting
+                    // unparseable output, provider rejecting). STOP retrying automatically —
+                    // the endless retry-toast loop is worse than a stale ledger. The old
+                    // ledger keeps serving; a manual 'Build ledger from history' or the
+                    // next successful live pass clears this state.
+                    log(`Ledger catch-up suspended after ${attempts} failed attempts — not auto-resuming.`);
+                    toastr.warning('Ledger catch-up keeps failing (check the summarizer connection / model output). Your current ledger stays as-is; run "Build ledger from history" once the connection is healthy.', 'Summaryception', { timeOut: 9000 });
                 } else {
-                    st.ledgerRebuild = null;
+                    const { chat } = SillyTavern.getContext();
+                    const li = (typeof st.ledgerLiveIdx === 'number') ? st.ledgerLiveIdx : -1;
+                    const tgt = Math.min(st.ledgerRebuild.target, (Array.isArray(chat) ? chat.length : 1) - 1);
+                    if (li < tgt) {
+                        const n = queueLedgerReplay(li, tgt, { staging: !!st.ledgerRebuild.staging });
+                        if (n > 0) toastr.info(`Resuming ledger catch-up — ${n} background pass${n === 1 ? '' : 'es'} remaining.`, 'Summaryception', { timeOut: 4000 });
+                        else { st.ledgerRebuild = null; st.ledgerStaging = null; }
+                    } else {
+                        // Pointer already reached the target (completion raced the reload):
+                        // finish the swap if a staged result is waiting.
+                        if (st.ledgerRebuild.staging && st.ledgerStaging && Object.keys(st.ledgerStaging).length > 0) st.ledger = st.ledgerStaging;
+                        st.ledgerStaging = null;
+                        st.ledgerRebuild = null;
+                    }
                 }
             }
         } catch (_) {}
@@ -6094,7 +6164,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, 'Summaryception v5.45.0 loaded — DATA-LOSS FIX: the auto-rewind no longer wipes the ledger on chats without summarized history (that pre-live-ledger shortcut destroyed live-built ledgers on reopen whenever a repair fired — e.g. the mobile save race that leaves ledgerLiveIdx one past a shorter chat); the clear now applies ONLY when rewinding to the literal start of a chat, and everything else goes through checkpoint restore / background rebuild like any other chat. Also: rebuilds and replays persist a catch-up marker in chat metadata, so killing the app mid-catch-up RESUMES at reopen from the last finished chunk instead of stranding a half-empty ledger; and a live pass facing a huge pointer gap now routes through bounded chunks instead of one monster prompt. Prior (5.44): no more foreground full-rebuilds: when a trim/branch lands below the oldest surviving checkpoint, the ledger now rebuilds through the SAME invisible, resumable background queue as a normal rewind (assistant-turn batches, snapshots saved along the way so the situation cannot recur for that region) instead of the busy-locked whole-history backfill; and checkpoint lookups now union across the chat\'s recent content signatures (remembered in chat metadata, which survives greeting edits / head deletions and is copied into branches) — editing message 0 no longer orphans every snapshot the chat ever saved. Prior (5.43): hardening release: a ledger GENERATION guard now discards any scribe job still in flight when the ledger is rewound, trimmed, or a message is deleted (the epoch only covered chat switches, so a stale job could merge deltas from deleted turns into a freshly-restored ledger and push the live pointer past the chat end); branch/repair toasts and logs now name exactly WHICH condition triggered them ([summaryOverruns/snippetOverruns/verbatimGhosted/ledgerAhead]) so misfires are diagnosable from a screenshot; a startup storage GC keeps the total checkpoint+backup footprint bounded (quota exhaustion silently broke checkpoint saves — the exact thing that makes branch rewinds cheap); and the profile connection path no longer dumps the full model response to console on every call unless debugMode is on. Prior (5.42): deep-audit release: per-call abort controllers (Abort now stops the RIGHT call even with background passes in flight), the 120s watchdog no longer leaks zombie timers/unhandled rejections, batch summaries skip the redundant ledger scribe when the live pass already covered those turns (one full LLM call saved per batch), live-off installs now checkpoint from batch jobs (branch rewind no longer full-rebuilds for them), ALL unhide paths (Clear Memory, branch repair, orphan heal) use contiguous range calls — one chat save per run instead of one per message, pending edit-rechecks and continuity jobs are cleared on chat switch (no more cross-chat snippet contamination), the backlog dialog can no longer stack copies of itself, passages keep each speaker\'s NAME (group scenes stop being anonymous "Assistant:" lines), and snippet boundaries survive into the gist/injection/promotion prompts instead of collapsing into a run-on. Prior (5.41): branch/trim ledger rewinds are instant: the checkpoint restores immediately and the delta re-derives as bounded background passes (resumable if interrupted) instead of one blocking scribe call with a sticky toast; old checkpoints are thinned geometrically rather than dropped, so deep branches rewind from a nearby snapshot instead of triggering a full rebuild. — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
+            console.log(LOG_PREFIX, 'Summaryception v5.46.0 loaded — STAGED LEDGER REBUILDS: when a branch/trim needs a rebuild, the existing ledger now keeps serving injection UNTOUCHED while the clean rebuild accumulates in a separate staging area, and the swap happens atomically only at completion — nothing is deleted before its replacement exists, a failure or app-kill keeps the old ledger, and resume continues from the last finished chunk. A failed chunk now halts the pipeline instead of letting later chunks advance the pointer past the hole (that silent turn-skipping is where drifting Now entries came from), failed rounds are counted on the persisted marker, and after 5 the auto-resume STOPS with a clear warning instead of retry-looping forever. Staging chunks read/write only the staging ledger (checkpoints included), so a contaminated old ledger can never bleed into the rebuilt one. Prior (5.45): DATA-LOSS FIX: the auto-rewind no longer wipes the ledger on chats without summarized history (that pre-live-ledger shortcut destroyed live-built ledgers on reopen whenever a repair fired — e.g. the mobile save race that leaves ledgerLiveIdx one past a shorter chat); the clear now applies ONLY when rewinding to the literal start of a chat, and everything else goes through checkpoint restore / background rebuild like any other chat. Also: rebuilds and replays persist a catch-up marker in chat metadata, so killing the app mid-catch-up RESUMES at reopen from the last finished chunk instead of stranding a half-empty ledger; and a live pass facing a huge pointer gap now routes through bounded chunks instead of one monster prompt. Prior (5.44): no more foreground full-rebuilds: when a trim/branch lands below the oldest surviving checkpoint, the ledger now rebuilds through the SAME invisible, resumable background queue as a normal rewind (assistant-turn batches, snapshots saved along the way so the situation cannot recur for that region) instead of the busy-locked whole-history backfill; and checkpoint lookups now union across the chat\'s recent content signatures (remembered in chat metadata, which survives greeting edits / head deletions and is copied into branches) — editing message 0 no longer orphans every snapshot the chat ever saved. Prior (5.43): hardening release: a ledger GENERATION guard now discards any scribe job still in flight when the ledger is rewound, trimmed, or a message is deleted (the epoch only covered chat switches, so a stale job could merge deltas from deleted turns into a freshly-restored ledger and push the live pointer past the chat end); branch/repair toasts and logs now name exactly WHICH condition triggered them ([summaryOverruns/snippetOverruns/verbatimGhosted/ledgerAhead]) so misfires are diagnosable from a screenshot; a startup storage GC keeps the total checkpoint+backup footprint bounded (quota exhaustion silently broke checkpoint saves — the exact thing that makes branch rewinds cheap); and the profile connection path no longer dumps the full model response to console on every call unless debugMode is on. Prior (5.42): deep-audit release: per-call abort controllers (Abort now stops the RIGHT call even with background passes in flight), the 120s watchdog no longer leaks zombie timers/unhandled rejections, batch summaries skip the redundant ledger scribe when the live pass already covered those turns (one full LLM call saved per batch), live-off installs now checkpoint from batch jobs (branch rewind no longer full-rebuilds for them), ALL unhide paths (Clear Memory, branch repair, orphan heal) use contiguous range calls — one chat save per run instead of one per message, pending edit-rechecks and continuity jobs are cleared on chat switch (no more cross-chat snippet contamination), the backlog dialog can no longer stack copies of itself, passages keep each speaker\'s NAME (group scenes stop being anonymous "Assistant:" lines), and snippet boundaries survive into the gist/injection/promotion prompts instead of collapsing into a run-on. Prior (5.41): branch/trim ledger rewinds are instant: the checkpoint restores immediately and the delta re-derives as bounded background passes (resumable if interrupted) instead of one blocking scribe call with a sticky toast; old checkpoints are thinned geometrically rather than dropped, so deep branches rewind from a nearby snapshot instead of triggering a full rebuild. — memory now records causal chains and involuntary manner instead of flat facts, pins load-bearing verbatim quotes, and the character ledger carries each person\'s current whereabouts plus a compressed relationship-arc history with the reason behind every shift. Improved default prompts auto-migrate to installs that were on the stock prompt; customized prompts are untouched. Memory is now also mirrored to a local backup and auto-recovers if a chat rename or reload ever drops it. The character ledger now updates live every turn (not only on summarization) and injects a full-cast roster (compact, capped, and rotating) so off-screen characters are never forgotten. Important characters can be pinned to stay in context permanently, and off-screen characters are invited back into the story when it fits. Bulk passes (catch-up and build-from-history) write to disk far less per batch, and branching/deleting correctly rewinds snippets and their audit notes, and the character ledger is brought back in line automatically on branch/trim — a cheap checkpoint rewind when a snapshot exists, otherwise an automatic clean rebuild, with no manual step. NEW: an opt-in Continuity Auditor checks each snippet against its source and the established record, filing concise flags (drift / contradiction) into a work-queue your copilot can list/resolve/dismiss, with an optional nudge-the-story toggle; re-checking now reconciles (clears flags whose issue is fixed); flags can be one-click Applied, Applied-all oldest->newest, or auto-fixed (snippet layer) via a toggle, with message-level fixes routed to the copilot. Flags now record where the error lives (snippet vs source); auto-fix only rewrites snippet-level ones (aligning the snippet to its source, so no drift loop), leaving source-level errors for the copilot to fix at the message. Editing an already-summarized message now auto-re-checks just that snippet (debounced), so a fixed message realigns its snippet on its own. NEW: an in-app Continuity panel (flag list with per-flag Apply/Dismiss, Re-check All / Apply All buttons, enable/auto-fix/nudge toggles, and prompt editors).');
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

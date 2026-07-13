@@ -390,6 +390,22 @@ section('_pickCheckpoint — nearest snapshot at/before target');
 }
 
 // ─────────────────────────────────────────────────────────────────────
+section('mergeLedgerDeltas — explicit target isolation (staging rebuilds)');
+{
+    const a = {}, b = {};
+    eq(L.mergeLedgerDeltas([{ name: 'Asari', core: 'calm strategist', state: 'wary' }], a), 1, 'merge into explicit target A');
+    eq(L.mergeLedgerDeltas([{ name: 'Asari', core: 'furious', threads: ['find the mole'] }], b), 1, 'merge into explicit target B');
+    eq(a['Asari'].core, 'calm strategist', 'target A holds its own value');
+    eq(b['Asari'].core, 'furious', 'target B holds its own value — zero cross-talk');
+    ok(!a['Asari'].threads, 'A never received B\'s threads');
+    eq(b['Asari'].threads.length, 1, 'B kept its threads');
+    // staging semantics: repeated merges into the same target evolve it in place
+    L.mergeLedgerDeltas([{ name: 'Asari', state: 'resolved' }], b);
+    eq(b['Asari'].state, 'resolved', 'later chunk replaces the field on the same target');
+    eq(b['Asari'].core, 'furious', 'untouched fields survive later chunks');
+}
+
+// ─────────────────────────────────────────────────────────────────────
 section('_selectStorageEvictions — bounded checkpoint/backup footprint');
 {
     const E = (key, bytes, at) => ({ key, bytes, at });
