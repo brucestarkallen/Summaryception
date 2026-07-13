@@ -232,6 +232,13 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
         '</thinking>',
     ],
 
+    // Machine-note blocks removed from STORY INPUT before any summarizer / ledger
+    // scribe / auditor pass. Planned-intent meta (director momentum notes,
+    // watchlists, copilot edit blocks) lives inside message text but was never
+    // narrated — ingesting it poisons memory with planned-but-unplayed "facts".
+    inputStripTags: ['plot_momentum', 'watchlist', 'director', 'edits', 'memedits', 'wiedits', 'fetch', 'supersede'],
+    inputStripHeaders: ['PLOT MOMENTUM', 'WATCHLIST'],
+
     debugMode: false,
     traceMode: false,
 
@@ -1123,6 +1130,37 @@ function getVisibleAssistantTurns(chat) {
  * Skips messages that are hidden (by user or system) UNLESS they were
  * hidden by Summaryception (sc_ghosted). Also skips empty messages.
  */
+// Strip machine-note blocks from story input. Conservative by design: only
+// configured tag pairs (and matching code fences), configured bracket-header
+// sections (header line to the next blank line), HTML comments, and the
+// [EPISODE_END] marker are removed; story prose is untouched. Never throws —
+// on any error the original text is returned.
+function stripMetaBlocks(text) {
+    if (typeof text !== 'string' || !text) return text;
+    try {
+        const s = getSettings();
+        let out = text;
+        const tags = (s.inputStripTags || []).map(t => String(t)).filter(t => /^[a-z0-9_-]+$/i.test(t));
+        for (const t of tags) {
+            out = out.replace(new RegExp('<' + t + '(?:\\s[^>]*)?>[\\s\\S]*?</' + t + '>', 'gi'), '');
+            out = out.replace(new RegExp('```' + t + '\\b[\\s\\S]*?```', 'gi'), '');
+        }
+        const headers = (s.inputStripHeaders || []).map(h => String(h).trim()).filter(Boolean);
+        for (const h of headers) {
+            const esc = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // Header at line start (brackets optional, rest of line free), block runs
+            // to the next blank line or the true end of the text.
+            out = out.replace(new RegExp('^[ \\t]*\\[?' + esc + '\\b[^\\n]*[\\s\\S]*?(?=\\n[ \\t]*\\n|(?![\\s\\S]))', 'gim'), '');
+        }
+        out = out.replace(/<!--[\s\S]*?-->/g, '');
+        out = out.replace(/\[EPISODE_END\]/g, '');
+        out = out.replace(/\n{3,}/g, '\n\n');
+        return out.trim();
+    } catch (e) {
+        return text;
+    }
+}
+
 function buildPassageFromRange(chat, startIdx, endIdx) {
     const lines = [];
     for (let i = startIdx; i <= endIdx; i++) {
@@ -1140,7 +1178,9 @@ function buildPassageFromRange(chat, startIdx, endIdx) {
         // group scenes have multiple speakers — a flat 'Assistant:' label forces every
         // downstream pass (summarizer/scribe/auditor) to guess who is talking.
         const speaker = m.is_user ? 'Player' : ((m.name && String(m.name).trim()) ? String(m.name).trim() : 'Assistant');
-        lines.push(`${speaker}: ${m.mes.trim()}`);
+        const body = stripMetaBlocks(m.mes.trim());
+        if (!body) continue; // message was pure machine-meta — nothing narrated
+        lines.push(`${speaker}: ${body}`);
     }
     return lines.join('\n');
 }
@@ -4170,6 +4210,8 @@ function updateUI() {
         $('#sc_debug_mode').prop('checked', s.debugMode);
         $('#sc_trace_mode').prop('checked', s.traceMode);
         $('#sc_strip_patterns').val((s.stripPatterns || []).join('\n'));
+        $('#sc_input_strip_tags').val((s.inputStripTags || []).join('\n'));
+        $('#sc_input_strip_headers').val((s.inputStripHeaders || []).join('\n'));
         $('#sc_summarizer_response_length').val(s.summarizerResponseLength || 0);
 
         let ghostedCount = 0;
@@ -5091,6 +5133,18 @@ function bindUIEvents() {
         saveSettings();
     });
 
+    $(document).on('change', '#sc_input_strip_tags', function () {
+        const lines = $(this).val().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        getSettings().inputStripTags = lines;
+        saveSettings();
+    });
+
+    $(document).on('change', '#sc_input_strip_headers', function () {
+        const lines = $(this).val().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        getSettings().inputStripHeaders = lines;
+        saveSettings();
+    });
+
     const sliders = [
         { id: '#sc_verbatim_turns', key: 'verbatimTurns', display: '#sc_verbatim_turns_val' },
         { id: '#sc_turns_per_summary', key: 'turnsPerSummary', display: '#sc_turns_per_summary_val' },
@@ -5845,6 +5899,8 @@ function bindUIEvents() {
         s.injectionTemplate = defaultSettings.injectionTemplate;
         s.notepadTemplate = defaultSettings.notepadTemplate;
         s.stripPatterns = [...defaultSettings.stripPatterns];
+        s.inputStripTags = [...defaultSettings.inputStripTags];
+        s.inputStripHeaders = [...defaultSettings.inputStripHeaders];
         s.summarizerResponseLength = defaultSettings.summarizerResponseLength;
 
         // Reset Detail Auditor (sister) prompts

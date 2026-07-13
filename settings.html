@@ -787,6 +787,20 @@
                         </label>
                         <textarea id="sc_strip_patterns" class="text_pole sc-textarea" rows="4"></textarea>
                     </div>
+                    <div class="sc-setting-row">
+                        <label for="sc_input_strip_tags">
+                            Story-input strip: tag blocks (one tag per line)
+                            <span class="sc-hint">Machine-note tag pairs / code fences removed from story text BEFORE summarizing and ledgering — planner meta (plot momentum, watchlists, copilot blocks) must never become memory "facts".</span>
+                        </label>
+                        <textarea id="sc_input_strip_tags" class="text_pole sc-textarea" rows="4"></textarea>
+                    </div>
+                    <div class="sc-setting-row">
+                        <label for="sc_input_strip_headers">
+                            Story-input strip: header sections (one header per line)
+                            <span class="sc-hint">Lines starting with these headers (brackets optional) are removed together with their block, up to the next blank line — e.g. PLOT MOMENTUM, WATCHLIST.</span>
+                        </label>
+                        <textarea id="sc_input_strip_headers" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
 
 
                     <!-- Debug -->

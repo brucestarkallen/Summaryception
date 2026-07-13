@@ -26,7 +26,7 @@ function extractTopLevel(name) {
     return lines.slice(start, end).join('\n');
 }
 
-const names = ['_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -46,6 +46,7 @@ return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
+  stripMetaBlocks, buildPassageFromRange,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -643,6 +644,54 @@ section('_storeHasContent — backup/recovery gating');
     ok(L._storeHasContent({ notepad: '    ' }) === false, 'whitespace-only notepad -> no content');
     ok(L._storeHasContent({ pins: [{ id: 'p1' }] }) === true, 'a pin -> has content');
     ok(L._storeHasContent({ ledger: [] }) === false, 'ledger as array (malformed) -> no content');
+}
+
+// ─── stripMetaBlocks: planned-intent meta must never become memory fact ───
+section('stripMetaBlocks / buildPassageFromRange input hygiene');
+L.__setSettings({ inputStripTags: ['plot_momentum', 'watchlist', 'edits'], inputStripHeaders: ['PLOT MOMENTUM', 'WATCHLIST'] });
+{
+    const prose = 'Stella raised one finger. Honami froze, toast halfway to her mouth.';
+    const tagged = prose + '\n<plot_momentum>\nBoard notice arrives in three days; Silas runs cheat-or-prodigy bets.\n</plot_momentum>';
+    const out = L.stripMetaBlocks(tagged);
+    ok(out.includes('Stella raised one finger'), 'prose survives tag strip');
+    ok(!out.includes('Board notice'), 'tag block content removed');
+
+    const fenced = prose + '\n```watchlist\nAlaric | cold satisfaction | spin the narrative\n```';
+    ok(!L.stripMetaBlocks(fenced).includes('Alaric |'), 'matching code fence removed');
+
+    const headered = prose + '\n\n[WATCHLIST — active agendas]\nAlaric | ensure assessment confirms fraud narrative\nSilas | monetize gossip\n\nShe finally bit the toast.';
+    const h = L.stripMetaBlocks(headered);
+    ok(!h.includes('fraud narrative') && !h.includes('monetize gossip'), 'bracket-header section removed to blank line');
+    ok(h.includes('She finally bit the toast'), 'prose after the blank line survives');
+
+    const headerAtEnd = prose + '\n\nPLOT MOMENTUM: pending\nThe duel fallout compounds tomorrow.';
+    ok(!L.stripMetaBlocks(headerAtEnd).includes('compounds tomorrow'), 'header block at end-of-text removed');
+
+    const marked = 'The hall emptied. [EPISODE_END]';
+    ok(L.stripMetaBlocks(marked) === 'The hall emptied.', 'EPISODE_END marker removed');
+
+    const commented = 'He bowed. <!-- director: escalate next scene --> She did not.';
+    const c = L.stripMetaBlocks(commented);
+    ok(!c.includes('escalate') && c.includes('He bowed.') && c.includes('She did not.'), 'HTML comment removed, prose intact');
+
+    const mathy = 'He whispered: 2<3, always. <b>Bold claim.</b>';
+    ok(L.stripMetaBlocks(mathy) === mathy, 'non-configured tags and inequalities untouched');
+
+    const edits = 'Sure.\n<edits>[{"id":5,"find":"x","replace":"y"}]</edits>';
+    ok(L.stripMetaBlocks(edits) === 'Sure.', 'copilot edits block removed');
+}
+{
+    const chat = [
+        { is_user: true, mes: 'I check the notice board.' },
+        { is_user: false, name: 'Narrator', mes: '<plot_momentum>Planned: expulsion threat</plot_momentum>' },
+        { is_user: false, name: 'Narrator', mes: 'The board is bare.\n<watchlist>Silas | bets</watchlist>' },
+    ];
+    const passage = L.buildPassageFromRange(chat, 0, 2);
+    ok(passage.includes('Player: I check the notice board.'), 'passage keeps player line');
+    ok(!passage.includes('expulsion threat'), 'pure-meta message contributes nothing');
+    ok(passage.split('\n').length === 2, 'pure-meta message skipped entirely (no empty speaker line)');
+    ok(passage.includes('Narrator: The board is bare.'), 'mixed message keeps its prose');
+    ok(!passage.includes('Silas | bets'), 'mixed message sheds its meta');
 }
 
 console.log('\n────────────────────────────────────────');
