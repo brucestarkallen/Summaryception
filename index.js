@@ -1790,12 +1790,44 @@ function serializeLedgerForScribe(ledger, budgetChars) {
     return out || '(empty — no characters recorded yet)';
 }
 
+// Pure: names of ledger entries missing their stable-nature core. A character can
+// enter the ledger sideways — a live delta that only recorded their state — and from
+// then on every pass treats them as "established" and never writes core ("change
+// core only for a genuinely new trait" + "omit unchanged fields" = permanent hole).
+function _ledgerMissingCore(ledger) {
+    const out = [];
+    if (!ledger || typeof ledger !== 'object') return out;
+    for (const [name, e] of Object.entries(ledger)) {
+        if (!e || typeof e !== 'object') continue;
+        if (typeof e.core === 'string' && e.core.trim()) continue;
+        out.push(name);
+    }
+    return out.sort();
+}
+
+// Pure: the establish-order appended inside <current_ledger> when holes exist. Lives
+// in CODE, not the prompt template, so customized prompts get the self-heal too.
+function _missingCoreNotice(names) {
+    if (!Array.isArray(names) || names.length === 0) return '';
+    const cap = 8;
+    const shown = names.slice(0, cap).join(', ');
+    const more = names.length > cap ? ` (+${names.length - cap} more)` : '';
+    return `\n\n!! MISSING CORE \u2014 these recorded characters have no stable-nature core yet: ${shown}${more}. For ANY of them who appears in <new_passage>, establish their FULL core now (temperament, expression under stress, speech habits, how they address people, hard lines) from everything the story has shown so far \u2014 do not wait for a "new trait".`;
+}
+
 async function callLedgerScribe(storyTxt, contextStr, ledgerStr) {
     const s = getSettings();
+    let ledgerWithNotice = ledgerStr;
+    try {
+        // Self-heal: surface core-less entries to the scribe on every pass they might
+        // appear in. Zero extra calls — rides the pass that was happening anyway.
+        const notice = _missingCoreNotice(_ledgerMissingCore(getChatStore().ledger));
+        if (notice) ledgerWithNotice = String(ledgerStr || '') + notice;
+    } catch (_) {}
     const raw = await callSummarizer(storyTxt, contextStr, {
         systemPrompt: s.ledgerSystemPrompt,
         userPrompt: s.ledgerUserPrompt,
-        ledger: ledgerStr,
+        ledger: ledgerWithNotice,
         quiet: true,   // ledger failures are logged, never shown as summarizer errors
     });
     return extractJsonArray(raw);   // [{name, core?, state?, arc?, threads?}] or null

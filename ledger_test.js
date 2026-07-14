@@ -26,7 +26,7 @@ function extractTopLevel(name) {
     return lines.slice(start, end).join('\n');
 }
 
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -46,7 +46,7 @@ return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
-  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision,
+  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -737,6 +737,26 @@ section('ledger currency — edits, swipes, rewind hygiene');
     ok(!evict.has('bak::B::2'), 'non-tiered group: newest protected');
     const evictOld = new Set(L._selectStorageEvictions(entries, 1, 4));   // legacy 3-arg call: old newest-only behavior
     ok(evictOld.has('ck::A::5'), 'backward compat: without sparseEvery, far-back anchors are not specially protected');
+}
+
+// ─── missing-core self-heal ───
+section('missing-core detection + establish-order');
+{
+    const led = {
+        Claire: { state: 'in the infirmary', arc: 'converging', threads: ['statement'] },   // the reported hole
+        Jovan:  { core: 'guarded, deliberate; speaks plainly', state: 'cornered' },
+        Aldith: { core: '   ', state: 'observing' },                                        // whitespace core = hole
+        Renn:   { core: 'dutiful scribe' },
+    };
+    const missing = L._ledgerMissingCore(led);
+    ok(missing.length === 2 && missing[0] === 'Aldith' && missing[1] === 'Claire', 'detects coreless + whitespace-core entries, sorted');
+    ok(L._ledgerMissingCore({}).length === 0 && L._ledgerMissingCore(null).length === 0, 'empty/null ledger -> none');
+    const notice = L._missingCoreNotice(missing);
+    ok(notice.includes('Aldith, Claire') && notice.includes('establish their FULL core now'), 'notice names the holes and orders establishment');
+    ok(notice.includes('do not wait for a "new trait"'), 'notice overrides the only-on-new-trait rule');
+    ok(L._missingCoreNotice([]) === '', 'no holes -> no notice');
+    const many = L._missingCoreNotice(['A','B','C','D','E','F','G','H','I','J']);
+    ok(many.includes('(+2 more)') && !many.includes(' I,') && !many.includes('J.'), 'notice caps at 8 names');
 }
 
 console.log('\n────────────────────────────────────────');
