@@ -26,7 +26,7 @@ function extractTopLevel(name) {
     return lines.slice(start, end).join('\n');
 }
 
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -46,7 +46,7 @@ return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
-  stripMetaBlocks, buildPassageFromRange,
+  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -692,6 +692,51 @@ L.__setSettings({ inputStripTags: ['plot_momentum', 'watchlist', 'edits'], input
     ok(passage.split('\n').length === 2, 'pure-meta message skipped entirely (no empty speaker line)');
     ok(passage.includes('Narrator: The board is bare.'), 'mixed message keeps its prose');
     ok(!passage.includes('Silas | bets'), 'mixed message sheds its meta');
+}
+
+// ─── ledger currency: edit/swipe policy, decontamination, stamping, tiered GC ───
+section('ledger currency — edits, swipes, rewind hygiene');
+{
+    ok(L._editRewindDecision(50, 40, 10) === 'ignore', 'edit past live pointer -> ignore (live pass ingests it)');
+    ok(L._editRewindDecision(38, 40, 10) === 'rewind', 'recent edit within depth -> rewind');
+    ok(L._editRewindDecision(40, 40, 10) === 'rewind', 'edit AT the live pointer -> rewind');
+    ok(L._editRewindDecision(20, 40, 10) === 'deep', 'deep edit -> no re-derivation (canon-correction)');
+    ok(L._editRewindDecision(38, 40, 0) === 'ignore', 'depth 0 disables the feature');
+    ok(L._editRewindDecision(5, -1, 10) === 'ignore', 'no ledger yet -> ignore');
+}
+{
+    const led = {
+        Stella:  { core: 'x', _t: 35 },
+        Silas:   { core: 'y', _t: 78 },
+        Honami:  { core: 'z' },            // legacy, unstamped
+    };
+    const served = L._ledgerDroppingPast(led, 40);
+    ok('Stella' in served, 'entry shaped before the target survives');
+    ok(!('Silas' in served), 'entry shaped past the target dropped from serving copy');
+    ok('Honami' in served, 'unstamped legacy entry kept (cannot judge)');
+    ok(Object.keys(L._ledgerDroppingPast(null, 10)).length === 0, 'null ledger -> empty object');
+}
+{
+    const tgt = {};
+    L.mergeLedgerDeltas([{ name: 'Stella', state: 'furious' }], tgt, 41);
+    ok(tgt.Stella && tgt.Stella._t === 41, 'merge stamps touched entry with the shaping turn');
+    L.mergeLedgerDeltas([{ name: 'Stella', state: 'calm' }], tgt);
+    ok(tgt.Stella._t === 41, 'merge without a turn leaves the stamp untouched');
+}
+{
+    const mk = (key, at, tiered, group) => ({ key, at, tiered, group, bytes: 100 });
+    const entries = [
+        mk('ck::A::5', 5, true, 'ck::A'), mk('ck::A::30', 30, true, 'ck::A'),
+        mk('ck::A::76', 76, true, 'ck::A'), mk('ck::A::80', 80, true, 'ck::A'),
+        mk('ck::A::84', 84, true, 'ck::A'), mk('ck::A::88', 88, true, 'ck::A'),
+        mk('bak::B::1', 1000, false, 'bak::B'), mk('bak::B::2', 2000, false, 'bak::B'),
+    ];
+    const evict = new Set(L._selectStorageEvictions(entries, 1, 4, 25));   // impossible budget: evict all unprotected
+    ok(!evict.has('ck::A::88') && !evict.has('ck::A::84') && !evict.has('ck::A::80') && !evict.has('ck::A::76'), 'tiered: newest 4 checkpoints protected');
+    ok(!evict.has('ck::A::5') && !evict.has('ck::A::30'), 'tiered: sparse far-back anchors protected (branch rewind targets)');
+    ok(!evict.has('bak::B::2'), 'non-tiered group: newest protected');
+    const evictOld = new Set(L._selectStorageEvictions(entries, 1, 4));   // legacy 3-arg call: old newest-only behavior
+    ok(evictOld.has('ck::A::5'), 'backward compat: without sparseEvery, far-back anchors are not specially protected');
 }
 
 console.log('\n────────────────────────────────────────');

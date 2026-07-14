@@ -239,6 +239,13 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
     inputStripTags: ['plot_momentum', 'watchlist', 'director', 'edits', 'memedits', 'wiedits', 'fetch', 'supersede'],
     inputStripHeaders: ['PLOT MOMENTUM', 'WATCHLIST'],
 
+    // When a message within this many turns of the ledger's live pointer is edited or
+    // swiped, auto-rewind to a checkpoint that PRECEDES the change and re-derive the
+    // small delta — the ledger tracks the corrected text instead of the original.
+    // Deeper edits are treated as corrections toward established canon and are NOT
+    // re-derived (0 disables edit/swipe rewinds entirely).
+    ledgerEditRewindDepth: 10,
+
     debugMode: false,
     traceMode: false,
 
@@ -598,7 +605,7 @@ function _pruneBackups() {
 // Pure: which localStorage entries to evict to get under budget. entries are
 // [{key, bytes, at}]; evicts OLDEST-first (missing timestamps count as oldest)
 // until total <= budgetBytes. Returns the keys to remove.
-function _selectStorageEvictions(entries, budgetBytes, protectPerGroup) {
+function _selectStorageEvictions(entries, budgetBytes, protectPerGroup, sparseEvery) {
     const out = [];
     if (!Array.isArray(entries) || entries.length === 0) return out;
     let total = 0;
@@ -607,6 +614,10 @@ function _selectStorageEvictions(entries, budgetBytes, protectPerGroup) {
     // Protect the newest `protectPerGroup` entries of every group (= chat sig):
     // pure oldest-first eviction across ALL chats strips any chat not touched
     // today completely bare, forcing a from-scratch rebuild the moment you return.
+    // Groups flagged `tiered` (ledger checkpoints, keyed by turn) additionally keep
+    // one sparse anchor per `sparseEvery` turns — branches jump BACKWARD, so
+    // newest-only protection was exactly wrong for them: quota pressure evicted the
+    // far-back snapshots deep branches rewind from, forcing full rebuilds.
     const exempt = new Set();
     const per = Math.max(0, protectPerGroup | 0);
     if (per > 0) {
@@ -618,6 +629,13 @@ function _selectStorageEvictions(entries, budgetBytes, protectPerGroup) {
             byGroup.get(g).push(e);
         }
         for (const list of byGroup.values()) {
+            const tiered = (sparseEvery | 0) > 0 && list.some(e => e && e.tiered);
+            if (tiered) {
+                const turnsAsc = list.map(e => (e.at | 0)).sort((a, b) => a - b);
+                const keepTurns = _selectCheckpointKeeps(turnsAsc, per, sparseEvery | 0);
+                for (const e of list) if (keepTurns.has(e.at | 0)) exempt.add(e.key);
+                continue;
+            }
             list.sort((a, b) => ((b.at) || 0) - ((a.at) || 0));   // newest first
             for (let i = 0; i < Math.min(per, list.length); i++) exempt.add(list[i].key);
         }
@@ -646,14 +664,18 @@ function gcLocalStorageBudget() {
             const k = localStorage.key(i);
             if (!k || (k.indexOf(_CKPT_PREFIX) !== 0 && k.indexOf(_BAK_PREFIX) !== 0)) continue;
             const v = localStorage.getItem(k) || '';
+            const isCkpt = k.indexOf(_CKPT_PREFIX) === 0;
             let at = 0;
-            try { const p = JSON.parse(v) || {}; at = p.savedAt || p.at || 0; } catch (_) {}
+            // Checkpoints anchor on their TURN (tiered retention buckets by turn —
+            // branches jump backward in turns, not in wall-clock); backups keep
+            // timestamp recency.
+            try { const p = JSON.parse(v) || {}; at = isCkpt ? (p.atTurn || 0) : (p.savedAt || p.at || 0); } catch (_) {}
             // group = everything up to the last '::' (i.e. prefix + chat signature),
             // so per-group protection means per-chat protection.
             const cut = k.lastIndexOf('::');
-            entries.push({ key: k, bytes: k.length + v.length, at, group: cut > 0 ? k.slice(0, cut) : k });
+            entries.push({ key: k, bytes: k.length + v.length, at, tiered: isCkpt, group: cut > 0 ? k.slice(0, cut) : k });
         }
-        const evict = _selectStorageEvictions(entries, _SC_STORAGE_BUDGET, 4);
+        const evict = _selectStorageEvictions(entries, _SC_STORAGE_BUDGET, 4, CKPT_SPARSE_EVERY);
         for (const k of evict) { try { localStorage.removeItem(k); } catch (_) {} }
         if (evict.length > 0) log(`Storage GC: evicted ${evict.length} old checkpoint/backup entr${evict.length === 1 ? 'y' : 'ies'} to stay under budget.`);
         return evict.length;
@@ -1823,7 +1845,7 @@ function stripLeadingLabel(v) {
 // present on the delta REPLACES that field (the scribe emits the full evolved
 // value); an omitted field is left untouched. `threads` present replaces the
 // open list; [] clears it. Returns the count of characters changed.
-function mergeLedgerDeltas(deltas, target) {
+function mergeLedgerDeltas(deltas, target, atTurn) {
     if (!Array.isArray(deltas) || deltas.length === 0) return 0;
     let ledger = target;
     if (!ledger || typeof ledger !== 'object') {
@@ -1851,6 +1873,7 @@ function mergeLedgerDeltas(deltas, target) {
         }
         if (touched) {
             entry.updatedAt = Date.now();
+            if (typeof atTurn === 'number' && isFinite(atTurn)) entry._t = atTurn;   // last turn that shaped this entry — lets rewinds drop future-derived state instantly
             ledger[key] = entry;
             changed++;
         }
@@ -2132,7 +2155,40 @@ function queueLedgerReplay(fromExclusive, toInclusive, opts) {
 
 // Restore the nearest checkpoint at/before targetTurn and re-derive the delta forward.
 // Returns true if it rewound; false if no usable checkpoint (caller suggests manual rebuild).
-async function tryAutoRewindLedger(targetTurn, label) {
+// Pure: copy of a ledger with every entry whose last shaping turn (_t) lies PAST
+// maxTurn removed. Entries without a stamp (legacy) are kept — we cannot judge them.
+// Used to decontaminate the SERVING ledger instantly when a trim/branch forces a
+// staged rebuild with no checkpoint: state earned on the abandoned timeline must not
+// keep injecting while the clean rebuild crawls.
+function _ledgerDroppingPast(ledger, maxTurn) {
+    const out = {};
+    if (!ledger || typeof ledger !== 'object') return out;
+    for (const [k, v] of Object.entries(ledger)) {
+        if (v && typeof v._t === 'number' && v._t > maxTurn) continue;
+        out[k] = v;
+    }
+    return out;
+}
+
+// Pure: what should a content change at `idx` do to the ledger?
+//   'ignore' — not yet ledgered (idx past the live pointer) or feature off: the live
+//              pass will ingest the final text anyway.
+//   'deep'   — edit is deeper than `depth` turns behind the pointer: almost always a
+//              correction TOWARD established canon (the audit workflow), so the ledger
+//              already reflects the intended facts; re-deriving the whole tail would
+//              burn tokens to learn nothing.
+//   'rewind' — recent edit: cheap checkpoint rewind + tiny replay keeps the ledger
+//              true to the corrected text.
+function _editRewindDecision(idx, liveIdx, depth) {
+    if (!Number.isFinite(idx) || idx < 0) return 'ignore';
+    if (typeof liveIdx !== 'number' || liveIdx < 0 || idx > liveIdx) return 'ignore';
+    const d = depth | 0;
+    if (d <= 0) return 'ignore';
+    if (liveIdx - idx > d) return 'deep';
+    return 'rewind';
+}
+
+async function tryAutoRewindLedger(targetTurn, label, maxCkptTurn) {
     try {
         const s = getSettings();
         if (s.ledgerAutoRewind === false) return false;
@@ -2157,7 +2213,8 @@ async function tryAutoRewindLedger(targetTurn, label) {
             toastr.info(`Ledger cleared for this ${label} — re-deriving from the remaining turns.`, 'Summaryception', { timeOut: 4500 });
             return true;
         }
-        const ckpt = _pickCheckpoint(listLedgerCheckpoints(), targetTurn);
+        const _ckptCeil = (typeof maxCkptTurn === 'number' && isFinite(maxCkptTurn)) ? Math.min(targetTurn, maxCkptTurn) : targetTurn;
+        const ckpt = _pickCheckpoint(listLedgerCheckpoints(), _ckptCeil);
         if (!ckpt) {
             // No snapshot at/below the target. Re-derivation from history is the only
             // remaining source of truth — but it does NOT need to be the heavyweight
@@ -2168,6 +2225,14 @@ async function tryAutoRewindLedger(targetTurn, label) {
             const cur = getChatStore();
             const hasLedger = cur.ledger && typeof cur.ledger === 'object' && Object.keys(cur.ledger).length > 0;
             if (!hasLedger) return true;   // nothing stale to fix — live pass fills it forward
+            // Serve honestly during the rebuild: drop entries whose last shaping turn
+            // lies past the target — they were earned on the abandoned timeline and
+            // would contaminate every injection until the swap. (Unstamped legacy
+            // entries stay; the swap replaces everything anyway.)
+            const _dropped = Object.keys(cur.ledger).length;
+            cur.ledger = _ledgerDroppingPast(cur.ledger, targetTurn);
+            const _droppedN = _dropped - Object.keys(cur.ledger).length;
+            if (_droppedN > 0) log(`Rewind(${label}): dropped ${_droppedN} ledger entr${_droppedN === 1 ? 'y' : 'ies'} shaped past turn ${targetTurn} from the serving copy.`);
             // STAGING rebuild: the existing ledger keeps serving injection EXACTLY as
             // it is (imperfect beats absent) while the clean rebuild accumulates in
             // ledgerStaging. The swap happens atomically at completion; a failure or
@@ -2297,7 +2362,7 @@ async function processLedgerQueue() {
                     continue;
                 }
                 const _tgt = job.staging ? (getChatStore().ledgerStaging || (getChatStore().ledgerStaging = {})) : undefined;
-                const changed = mergeLedgerDeltas(deltas, _tgt);
+                const changed = mergeLedgerDeltas(deltas, _tgt, (typeof job.liveEnd === 'number' ? job.liveEnd : undefined));
                 if (job.live && typeof job.liveEnd === 'number') {
                     const _st = getChatStore();
                     if (typeof _st.ledgerLiveIdx !== 'number' || job.liveEnd > _st.ledgerLiveIdx) _st.ledgerLiveIdx = job.liveEnd;
@@ -2886,13 +2951,66 @@ async function flushEditedRecheck() {
 // edits to recent verbatim turns have no snippet and are ignored. Coalesced via debounce.
 function onMessageEdited(mesId) {
     try {
-        if (!getSettings().continuityEnabled) return;
         const idx = Number(mesId);
         if (!Number.isFinite(idx)) return;
+        noteLedgerContentChange(idx);   // ledger reaction is independent of the continuity auditor
+        if (!getSettings().continuityEnabled) return;
         if (_findSnippetsCovering(getChatStore(), idx).length === 0) return;   // not summarized yet — nothing to re-check
         _pendingEditedIdx.add(idx);
         clearTimeout(_editRecheckTimer);
         _editRecheckTimer = setTimeout(flushEditedRecheck, 1500);
+    } catch (_) {}
+}
+
+// ─── Ledger vs content changes (edits / swipes) ──────────────────────
+// The live pass only ever moves FORWARD, so an edit or swipe at/below the live
+// pointer used to leave the ledger describing the PRE-change text forever — the
+// audit workflow (apply a batch of fixes) desynced the ledger on every run.
+// Changes are coalesced (Apply-all fires a burst of MESSAGE_EDITED) and resolved
+// once: rewind to a checkpoint that predates the earliest change, replay to head.
+let _ledgerEditMin = Infinity;
+let _ledgerEditTimer = null;
+let _deepEditToastShown = false;
+function noteLedgerContentChange(idx) {
+    try {
+        const s = getSettings();
+        if (!s.ledgerEnabled) return;
+        const st = getChatStore();
+        const live = (typeof st.ledgerLiveIdx === 'number') ? st.ledgerLiveIdx : -1;
+        const decision = _editRewindDecision(idx, live, (s.ledgerEditRewindDepth ?? 10));
+        if (decision === 'ignore') return;
+        if (decision === 'deep') {
+            if (!_deepEditToastShown) {
+                _deepEditToastShown = true;
+                toastr.info(`A deep-history message (turn ${idx}, ledger is at ${live}) was edited. Deep edits are treated as corrections toward existing canon and are not re-derived — run "Build ledger from history" if this edit changed character facts.`, 'Summaryception', { timeOut: 7000 });
+            }
+            return;
+        }
+        _ledgerEditMin = Math.min(_ledgerEditMin, Math.floor(idx));
+        clearTimeout(_ledgerEditTimer);
+        _ledgerEditTimer = setTimeout(() => {
+            const minIdx = _ledgerEditMin;
+            _ledgerEditMin = Infinity;
+            if (!Number.isFinite(minIdx)) return;
+            try {
+                const { chat } = SillyTavern.getContext();
+                const turns = getAssistantTurns(chat || []);
+                if (turns.length === 0) return;
+                const head = turns[turns.length - 1].index;
+                // Rewind floor: the checkpoint must PREDATE the earliest change; replay
+                // then re-derives through the head, ingesting the corrected text.
+                tryAutoRewindLedger(head, 'edit', Math.max(0, minIdx - 1)).catch(() => {});
+            } catch (_) {}
+        }, 2000);
+    } catch (_) {}
+}
+
+function onMessageSwiped(mesId) {
+    try {
+        const idx = Number(mesId);
+        if (!Number.isFinite(idx)) return;
+        // A swipe replaces the message's content wholesale — same class as an edit.
+        noteLedgerContentChange(idx);
     } catch (_) {}
 }
 
@@ -6233,6 +6351,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
         if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
         if (event_types.MESSAGE_EDITED) eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
+        if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
         else if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
