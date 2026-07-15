@@ -2462,7 +2462,15 @@ async function processLedgerQueue() {
                     continue;
                 }
                 if (typeof job.gen === 'number' && job.gen !== _ledgerGen) {
-                    log('Ledger (background): ledger was rewound/trimmed mid-update — stale result discarded.');
+                    // The chat's timeline moved (edit / delete / swipe / rewind) while
+                    // this pass was reading it — the result is stale and must be
+                    // discarded. But a silent discard left the pointer unmoved with the
+                    // user having WATCHED the pass complete: their next tap redid
+                    // identical work, looking like an endless restart. Discards now
+                    // say so (manual) and always self-heal by re-running automatically.
+                    log('Ledger (background): ledger was rewound/trimmed mid-update — stale result discarded; re-deriving automatically.');
+                    if (job.manual) toastr.info('That read was discarded — the chat changed (edit/delete/swipe) while it ran. Re-reading automatically…', 'Summaryception', { timeOut: 4000 });
+                    if (job.live) _armLiveRetry();
                     continue;
                 }
                 if (!deltas) {
@@ -4125,15 +4133,23 @@ function onMessageDeleted(deletedIndex) {
             ? Math.floor(deletedIndex) : -1;
 
         let _bulkTrim = false;
+        let _genStale = true;
         if (delta === 1 && D >= 0 && D <= newLen) {
             reindexAfterDeletion(store, D);   // the common case: one message, known position — exact shift
+            // Deleting a message the ledger never read (above the live pointer)
+            // invalidates nothing in flight: passages below D are untouched and the
+            // pointer did not shift. Bumping the generation here threw away COMPLETED
+            // passes for no reason — the root of the 'it restarts after finishing'
+            // loop when the user deleted during background reads.
+            const _li = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : -1;
+            if (D > _li) _genStale = false;
         } else if (delta >= 1 || D >= 0) {
             clampStoreToLength(store, newLen);   // bulk / uncertain — safe overrun-only repair
             _bulkTrim = true;
         } else {
             return;   // no shrink detected
         }
-        _ledgerGen++;                // any in-flight scribe job saw the pre-deletion chat — its liveEnd and deltas are stale
+        if (_genStale) _ledgerGen++;   // in-flight scribe jobs saw the pre-deletion timeline — their liveEnd and deltas are stale
         saveChatStore();
         updateInjection(true);       // active cast may have changed if a recent message went away
         try { updateUI(); } catch (_) {}

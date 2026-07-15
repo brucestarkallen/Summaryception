@@ -823,6 +823,14 @@ ok(SRC_FULL.includes("_liveFailStreak === 3"), 'auto failures: streak breaker re
 ok(SRC_FULL.includes("if (job.live) _liveFailStreak = 0;"), 'streak resets on any successful live pass');
 ok(SRC_FULL.includes("failures will be reported"), 'manual replay path: catch-up announced');
 
+// ─── discard self-heal + surgical gen bump ───
+section('stale-result discards heal themselves');
+ok(SRC_FULL.includes("re-deriving automatically.');"), 'gen-mismatch discard: logged as self-healing');
+ok(SRC_FULL.includes("That read was discarded — the chat changed (edit/delete/swipe) while it ran"), 'manual discard: user told why');
+ok(SRC_FULL.includes("if (job.live) _armLiveRetry();"), 'discard: live retry armed — pointer catches up with no tap');
+ok(SRC_FULL.includes("if (D > _li) _genStale = false;"), 'single delete above the live pointer: no gen bump, completed passes survive');
+ok(SRC_FULL.includes("if (_genStale) _ledgerGen++;"), 'gen bump is conditional, not unconditional');
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }
