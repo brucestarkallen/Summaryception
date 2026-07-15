@@ -15,7 +15,22 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
 - **Storage key is `MODULE_NAME = 'summaryception'`** — used for both `extensionSettings[MODULE_NAME]` (settings) and `chatMetadata[MODULE_NAME]` (per‑chat memory). **⚠️ Never change this string** — it would orphan every user's saved summaries and ledger. The display name and repo name are cosmetic and safe to change; this key is not.
 - **The ledger is injected as compact prose, not JSON.** The scribe *outputs* JSON only so it parses reliably; that JSON is parsed into stored fields and discarded. What reaches the storyteller is one readable line per on‑screen character.
 - **Everything is defensive:** background passes are `try/catch` + `quiet`, guarded against chat switches (epoch token), never throw upward, and the hot injection path is exception‑wrapped. Editing/deleting chat messages is handled (indices are resynced).
-- **Single file does the work:** `index.js` (~4.5k lines). `settings.html` is the panel, `style.css` the styling, `manifest.json` the metadata. `connectionutil.js` is upstream — don't edit.
+- **Single file does the work:** `index.js` (~7k lines). `settings.html` is the panel, `style.css` the styling, `manifest.json` the metadata. `connectionutil.js` is upstream — don't edit.
+- **⚠️ THE GATE — run all three before every push. Never use `node --check index.js`.**
+  SillyTavern loads `index.js` as an **ES module**; `node --check` on a `.js` file parses it as **CommonJS** and silently accepts what ESM rejects (a duplicate top-level `let`, most importantly). That false pass shipped a redeclared identifier in v5.58.0 and the extension **failed to load at all through v5.60.0 while every check reported green**.
+
+  ```bash
+  node load_test.mjs     # 1. MODULE INTEGRITY: really loads index.js as an ES module against mocked
+                         #    SillyTavern globals, then asserts every event handler bound.
+                         #    Catches SyntaxErrors, TDZ, init crashes, and event-wiring regressions.
+  node ledger_test.js    # 2. LOGIC: the ledger/memory assertion suite (also re-runs the ESM parse).
+  npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 3. STATIC: no-undef / no-redeclare
+                         #    across every code path, including ones no test executes.
+  ```
+  All three must exit 0. `require-atomic-updates` findings are false positives on this codebase — every
+  guard→set path is synchronous (an async body runs synchronously to its first `await`), and
+  `_catchupDialogOpen` covers the one genuine await-window; verify before dismissing any new one.
+- **One exclusive LLM channel.** Every background pass (summarizer, ledger scribe, detail auditor, ledger auditor, continuity checker, edit re-check) must gate on **`_llmChannelBusy()`**. `callSummarizer` snapshots SillyTavern's prompt toggles, disables them, and restores on finish — two concurrent calls interleave those snapshots and leave the user's toggles **permanently wrong**. Adding a new pass? Add its flag to that one predicate; never hand-roll a subset check (that pattern is O(n²) and has already failed twice).
 
 ---
 
