@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -42,6 +42,7 @@ let _rosterTick = 0;
 function getSettings(){ return __settings; }
 function getChatStore(){ return __store; }
 function log(){}
+const document = { createElement(){ let _v = ''; return { set textContent(x){ _v = String(x); }, get innerHTML(){ return _v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); } }; } };
 function toastr_noop(){}
 const SillyTavern = { getContext(){ return { chat: __chat }; } };
 ${body}
@@ -49,7 +50,7 @@ return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
-  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, foldLedgerNotes, ledgerHistoryFor, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
+  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -1112,6 +1113,33 @@ section('ledger notes — fold, rewind by reading fewer notes, history');
     ok(store.ledgerNotesFrom === 2000 - 300, 'exact history is retained for the recent tail');
     ok(L.foldLedgerNotes(store.ledgerNotes, Infinity)['Claire Argent'].state === 's1600', 'compaction preserves the current page exactly');
 }
+
+// ─── the wiki view ───
+section('per-character history view');
+{
+    const store = {
+        ledgerNotesFrom: 0,
+        ledgerNotes: [
+            { t: 12, name: 'Claire Argent', at: 1, core: 'guarded, precise', state: 'in the corridor' },
+            { t: 30, name: 'Claire Argent', at: 2, state: 'at the gallery rail', arc: 'protective older sister' },
+            { t: 47, name: 'Claire Argent', at: 3, threads: ['shape the statement'] },
+            { t: 47, name: 'Jovan Argent', at: 4, state: 'on the platform' },
+        ],
+    };
+    const h = L._historyHtml(store, 'Claire Argent');
+    ok(h.includes('turn 12') && h.includes('turn 30') && h.includes('turn 47'), 'history lists every turn that changed them');
+    ok(!h.includes('on the platform'), "another character's notes never appear in this history");
+    ok(h.indexOf('turn 12') < h.indexOf('turn 30') && h.indexOf('turn 30') < h.indexOf('turn 47'), 'oldest first — a development timeline, not a dump');
+    ok(h.includes('Nature') && h.includes('guarded, precise'), 'the turn a trait was established is visible');
+    ok((h.match(/Nature/g) || []).length === 1, 'Nature appears once — at the turn it was written, not repeated forever');
+    ok(h.includes('Exact history kept from turn 0'), 'the view states how far back it is authoritative');
+    const empty = L._historyHtml({ ledgerNotes: [], ledgerNotesFrom: 0 }, 'Nobody');
+    ok(empty.includes('No recorded history yet'), 'a character with no notes says so plainly');
+    ok(L._historyHtml({}, 'Claire Argent').includes('No recorded history') || L._historyHtml({}, 'Claire Argent').includes('unavailable'), 'a malformed store never throws');
+    const based = L._historyHtml({ ledgerNotesFrom: 80, ledgerNotes: [{ t: 80, name: 'Stella', at: 1, base: true, core: 'brash' }] }, 'Stella');
+    ok(based.includes('carried over'), 'a migrated base note is labelled as carried over, not as a turn that happened');
+}
+ok(SRC_FULL.includes("$(document).on('click', '.sc-ledger-hist'"), 'history toggle is wired to the card button');
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

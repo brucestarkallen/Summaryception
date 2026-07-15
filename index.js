@@ -5165,6 +5165,36 @@ function renderContinuity() {
     } catch (e) { try { log('renderContinuity failed (non-fatal):', e); } catch (_) {} }
 }
 
+// Which characters have their history expanded (per render, not persisted).
+const _histOpen = new Set();
+
+// The wiki view: every turn that changed this character, oldest first, showing only
+// what MOVED that turn — which is exactly what the note holds. This is the record
+// that proves a character developed rather than being replaced.
+function _historyHtml(store, name) {
+    try {
+        const rows = ledgerHistoryFor(store.ledgerNotes, name);
+        if (!rows.length) {
+            return '<div class="sc-ledger-hist-box"><div class="sc-muted">No recorded history yet for this character. History starts being kept from the moment a turn changes them.</div></div>';
+        }
+        const from = (typeof store.ledgerNotesFrom === 'number') ? store.ledgerNotesFrom : 0;
+        const items = rows.map((n) => {
+            const bits = [];
+            if (typeof n.core === 'string')  bits.push('<b>Nature</b> ' + escapeHtml(n.core));
+            if (typeof n.state === 'string') bits.push('<b>Now</b> ' + escapeHtml(n.state));
+            if (typeof n.arc === 'string')   bits.push('<b>Arc</b> ' + escapeHtml(n.arc));
+            if (Array.isArray(n.threads))    bits.push('<b>Open threads</b> ' + escapeHtml(n.threads.join('; ') || '(all resolved)'));
+            if (!bits.length) return '';
+            return '<li><span class="sc-hist-turn">' + (n.base ? 'as of turn ' + n.t : 'turn ' + n.t) + '</span>' +
+                (n.base ? ' <span class="sc-muted">(carried over)</span>' : '') +
+                '<div class="sc-hist-body">' + bits.join('<br>') + '</div></li>';
+        }).filter(Boolean).join('');
+        return '<div class="sc-ledger-hist-box"><div class="sc-muted">Every turn that changed them — only what moved is recorded, so unchanged traits simply persist. Exact history kept from turn ' + from + '.</div><ol class="sc-hist-list">' + items + '</ol></div>';
+    } catch (e) {
+        return '<div class="sc-ledger-hist-box"><div class="sc-muted">History unavailable.</div></div>';
+    }
+}
+
 function renderLedger() {
     try {
         try { renderContinuity(); } catch (_) {}
@@ -5241,6 +5271,7 @@ function renderLedger() {
             }
             html += `<div class="sc-ledger-card" data-idx="${i}">
                 <div class="sc-ledger-head"><span class="sc-ledger-name">${escapeHtml(name)}</span>${badge}${pinBadge}
+                    <button class="sc-ledger-hist menu_button fa-solid fa-clock-rotate-left${_histOpen.has(name) ? ' sc-pinned' : ''}" title="How they became who they are — every turn that changed this character"></button>
                     <button class="sc-ledger-pin menu_button fa-solid fa-thumbtack${pinned ? ' sc-pinned' : ''}" title="${pinned ? 'Unpin — allow rotation' : 'Pin — always keep in context, even when off-screen'}"></button>
                     <button class="sc-ledger-del menu_button fa-solid fa-xmark" title="Delete this character from the ledger"></button>
                 </div>
@@ -5248,6 +5279,7 @@ function renderLedger() {
                 ${field('Now', entry.state)}
                 ${threadsHtml}
                 ${field('Arc', entry.arc)}
+                ${_histOpen.has(name) ? _historyHtml(store, name) : ''}
             </div>`;
         });
         $box.html(html);
@@ -6179,6 +6211,13 @@ function bindUIEvents() {
         if (r === true) toastr.info('Reading the latest turn(s) into the ledger — you\'ll get a toast when it lands (or if it fails).', 'Summaryception', { timeOut: 3000 });
         else if (r === 'busy') { _armLiveRetry(); toastr.info('Still working on the previous pass — the update runs the moment it finishes.', 'Summaryception', { timeOut: 3500 }); }
         else toastr.success('Ledger is already current with the latest turn.', 'Summaryception', { timeOut: 2500 });
+    });
+
+    $(document).on('click', '.sc-ledger-hist', function () {
+        const name = $(this).closest('.sc-ledger-card').find('.sc-ledger-name').text();
+        if (!name) return;
+        if (_histOpen.has(name)) _histOpen.delete(name); else _histOpen.add(name);
+        try { renderLedger(); } catch (_) {}
     });
 
     $(document).on('click', '#sc_ledger_audit', async function () {
