@@ -806,7 +806,12 @@ ok(SRC_FULL.includes('head snapshot: the very next edit/deletion restores instan
 section('live pass: busy self-retry + Update now (source contracts)');
 ok(SRC_FULL.includes("return 'busy';"), 'live pass: busy is a distinct tri-state, not a silent false');
 ok(SRC_FULL.includes("else if (r === 'busy') _armLiveRetry();"), 'cadence gate: busy skips arm a self-retry');
-ok(SRC_FULL.includes("if (r === 'busy' && --_liveRetryLeft > 0) _armLiveRetry();"), 'retry: re-arms while busy, bounded attempts');
+ok(SRC_FULL.includes("const _LIVE_RETRY_MAX = 300;"), 'live retry patience outlasts any real model call (was 8 tries / 32s — shorter than one call on a phone)');
+ok(SRC_FULL.includes("if (r === false) { _liveRetryLeft = 0; return; }   // nothing left to ingest"), 'live retry stops immediately when there is nothing to ingest (cannot spin)');
+ok(/if \(--_liveRetryLeft > 0\) _armLiveRetry\(\);/.test(SRC_FULL), 'live retry keeps re-arming while the channel is busy');
+ok(SRC_FULL.includes('_summarizeRetryLeft = 300;'), 'summarize retry never abandons a pending summarization');
+ok(SRC_FULL.includes('_auditRetryLeft = 200;'), 'audit retry outlasts a slow model call');
+ok(SRC_FULL.includes('_turnsSinceLive = 0;   // cadence is per-chat'), 'live cadence counter reset per chat');
 ok(/_clearLiveRetry\(\);\s*\n\s*_clearAuditRetry\(\);/.test(SRC_FULL), 'retry: live + audit retries both cleared on chat change');
 ok(SRC_FULL.includes("#sc_ledger_now"), 'Update-now button wired');
 const H = require('fs').readFileSync(__dirname + '/settings.html', 'utf8');

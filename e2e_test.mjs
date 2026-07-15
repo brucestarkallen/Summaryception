@@ -234,6 +234,32 @@ try {
     ok(store().ledgerLiveIdx === chat.length - 1, 'the ledger still caught up to the newest turn while the user played on');
     globalThis.__latency = 250;
 
+    if (process.env.E2E_SLOW === '1') {
+        console.log('== 8. SLOW CHANNEL: turn B arrives while turn A holds the channel past the old 32s bound ==');
+        // THE discriminating case. The live pass used to give up after 8 tries x 4s =
+        // 32 seconds — shorter than one model call on a phone. Here turn A's scribe
+        // call holds the channel for 35s; turn B lands 1s in, finds the channel busy,
+        // and must retry. With the old bound its patience is exhausted at t=33s, two
+        // seconds BEFORE the channel frees at t=35s: turn B is never ingested, the
+        // ledger lags, and the only way out is tapping "Update now" by hand.
+        globalThis.__latency = 35000;
+        s.verbatimTurns = 99;   // ledger only; keep the summarizer out of it
+        chat.push(mkMsg('Player', 'Turn A.', true));
+        chat.push(mkMsg('Narrator', 'Claire Argent waited.'));
+        await fire('MESSAGE_RECEIVED', chat.length - 1);
+        await sleep(1500);                       // turn A's call is now in flight (35s)
+        ok((globalThis.__live || 0) === 1, 'precondition: turn A holds the channel');
+        globalThis.__latency = 250;   // turn A is already sleeping 35s; turn B's own call should be quick
+        chat.push(mkMsg('Player', 'Turn B.', true));
+        chat.push(mkMsg('Narrator', 'Claire Argent finally spoke.'));
+        const target = chat.length - 1;
+        await fire('MESSAGE_RECEIVED', target);   // must retry until the channel frees
+        await sleep(52000);
+        ok(store().ledgerLiveIdx === target,
+            `turn B ingested with ZERO taps after a 35s channel hold (pointer ${store().ledgerLiveIdx}/${target})`);
+        globalThis.__latency = 250;
+    }
+
     console.log('== 6. a REAL chat switch: new metadata AND new messages ==');
     const oldNames = Object.keys(store().ledger || {});
     ctx.chatMetadata = {};

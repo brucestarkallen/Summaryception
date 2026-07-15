@@ -2110,7 +2110,7 @@ let _auditRetryLeft = 0;
 function _clearAuditRetry() { if (_auditRetryTimer) { clearTimeout(_auditRetryTimer); _auditRetryTimer = null; } _auditRetryLeft = 0; }
 function _armAuditRetry() {
     if (_auditRetryTimer) return;
-    if (_auditRetryLeft <= 0) _auditRetryLeft = 10;
+    if (_auditRetryLeft <= 0) _auditRetryLeft = 200;   // was 10 (~60s) — shorter than a slow model call
     _auditRetryTimer = setTimeout(async () => {
         _auditRetryTimer = null;
         const r = await auditLedgerEntries({});
@@ -2268,6 +2268,7 @@ function queueLiveLedgerUpdate(opts = {}) {
         if (!storyTxt.trim()) return false;
         const contextStr = buildLedgerContext(range[0], LEDGER_GIST_CAP);   // bounded recent gist (was the whole story every turn)
         _ledgerQueue.push({ storyTxt, contextStr, epoch: _chatEpoch, gen: _ledgerGen, live: true, liveEnd: range[1], staging: _staging, manual });
+        try { renderLedger(); } catch (_) { /* panel may be closed */ }   // indicator flips to "reading…" the moment work is queued
         processLedgerQueue();   // fire and forget
         return true;
     } catch (e) { try { log('queueLiveLedgerUpdate failed (non-fatal):', e); } catch (_) {} return false; }
@@ -2283,14 +2284,25 @@ function queueLiveLedgerUpdate(opts = {}) {
 let _liveRetryTimer = null;
 let _liveRetryLeft = 0;
 function _clearLiveRetry() { if (_liveRetryTimer) { clearTimeout(_liveRetryTimer); _liveRetryTimer = null; } _liveRetryLeft = 0; }
+// A 'busy' skip must NEVER be abandoned. The old bound was 8 tries x 4s = 32s of
+// patience — SHORTER THAN ONE MODEL CALL on a phone. So the ordinary sequence
+// (play -> summarizer holds the channel 30s+ -> live pass retries -> gives up)
+// left the newest turn permanently un-ingested: the ledger's "Now" lagged, and the
+// user had to tap "Update now" by hand, which only worked because the channel was
+// free by then. That is exactly why it did not feel automatic. 'busy' means another
+// pass holds the channel and passes always finish, so retrying until it lands is
+// correct and cannot loop forever; the cap only kills a pathological zombie timer,
+// and 'false' (nothing to ingest) stops immediately.
+const _LIVE_RETRY_MAX = 300;   // ~20 min of patience, not 32 seconds
 function _armLiveRetry() {
     if (_liveRetryTimer) return;                    // one pending retry at a time
-    if (_liveRetryLeft <= 0) _liveRetryLeft = 8;    // fresh burst: up to ~32s of patience
+    if (_liveRetryLeft <= 0) _liveRetryLeft = _LIVE_RETRY_MAX;
     _liveRetryTimer = setTimeout(() => {
         _liveRetryTimer = null;
         const r = queueLiveLedgerUpdate();
-        if (r === true) { _turnsSinceLive = 0; _liveRetryLeft = 0; return; }
-        if (r === 'busy' && --_liveRetryLeft > 0) _armLiveRetry();
+        if (r === true) { _turnsSinceLive = 0; _liveRetryLeft = 0; try { renderLedger(); } catch (_) {} return; }
+        if (r === false) { _liveRetryLeft = 0; return; }   // nothing left to ingest
+        if (--_liveRetryLeft > 0) _armLiveRetry();
     }, 4000);
 }
 
@@ -3462,7 +3474,7 @@ let _summarizeRetryLeft = 0;
 function _clearSummarizeRetry() { if (_summarizeRetryTimer) { clearTimeout(_summarizeRetryTimer); _summarizeRetryTimer = null; } _summarizeRetryLeft = 0; }
 function _armSummarizeRetry() {
     if (_summarizeRetryTimer) return;
-    if (_summarizeRetryLeft <= 0) _summarizeRetryLeft = 10;
+    if (_summarizeRetryLeft <= 0) _summarizeRetryLeft = 300;   // never abandon a pending summarization
     _summarizeRetryTimer = setTimeout(() => {
         _summarizeRetryTimer = null;
         if (_llmChannelBusy()) { if (--_summarizeRetryLeft > 0) _armSummarizeRetry(); return; }
@@ -4577,6 +4589,7 @@ function onChatChanged() {
     _clearAuditRetry();
     _clearSummarizeRetry();
     _turnsSinceAudit = 0;
+    _turnsSinceLive = 0;   // cadence is per-chat; a leftover count could skip the new chat's first pass
     try { const { chat } = SillyTavern.getContext(); _prevChatLen = Array.isArray(chat) ? chat.length : -1; } catch (_) { _prevChatLen = -1; }
     // Kickstart: a chat with a live ledger but ZERO saved snapshots (backfill-built
     // long ago, or a victim of the pre-v5.51 global-cursor bug that silently
@@ -5026,7 +5039,24 @@ function renderLedger() {
         };
 
         const _pinnedSet = new Set(getLedgerPins().map(p => String(p).toLowerCase()));
-        let html = `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full entr${cast.shown.length === 1 ? 'y' : 'ies'} (on screen) + ${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}.</div>`;
+        // Freshness, stated plainly: no guessing whether a pass is running, no tapping
+        // to find out. The scribe reads a turn AFTER it exists, so "current through
+        // the newest turn" is the best possible state — it is never ahead.
+        let freshHtml = '';
+        try {
+            const { chat: _c } = SillyTavern.getContext();
+            const _turns = getAssistantTurns(_c || []);
+            const _latest = _turns.length ? _turns[_turns.length - 1].index : -1;
+            const _li = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : -1;
+            const _behind = (_latest >= 0 && _li < _latest) ? (_latest - _li) : 0;
+            const _working = _ledgerActive || _ledgerAuditActive || _ledgerQueue.length > 0 || !!_liveRetryTimer;
+            freshHtml = _working
+                ? `<div class="sc-ledger-fresh sc-fresh-work">⏳ Reading the story into the ledger${_behind ? ` — ${_behind} turn(s) behind` : ''}… it lands on its own; nothing to tap.</div>`
+                : _behind > 0
+                    ? `<div class="sc-ledger-fresh sc-fresh-lag">⚠ ${_behind} turn(s) not read yet — the next turn picks them up automatically.</div>`
+                    : `<div class="sc-ledger-fresh sc-fresh-ok">✓ Current through turn ${_li} (the newest turn). Nothing pending.</div>`;
+        } catch (_) { /* no chat loaded */ }
+        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full entr${cast.shown.length === 1 ? 'y' : 'ies'} (on screen) + ${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}.</div>`;
         entries.forEach(({ name, entry, st }, i) => {
             // Badge = this turn's injection truth, straight from the shared selector.
             const badge = st === 'full'
