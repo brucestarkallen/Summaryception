@@ -44,6 +44,18 @@ export async function sendSummarizerRequest(s, sysPrompt, prompt) {
         : /detail/i.test(sysPrompt) ? 'detail'
         : 'summary';
     globalThis.__calls.push({ kind, prompt });
+    // Concurrency probe: callSummarizer snapshots/disables/restores ST's prompt
+    // toggles, so TWO of these overlapping corrupts them permanently. Any overlap
+    // here is a hard failure.
+    globalThis.__live = (globalThis.__live || 0) + 1;
+    globalThis.__maxLive = Math.max(globalThis.__maxLive || 0, globalThis.__live);
+    if (globalThis.__live > 1) globalThis.__overlap = (globalThis.__overlap || []).concat([kind]);
+    try {
+        await new Promise((r) => setTimeout(r, (globalThis.__latency || 250)));   // model latency (test-controlled)
+        return __reply(kind);
+    } finally { globalThis.__live--; }
+}
+function __reply(kind) {
     if (kind === 'ledger-scribe') {
         // Two characters; Claire's state carries a claim the story never showed.
         return JSON.stringify([
@@ -59,6 +71,7 @@ export async function sendSummarizerRequest(s, sysPrompt, prompt) {
     }
     return 'A compact summary line.';
 }
+
 export async function fetchOllamaModels() { return []; }
 export async function testOpenAIConnection() { return true; }
 export async function populateProfileDropdown() {}
@@ -193,6 +206,33 @@ try {
     console.log('== 5. one exclusive LLM channel (v5.60.1) ==');
     const seq = calls.map((c) => c.kind);
     ok(seq.length > 0, `passes ran sequentially: ${seq.join(' -> ')}`);
+
+    console.log('== 7. THE REPORTED SEQUENCE: a background pass is running and the user keeps playing ==');
+    // This is the shape of the reported flow: a ledger pass is IN FLIGHT (tapping
+    // "Update now", or any background pass) and a new turn lands while it runs. It
+    // must be built deliberately, because within one MESSAGE_RECEIVED callback the
+    // summarizer is awaited BEFORE the ledger, so those two can never overlap each
+    // other — the danger is only ledger-first, summarizer-second.
+    globalThis.__maxLive = 0; globalThis.__overlap = []; globalThis.__latency = 900;
+    s.enabled = true; s.sisterEnabled = false; s.continuityEnabled = false;
+    s.ledgerAuditEveryTurns = 0;
+    s.verbatimTurns = 99; s.turnsPerSummary = 2;   // summarizer NOT eligible yet -> ledger goes first
+    chat.push(mkMsg('Player', 'I answer her.', true));
+    chat.push(mkMsg('Narrator', 'Claire Argent exhaled. Jovan Argent did not look away.'));
+    await fire('MESSAGE_RECEIVED', chat.length - 1);   // -> ledger scribe starts ~500ms from now, runs ~900ms
+    await sleep(700);                                  // ledger call is now IN FLIGHT
+    ok((globalThis.__live || 0) === 1, 'precondition: a background model call is genuinely in flight');
+    // The user keeps playing. This turn makes the summarizer eligible.
+    s.verbatimTurns = 3;
+    chat.push(mkMsg('Player', 'I keep walking.', true));
+    chat.push(mkMsg('Narrator', 'The platform emptied around them.'));
+    await fire('MESSAGE_RECEIVED', chat.length - 1);   // -> summarizer fires ~500ms from now, mid-ledger-call
+    await sleep(6000);
+    ok((globalThis.__maxLive || 0) === 1, `never two model calls at once (peak ${globalThis.__maxLive || 0}) — ST's prompt toggles cannot be corrupted`);
+    ok((globalThis.__overlap || []).length === 0, 'no overlapping pass' + ((globalThis.__overlap || []).length ? ': ' + globalThis.__overlap.join(' + ') : ''));
+    ok(calls.some((c) => c.kind === 'summary'), 'precondition: the summarizer really ran (test is not vacuous)');
+    ok(store().ledgerLiveIdx === chat.length - 1, 'the ledger still caught up to the newest turn while the user played on');
+    globalThis.__latency = 250;
 
     console.log('== 6. a REAL chat switch: new metadata AND new messages ==');
     const oldNames = Object.keys(store().ledger || {});

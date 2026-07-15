@@ -3455,11 +3455,37 @@ function onMessageSwiped(mesId) {
 
 // ─── Core: Summarize Oldest Verbatim Turns ──────────────────────────
 
+// Bounded self-retry for a summarization deferred by a busy channel, so a skipped
+// run does not wait for the user's next turn.
+let _summarizeRetryTimer = null;
+let _summarizeRetryLeft = 0;
+function _clearSummarizeRetry() { if (_summarizeRetryTimer) { clearTimeout(_summarizeRetryTimer); _summarizeRetryTimer = null; } _summarizeRetryLeft = 0; }
+function _armSummarizeRetry() {
+    if (_summarizeRetryTimer) return;
+    if (_summarizeRetryLeft <= 0) _summarizeRetryLeft = 10;
+    _summarizeRetryTimer = setTimeout(() => {
+        _summarizeRetryTimer = null;
+        if (_llmChannelBusy()) { if (--_summarizeRetryLeft > 0) _armSummarizeRetry(); return; }
+        _summarizeRetryLeft = 0;
+        maybeSummarizeTurns().catch(() => {});
+    }, 3000);
+}
+
 async function maybeSummarizeTurns() {
     const s = getSettings();
     if (!s.enabled) return;
     if (s.pauseSummarization) return;  // ← new
-    if (isSummarizing) return;
+    // The summarizer was the ONE pass that never joined the exclusive channel: it
+    // checked only its OWN flag, so while a ledger scribe / auditor / continuity
+    // pass held the channel it happily started a SECOND concurrent callSummarizer.
+    // Every other pass defers to isSummarizing, so the hole was one-directional and
+    // invisible — and it opened on the most ordinary sequence there is: tap Update
+    // now (or let any background pass run), then keep playing. Concurrency here is
+    // not just slow: callSummarizer snapshots ST's prompt toggles, disables them,
+    // and restores on finish, so interleaved calls leave the user's toggles
+    // permanently wrong. A deferred run retries itself; every new turn retries too,
+    // and the summarizer self-heals a backlog by design.
+    if (_llmChannelBusy()) { _armSummarizeRetry(); return; }
 
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
@@ -4549,6 +4575,7 @@ function onChatChanged() {
     catchupDismissed = false;
     _clearLiveRetry();
     _clearAuditRetry();
+    _clearSummarizeRetry();
     _turnsSinceAudit = 0;
     try { const { chat } = SillyTavern.getContext(); _prevChatLen = Array.isArray(chat) ? chat.length : -1; } catch (_) { _prevChatLen = -1; }
     // Kickstart: a chat with a live ledger but ZERO saved snapshots (backfill-built
