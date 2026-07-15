@@ -24,7 +24,10 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
                          #    SillyTavern globals, then asserts every event handler bound.
                          #    Catches SyntaxErrors, TDZ, init crashes, and event-wiring regressions.
   node ledger_test.js    # 2. LOGIC: the ledger/memory assertion suite (also re-runs the ESM parse).
-  npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 3. STATIC: no-undef / no-redeclare
+  node e2e_test.mjs      # 3. PIPELINE: swaps connectionutil.js for a scripted stub and runs the REAL
+                         #    index.js end to end — event -> scribe -> ledger -> injection -> checkpoint
+                         #    -> auditor -> chat switch. "Passes the unit tests" is not "works".
+  npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 4. STATIC: no-undef / no-redeclare
                          #    across every code path, including ones no test executes.
   ```
   All three must exit 0. `require-atomic-updates` findings are false positives on this codebase — every
