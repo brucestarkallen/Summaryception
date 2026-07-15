@@ -918,6 +918,23 @@ ok(SRC_FULL.includes('const seenRev = new Map();'), 'audit snapshots each entry 
 ok(SRC_FULL.includes('seenRev.get(k) === rev;'), 'stale corrections dropped — newer state never clobbered by an older audit');
 ok(SRC_FULL.includes('mergeLedgerDeltas(fresh, undefined, liveIdx)'), 'only fresh corrections merge');
 
+// ─── deep audit: event coverage + per-chat lifecycle ───
+section('deep audit — event wiring, timer lifecycle, reset coverage');
+ok(/if \(event_types\.MESSAGE_SWIPED\) eventSource\.on\(event_types\.MESSAGE_SWIPED, onMessageSwiped\);\s*\n\s*\/\/[^\n]*\n(\s*\/\/[^\n]*\n)*\s*if \(event_types\.MESSAGE_UPDATED\)/.test(SRC_FULL), 'MESSAGE_UPDATED registered unconditionally — no longer shadowed by an else-if on SWIPED');
+ok(!/else if \(event_types\.MESSAGE_UPDATED\)/.test(SRC_FULL), 'the else-if that hid programmatic edits is gone');
+ok(SRC_FULL.includes('clearTimeout(_ledgerEditTimer);          // same class'), 'chat change clears the armed ledger edit-rewind (would rewind the WRONG chat)');
+ok(/_ledgerEditTimer = null;\s*\n\s*_ledgerEditMin = Infinity;/.test(SRC_FULL), 'chat change resets the coalesced edit floor with the timer');
+ok(SRC_FULL.includes('if (_chatEpoch !== _epochAtArm) { _ledgerEditMin = Infinity; return; }'), 'edit debounce carries an epoch belt — fires only for the chat that armed it');
+for (const k of ['ledgerEditRewindDepth', 'ledgerAuditEnabled', 'ledgerAuditEveryTurns', 'ledgerAuditMaxPerRun', 'ledgerAuditEvidenceMsgs', 'ledgerAuditEvidenceChars', 'ledgerAuditSystemPrompt', 'ledgerAuditUserPrompt']) {
+    ok(SRC_FULL.includes(`s.${k} = defaultSettings.${k};`), `reset-to-defaults covers ${k}`);
+}
+// Internal bookkeeping must never reach the model.
+{
+    const line = L.formatLedgerEntry('Claire', { core: 'guarded', state: 'waiting', arc: 'a', threads: ['t'], _t: 41, _a: 38, updatedAt: 123 }, 600);
+    ok(!line.includes('_t') && !line.includes('_a') && !line.includes('41') && !line.includes('updatedAt'), 'injection text carries no internal stamps (_t/_a/updatedAt)');
+    ok(line.startsWith('Claire — Nature: guarded'), 'injection text is the character, nothing else');
+}
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }

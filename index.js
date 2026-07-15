@@ -3396,7 +3396,9 @@ function noteLedgerContentChange(idx) {
         }
         _ledgerEditMin = Math.min(_ledgerEditMin, Math.floor(idx));
         clearTimeout(_ledgerEditTimer);
+        const _epochAtArm = _chatEpoch;
         _ledgerEditTimer = setTimeout(() => {
+            if (_chatEpoch !== _epochAtArm) { _ledgerEditMin = Infinity; return; }   // armed for a chat that is no longer loaded
             const minIdx = _ledgerEditMin;
             _ledgerEditMin = Infinity;
             if (!Number.isFinite(minIdx)) return;
@@ -4517,6 +4519,9 @@ function onChatChanged() {
     _continuityQueue = [];
     _pendingEditedIdx.clear();               // indices from the OLD chat — meaningless (and dangerous) in this one
     clearTimeout(_editRecheckTimer);         // a pending debounce would re-check the WRONG chat's snippets
+    clearTimeout(_ledgerEditTimer);          // same class: an armed edit-rewind would rewind the WRONG chat at the old chat's indices
+    _ledgerEditTimer = null;
+    _ledgerEditMin = Infinity;
     _chatEpoch++;   // invalidate any ledger update still in flight for the previous chat
     _ledgerGen++;   // defense in depth — same invalidation through the generation guard
     $('#sc_editor_undo').hide();
@@ -6514,6 +6519,14 @@ function bindUIEvents() {
         s.stripPatterns = [...defaultSettings.stripPatterns];
         s.inputStripTags = [...defaultSettings.inputStripTags];
         s.inputStripHeaders = [...defaultSettings.inputStripHeaders];
+        s.ledgerEditRewindDepth = defaultSettings.ledgerEditRewindDepth;
+        s.ledgerAuditEnabled = defaultSettings.ledgerAuditEnabled;
+        s.ledgerAuditEveryTurns = defaultSettings.ledgerAuditEveryTurns;
+        s.ledgerAuditMaxPerRun = defaultSettings.ledgerAuditMaxPerRun;
+        s.ledgerAuditEvidenceMsgs = defaultSettings.ledgerAuditEvidenceMsgs;
+        s.ledgerAuditEvidenceChars = defaultSettings.ledgerAuditEvidenceChars;
+        s.ledgerAuditSystemPrompt = defaultSettings.ledgerAuditSystemPrompt;
+        s.ledgerAuditUserPrompt = defaultSettings.ledgerAuditUserPrompt;
         s.summarizerResponseLength = defaultSettings.summarizerResponseLength;
 
         // Reset Detail Auditor (sister) prompts
@@ -6847,7 +6860,12 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
         if (event_types.MESSAGE_EDITED) eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
         if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
-        else if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
+        // MESSAGE_UPDATED is a DISTINCT event, not a fallback: programmatic edits
+        // (script/slash flows, other extensions) can fire UPDATED without EDITED.
+        // The old else-if shadowed it whenever SWIPED existed — those edits were
+        // invisible: no ledger rewind, no snippet recheck, silent stale. The edit
+        // pipeline dedupes (Set + min-coalescer), so double-firing is harmless.
+        if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
         registerSlashCommands();
