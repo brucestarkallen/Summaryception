@@ -2056,7 +2056,7 @@ function saveLedgerCheckpoint(atTurn, ledgerOverride) {
         const store = getChatStore();
         const src = (ledgerOverride && typeof ledgerOverride === 'object') ? ledgerOverride : store.ledger;
         if (!src || typeof src !== 'object' || Object.keys(src).length === 0) return;
-        const payload = JSON.stringify({ atTurn, ledger: src, savedAt: Date.now() });
+        const payload = JSON.stringify({ atTurn, ledger: src, savedAt: Date.now(), era: (store.ledgerEra | 0) });
         const key = _CKPT_PREFIX + sig + '::' + atTurn;
         try { localStorage.setItem(key, payload); }
         catch (_) { _pruneCheckpoints(sig, Math.max(2, Math.floor(CKPT_KEEP / 2)), 0); try { localStorage.setItem(key, payload); } catch (_) {} }
@@ -2092,6 +2092,11 @@ function listLedgerCheckpoints() {
                 if (!k || k.indexOf(prefix) !== 0) continue;
                 try {
                     const v = JSON.parse(localStorage.getItem(k));
+                    // Era gate: Clear Ledger bumps store.ledgerEra, making every older
+                    // snapshot invisible to THIS chat (a rewind must never resurrect a
+                    // ledger the user explicitly rejected) while branches — whose copied
+                    // store carries the era they branched at — keep seeing theirs.
+                    if (v && ((v.era | 0) !== (store.ledgerEra | 0))) continue;
                     if (v && typeof v.atTurn === 'number' && v.ledger && !seen.has(v.atTurn)) { seen.add(v.atTurn); out.push(v); }
                 } catch (_) {}
             }
@@ -2541,7 +2546,7 @@ async function backfillLedgerFromHistory(opts) {
                 const contextStr = buildLedgerContext(b.passageStart, LEDGER_GIST_CAP);   // bounded + past-only — don't send the whole gist every pass (long chats hit token limits -> 429 waits)
                 const deltas = await callLedgerScribe(storyTxt, contextStr, ledgerStr);
                 if (_chatEpoch !== startEpoch) break;   // switched during the call — discard, never merge into the wrong chat
-                if (deltas) mergeLedgerDeltas(deltas);
+                if (deltas) mergeLedgerDeltas(deltas, undefined, b.endIdx);
                 if (b.endIdx >= _bfCkpt + CKPT_EVERY) { try { saveLedgerCheckpoint(b.endIdx); } catch (_) {} _bfCkpt = b.endIdx; }   // checkpoint AS we rebuild, so a later branch can cheaply rewind instead of full-rebuilding again
                 consec = 0;
             } catch (e) {
@@ -2560,6 +2565,7 @@ async function backfillLedgerFromHistory(opts) {
         } else {
             await saveChatStore();
             store.ledgerLiveIdx = turns.length ? turns[turns.length - 1].index : (typeof store.ledgerLiveIdx === 'number' ? store.ledgerLiveIdx : -1);
+            try { if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= 0) saveLedgerCheckpoint(store.ledgerLiveIdx); } catch (_) {}   // head snapshot: the very next edit/deletion restores instantly instead of replaying the last chunk
             store._ckptLast = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : _bfCkpt;   // align live checkpoint throttle with what we just built — per-chat cursor
             updateInjection(true);
             try { renderLedger(); } catch (_) {}
@@ -2594,7 +2600,7 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
         toastr.info(`Reading scene ${sn.turnRange[0]}–${sn.turnRange[1]} into the ledger…`, 'Summaryception', { timeOut: 3000, progressBar: true });
         const deltas = await callLedgerScribe(storyTxt, contextStr, serializeLedgerForScribe(store.ledger, s.ledgerContextMaxChars));
         if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — scene not applied.', 'Summaryception', { timeOut: 3000 }); return; }
-        const changed = deltas ? mergeLedgerDeltas(deltas) : 0;
+        const changed = deltas ? mergeLedgerDeltas(deltas, undefined, (sn && sn.turnRange && typeof sn.turnRange[1] === 'number') ? sn.turnRange[1] : undefined) : 0;
         await saveChatStore();
         updateInjection(true);
         renderLedger();
@@ -5481,10 +5487,21 @@ function bindUIEvents() {
         if (!confirm('Clear the entire character ledger for THIS chat?\n\nThis removes all recorded character nature, current state, arc, and open threads. It rebuilds automatically as the story continues.')) return;
         const store = getChatStore();
         store.ledger = {};
+        // New era: all existing snapshots become invisible to this chat — a later
+        // auto-rewind must never restore the ledger the user just rejected. (They are
+        // not deleted: sibling branches share the checkpoint keyspace and keep the
+        // era they branched at.) In-flight jobs and staged rebuilds are from the old
+        // era too — invalidate them.
+        store.ledgerEra = (store.ledgerEra | 0) + 1;
+        store._ckptLast = -1;
+        store.ledgerRebuild = null;
+        store.ledgerStaging = null;
+        _ledgerQueue = [];
+        _ledgerGen++;
         await saveChatStore();
         updateInjection(true);
         renderLedger();
-        toastr.success('Character ledger cleared for this chat.', 'Summaryception', { timeOut: 2500 });
+        toastr.success('Character ledger cleared for this chat. Old snapshots retired — rebuilt ones start a fresh era.', 'Summaryception', { timeOut: 3500 });
     });
 
     // ── Backfill / Maintenance ──

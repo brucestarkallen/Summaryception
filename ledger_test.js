@@ -792,6 +792,16 @@ section('checkpoint synthesis from entry stamps');
 }
 ok(!SRC_FULL.includes('_lastCkptTurn'), 'global checkpoint cursor fully removed (per-chat store cursor everywhere)');
 
+// ─── ledger eras: clear must never be resurrect-able ───
+section('ledger eras + rebuild stamping (source contracts)');
+ok(SRC_FULL.includes("era: (store.ledgerEra | 0)"), 'save: snapshots stamped with the chat store era');
+ok(SRC_FULL.includes("((v.era | 0) !== (store.ledgerEra | 0))) continue;"), 'list: snapshots from other eras invisible to this chat');
+ok(SRC_FULL.includes("store.ledgerEra = (store.ledgerEra | 0) + 1;"), 'clear: bumps the era (old snapshots retired, branches keep theirs)');
+ok(SRC_FULL.includes("store.ledgerStaging = null;\n        _ledgerQueue = [];\n        _ledgerGen++;") , 'clear: invalidates in-flight jobs and staged rebuilds');
+ok(SRC_FULL.includes("mergeLedgerDeltas(deltas, undefined, b.endIdx)"), 'backfill: merges stamped with chunk end turn');
+ok(SRC_FULL.includes("sn.turnRange[1] === 'number') ? sn.turnRange[1] : undefined"), 'snippet path: merges stamped with scene end turn');
+ok(SRC_FULL.includes('head snapshot: the very next edit/deletion restores instantly'), 'backfill completion: explicit head checkpoint');
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }
