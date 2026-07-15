@@ -2173,6 +2173,159 @@ function stripLeadingLabel(v) {
 // present on the delta REPLACES that field (the scribe emits the full evolved
 // value); an omitted field is left untouched. `threads` present replaces the
 // open list; [] clears it. Returns the count of characters changed.
+// ─── Per-turn notes: the ledger's real history ───────────────────────
+// A character's page (Nature / Now / Arc / Open threads) is CUMULATIVE — turn 47's
+// page is turn 46's page with some fields overwritten. You cannot subtract turn 47
+// from it, which is why rewinding used to need a stored snapshot ("photograph every
+// page every turn") and, when the snapshot had been pruned for space, an AI rebuild.
+//
+// But the scribe already tells us exactly what changed — its instructions say to OMIT
+// every unchanged field. That reply IS the history, and it was being thrown away. So
+// we keep it: one small note per turn per character, recording only the fields that
+// moved. The page is then COMPUTED — newest value of each field wins — and a rewind
+// is "read fewer notes". Instant, exact, no model call, nothing to prune.
+//
+// The page itself (store.ledger) stays materialized so every consumer — injection,
+// panel, roster, audit — is untouched. Notes are the source of truth for TIME.
+
+// Pure: fold notes into a page-per-character. Newest value per field wins; a field
+// nobody has rewritten keeps its value forever, which is correct (Claire's Nature
+// from turn 12 is still true at turn 200 unless something changed it).
+function foldLedgerNotes(notes, maxTurn) {
+    const out = {};
+    if (!Array.isArray(notes)) return out;
+    const lim = (typeof maxTurn === 'number' && isFinite(maxTurn)) ? maxTurn : Infinity;
+    const rows = notes
+        .filter(n => n && typeof n.t === 'number' && n.t <= lim && typeof n.name === 'string' && n.name.trim())
+        .sort((a, b) => (a.t - b.t) || ((a.at || 0) - (b.at || 0)));
+    for (const n of rows) {
+        const key = resolveLedgerKey(out, n.name.trim());
+        const e = out[key] || {};
+        if (typeof n.core === 'string') e.core = n.core;
+        if (typeof n.state === 'string') e.state = n.state;
+        if (typeof n.arc === 'string') e.arc = n.arc;
+        if (Array.isArray(n.threads)) e.threads = n.threads.slice();
+        if (typeof n.a === 'number') e._a = n.a;          // audit stamp rides the notes too
+        e._t = n.t;
+        e.updatedAt = n.at || e.updatedAt || 0;
+        out[key] = e;
+    }
+    return out;
+}
+
+// Pure: the character's own timeline — every note that ever touched them, oldest
+// first. This is the "wiki history" view: how they became who they are.
+function ledgerHistoryFor(notes, name) {
+    if (!Array.isArray(notes) || !name) return [];
+    const want = String(name).trim().toLowerCase();
+    return notes
+        .filter(n => n && typeof n.name === 'string' && n.name.trim().toLowerCase() === want)
+        .sort((a, b) => (a.t - b.t) || ((a.at || 0) - (b.at || 0)));
+}
+
+// Pure: notes are only authoritative back to their base turn. A chat that had a
+// ledger before notes existed gets a base note capturing the page as it stood then;
+// rewinds ABOVE that are exact folds, rewinds below still need the old machinery.
+function notesCover(store, targetTurn) {
+    if (!store || !Array.isArray(store.ledgerNotes) || store.ledgerNotes.length === 0) return false;
+    const from = (typeof store.ledgerNotesFrom === 'number') ? store.ledgerNotesFrom : null;
+    if (from === null) return false;
+    return targetTurn >= from;
+}
+
+// Migration: adopt the existing page as a base note at the current pointer, so no
+// history is lost and folding stays correct from here on. A fresh chat bases at 0
+// and is therefore exactly foldable forever.
+function ensureLedgerNotes(store) {
+    if (Array.isArray(store.ledgerNotes)) return;
+    store.ledgerNotes = [];
+    const led = (store.ledger && typeof store.ledger === 'object') ? store.ledger : {};
+    const at = (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= 0) ? store.ledgerLiveIdx : 0;
+    const names = Object.keys(led);
+    for (const name of names) {
+        const e = led[name];
+        if (!e || typeof e !== 'object') continue;
+        const note = { t: at, name, at: e.updatedAt || Date.now(), base: true };
+        if (typeof e.core === 'string') note.core = e.core;
+        if (typeof e.state === 'string') note.state = e.state;
+        if (typeof e.arc === 'string') note.arc = e.arc;
+        if (Array.isArray(e.threads)) note.threads = e.threads.slice();
+        if (typeof e._a === 'number') note.a = e._a;
+        store.ledgerNotes.push(note);
+    }
+    store.ledgerNotesFrom = names.length ? at : 0;
+}
+
+const _NOTES_SOFT_CAP = 1500;   // ~450 KB worst case; compaction keeps it bounded
+const _NOTES_KEEP_TAIL = 300;   // turns of exact-fold history always retained
+
+// Bound growth without losing truth: fold everything older than the tail into ONE
+// base note per character at the cut turn. Rewinds inside the tail stay exact; older
+// rewinds fall back to the existing path, exactly as they do for a legacy chat.
+function compactLedgerNotes(store) {
+    try {
+        const notes = store.ledgerNotes;
+        if (!Array.isArray(notes) || notes.length <= _NOTES_SOFT_CAP) return;
+        const head = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : 0;
+        const cut = head - _NOTES_KEEP_TAIL;
+        if (cut <= (store.ledgerNotesFrom || 0)) return;
+        const base = foldLedgerNotes(notes, cut);
+        const kept = notes.filter(n => n && typeof n.t === 'number' && n.t > cut);
+        const rebuilt = [];
+        for (const [name, e] of Object.entries(base)) {
+            const note = { t: cut, name, at: e.updatedAt || Date.now(), base: true };
+            if (typeof e.core === 'string') note.core = e.core;
+            if (typeof e.state === 'string') note.state = e.state;
+            if (typeof e.arc === 'string') note.arc = e.arc;
+            if (Array.isArray(e.threads)) note.threads = e.threads.slice();
+            if (typeof e._a === 'number') note.a = e._a;
+            rebuilt.push(note);
+        }
+        store.ledgerNotes = rebuilt.concat(kept);
+        store.ledgerNotesFrom = cut;
+        log(`Ledger notes compacted: ${notes.length} -> ${store.ledgerNotes.length} (exact history kept from turn ${cut}).`);
+    } catch (e) { log('compactLedgerNotes failed (non-fatal):', e); }
+}
+
+// Record what the scribe actually said this turn. Only fields it sent are stored —
+// that is the whole point: the note is small because it is only the change.
+function appendLedgerNotes(deltas, atTurn) {
+    if (!Array.isArray(deltas) || typeof atTurn !== 'number' || !isFinite(atTurn)) return 0;
+    const store = getChatStore();
+    ensureLedgerNotes(store);
+    let n = 0;
+    for (const d of deltas) {
+        if (!d || typeof d.name !== 'string' || !d.name.trim()) continue;
+        const note = { t: Math.floor(atTurn), name: d.name.trim(), at: Date.now() };
+        let has = false;
+        if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { note.core = v; has = true; } }
+        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { note.state = v; has = true; } }
+        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);   if (v) { note.arc = v; has = true; } }
+        if (Array.isArray(d.threads)) {
+            note.threads = d.threads.filter(t => typeof t === 'string' && t.trim()).map(t => stripLeadingLabel(t)).filter(Boolean);
+            has = true;
+        }
+        if (has) { store.ledgerNotes.push(note); n++; }
+    }
+    if (n) compactLedgerNotes(store);
+    return n;
+}
+
+// Rewind by READING FEWER NOTES. No snapshot, no model call, no pruning, exact.
+function rewindLedgerFromNotes(targetTurn) {
+    const store = getChatStore();
+    ensureLedgerNotes(store);
+    if (!notesCover(store, targetTurn)) return false;
+    const before = store.ledgerNotes.length;
+    store.ledgerNotes = store.ledgerNotes.filter(n => n && typeof n.t === 'number' && n.t <= targetTurn);
+    store.ledger = foldLedgerNotes(store.ledgerNotes, targetTurn);
+    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > targetTurn) store.ledgerLiveIdx = targetTurn;
+    store.ledgerStaging = null;
+    store.ledgerRebuild = null;
+    log(`Ledger rewound by folding notes to turn ${targetTurn}: dropped ${before - store.ledgerNotes.length} note(s), no model call.`);
+    return true;
+}
+
 function mergeLedgerDeltas(deltas, target, atTurn) {
     if (!Array.isArray(deltas) || deltas.length === 0) return 0;
     let ledger = target;
@@ -2206,6 +2359,9 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
             changed++;
         }
     }
+    // The page is the materialized view; the notes are the history behind it. Only
+    // the LIVE page is journalled — a staged rebuild writes its own notes on swap.
+    if (changed && !target) { try { appendLedgerNotes(deltas, atTurn); } catch (e) { log('appendLedgerNotes failed (non-fatal):', e); } }
     return changed;
 }
 
@@ -2600,6 +2756,17 @@ async function tryAutoRewindLedger(targetTurn, label, maxCkptTurn) {
             if (_chatEpoch !== epoch) return true;
             try { updateInjection(true); renderLedger(); } catch (_) {}
             toastr.info(`Ledger cleared for this ${label} — re-deriving from the remaining turns.`, 'Summaryception', { timeOut: 4500 });
+            return true;
+        }
+        // Fold first: if the notes reach back this far, the rewind is exact and free.
+        // Everything below (checkpoints, synthesis, staged rebuild) is now only the
+        // fallback for history recorded before notes existed.
+        if (rewindLedgerFromNotes(targetTurn)) {
+            _ledgerQueue = [];
+            _ledgerGen++;
+            await saveChatStore();
+            try { updateInjection(true); renderLedger(); } catch (_) {}
+            toastr.success(`Ledger rewound to turn ${targetTurn} (${label}) — folded from its own history, instantly. Nothing to re-read.`, 'Summaryception', { timeOut: 4000 });
             return true;
         }
         const _ckptCeil = (typeof maxCkptTurn === 'number' && isFinite(maxCkptTurn)) ? Math.min(targetTurn, maxCkptTurn) : targetTurn;

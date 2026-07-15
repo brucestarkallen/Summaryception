@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -41,13 +41,15 @@ let __chat = [];
 let _rosterTick = 0;
 function getSettings(){ return __settings; }
 function getChatStore(){ return __store; }
+function log(){}
+function toastr_noop(){}
 const SillyTavern = { getContext(){ return { chat: __chat }; } };
 ${body}
 return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
-  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
+  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, foldLedgerNotes, ledgerHistoryFor, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -1021,6 +1023,95 @@ ok(SRC_FULL.includes('let _ledgerAuditActive = false;'), 'ledger audit owns a di
 ok(/processContinuityQueue\(\) \{\s*\n\s*if \(_continuityActive\) return;\s*\n\s*if \(_llmChannelBusy\(\)\)/.test(SRC_FULL), 'continuity queue joins the exclusive channel');
 ok(/processAuditQueue\(\) \{\s*\n\s*if \(_auditActive\) return;\s*\n\s*if \(_llmChannelBusy\(\)\)/.test(SRC_FULL), 'sister auditor joins the exclusive channel');
 ok(SRC_FULL.includes("if (_chatEpoch !== _epoch) { log('edit-recheck: chat switched — abandoning the remaining snippet(s).'); break; }"), 'edit re-check stops spending LLM calls on a chat that is gone');
+
+// ─── per-turn notes: the ledger's own history ───
+section('ledger notes — fold, rewind by reading fewer notes, history');
+{
+    // Claire's real shape: Nature written once and never touched again, Now moving
+    // constantly, Arc moving occasionally, threads replaced wholesale.
+    const notes = [
+        { t: 12, name: 'Claire Argent', at: 1, core: 'guarded, precise; grips her wrist when tense', state: 'in the corridor' },
+        { t: 30, name: 'Claire Argent', at: 2, state: 'at the gallery rail', arc: 'protective older sister', threads: ['get Jovan out before the crowd forms'] },
+        { t: 47, name: 'Claire Argent', at: 3, state: 'waiting by the arch', threads: ['shape the statement', 'tell him about Ivar'] },
+        { t: 47, name: 'Jovan Argent', at: 4, core: 'deliberate, plain-spoken', state: 'on the platform' },
+    ];
+    const now = L.foldLedgerNotes(notes, Infinity);
+    ok(now['Claire Argent'].core === 'guarded, precise; grips her wrist when tense', 'Nature survives from turn 12 — never rewritten, still true');
+    ok(now['Claire Argent'].state === 'waiting by the arch', 'Now takes the newest note');
+    ok(now['Claire Argent'].arc === 'protective older sister', 'Arc keeps turn 30 (nothing moved it since)');
+    ok(JSON.stringify(now['Claire Argent'].threads) === '["shape the statement","tell him about Ivar"]', 'threads replaced wholesale by the newest list');
+    ok(now['Claire Argent']._t === 47, 'entry stamped with the last turn that touched it');
+    ok(!!now['Jovan Argent'], 'every character folds independently');
+
+    // THE branch case, per field.
+    const at20 = L.foldLedgerNotes(notes, 20);
+    ok(at20['Claire Argent'].core.startsWith('guarded'), 'branch to 20: Nature from turn 12 still hers');
+    ok(at20['Claire Argent'].state === 'in the corridor', 'branch to 20: Now reverts to turn 12 exactly');
+    ok(at20['Claire Argent'].arc === undefined, 'branch to 20: Arc had not been written yet — correctly absent');
+    ok(!at20['Jovan Argent'], 'branch to 20: a character not yet seen does not exist');
+    const at35 = L.foldLedgerNotes(notes, 35);
+    ok(at35['Claire Argent'].state === 'at the gallery rail' && at35['Claire Argent'].arc === 'protective older sister', 'branch to 35: exactly turn 30 state, per field');
+    ok(JSON.stringify(L.foldLedgerNotes(notes, 100)) === JSON.stringify(L.foldLedgerNotes(notes, Infinity)), 'folding past the end == folding everything');
+    ok(Object.keys(L.foldLedgerNotes([], 50)).length === 0 && Object.keys(L.foldLedgerNotes(null, 50)).length === 0, 'empty/null notes -> empty page');
+
+    const hist = L.ledgerHistoryFor(notes, 'Claire Argent');
+    ok(hist.length === 3 && hist[0].t === 12 && hist[2].t === 47, "the wiki view: a character's own timeline, oldest first");
+    ok(L.ledgerHistoryFor(notes, 'Nobody').length === 0, 'history of an unknown character is empty');
+}
+{
+    // Rewind by reading fewer notes — the reported turn-100 -> turn-50 case.
+    const store = { ledger: {}, ledgerLiveIdx: 100, ledgerNotesFrom: 0, ledgerNotes: [] };
+    for (let i = 1; i <= 100; i++) store.ledgerNotes.push({ t: i, name: 'Claire Argent', at: i, state: 'scene ' + i });
+    store.ledgerNotes.push({ t: 4, name: 'Claire Argent', at: 0, core: 'guarded, precise' });
+    L.__setStore(store);
+    ok(L.notesCover(store, 50) === true, 'notes reach back to turn 50');
+    ok(L.rewindLedgerFromNotes(50) === true, 'rewind to 50 succeeds with ZERO model calls');
+    ok(store.ledger['Claire Argent'].state === 'scene 50', 'the page is exactly what it was at turn 50');
+    ok(store.ledger['Claire Argent'].core === 'guarded, precise', 'Nature written at turn 4 survives the rewind');
+    ok(store.ledgerLiveIdx === 50, 'the pointer follows the rewind');
+    ok(store.ledgerNotes.every(n => n.t <= 50), 'notes past the branch point are dropped');
+    ok(store.ledgerRebuild === null && store.ledgerStaging === null, 'no rebuild is scheduled — there is nothing to rebuild');
+}
+{
+    // Legacy chat: notes only become authoritative from their base.
+    const store = { ledger: { Stella: { core: 'brash', updatedAt: 5 } }, ledgerLiveIdx: 80 };
+    L.__setStore(store);
+    L.ensureLedgerNotes(store);
+    ok(store.ledgerNotesFrom === 80, 'an existing page is adopted as a base note at the current pointer');
+    ok(store.ledgerNotes.length === 1 && store.ledgerNotes[0].base === true && store.ledgerNotes[0].core === 'brash', 'the base note carries the page verbatim — no history lost');
+    ok(L.notesCover(store, 90) === true, 'rewinds above the base fold exactly');
+    ok(L.notesCover(store, 40) === false, 'rewinds below the base honestly decline — the old path handles them');
+    ok(L.rewindLedgerFromNotes(40) === false, 'declining is explicit, never a wrong answer');
+    const fresh = { ledger: {}, ledgerLiveIdx: -1 };
+    L.ensureLedgerNotes(fresh);
+    ok(fresh.ledgerNotesFrom === 0, 'a NEW chat bases at turn 0 — exactly foldable forever');
+}
+{
+    // Appending: only what the scribe actually said gets recorded.
+    const store = { ledger: {}, ledgerLiveIdx: -1 };
+    L.__setStore(store);
+    L.ensureLedgerNotes(store);
+    L.mergeLedgerDeltas([{ name: 'Claire Argent', core: 'guarded', state: 'corridor' }], undefined, 12);
+    L.mergeLedgerDeltas([{ name: 'Claire Argent', state: 'the arch' }], undefined, 47);
+    ok(store.ledgerNotes.length === 2, 'one note per scribe reply per character');
+    ok(store.ledgerNotes[1].state === 'the arch' && store.ledgerNotes[1].core === undefined, 'the note holds ONLY the changed field — that is why it is small');
+    ok(store.ledger['Claire Argent'].core === 'guarded', 'the materialized page keeps the unchanged Nature');
+    ok(JSON.stringify(L.foldLedgerNotes(store.ledgerNotes, Infinity)['Claire Argent'].state) === '"the arch"', 'fold(notes) reproduces the live page');
+    const staged = {};
+    const n0 = store.ledgerNotes.length;
+    L.mergeLedgerDeltas([{ name: 'Claire Argent', state: 'staged only' }], staged, 48);
+    ok(store.ledgerNotes.length === n0, 'a STAGED merge writes no notes (it is not the live timeline)');
+}
+{
+    // Growth is bounded without losing truth.
+    const store = { ledger: {}, ledgerLiveIdx: 2000, ledgerNotesFrom: 0, ledgerNotes: [] };
+    for (let i = 1; i <= 1600; i++) store.ledgerNotes.push({ t: i, name: 'Claire Argent', at: i, state: 's' + i });
+    L.__setStore(store);
+    L.compactLedgerNotes(store);
+    ok(store.ledgerNotes.length < 1600, 'over the cap, old notes compact into a base');
+    ok(store.ledgerNotesFrom === 2000 - 300, 'exact history is retained for the recent tail');
+    ok(L.foldLedgerNotes(store.ledgerNotes, Infinity)['Claire Argent'].state === 's1600', 'compaction preserves the current page exactly');
+}
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

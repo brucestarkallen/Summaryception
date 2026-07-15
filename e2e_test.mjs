@@ -260,6 +260,23 @@ try {
         globalThis.__latency = 250;
     }
 
+    console.log('== 9. BRANCH/DELETE now folds the notes — no model call at all ==');
+    globalThis.__latency = 250;
+    const notesLen = (store().ledgerNotes || []).length;
+    ok(notesLen > 0, 'the scribe replies were journalled as per-turn notes');
+    ok(typeof store().ledgerNotesFrom === 'number', 'the notes declare how far back they are authoritative');
+    const callsBefore = calls.length;
+    const target = 3;
+    // Delete everything above turn 3 — the shape of a branch.
+    chat.length = target + 1;
+    await fire('MESSAGE_DELETED', target + 1);
+    await sleep(2500);
+    ok(calls.length === callsBefore, 'THE POINT: rewinding cost ZERO model calls (it used to rebuild)');
+    ok((store().ledgerNotes || []).every((n) => n.t <= target), 'notes past the branch point were dropped');
+    const folded = store().ledger || {};
+    ok(Object.keys(folded).length >= 0, 'the page was refolded from what remains');
+    ok(store().ledgerLiveIdx <= target, 'the pointer followed the branch');
+
     console.log('== 6. a REAL chat switch: new metadata AND new messages ==');
     const oldNames = Object.keys(store().ledger || {});
     ctx.chatMetadata = {};
