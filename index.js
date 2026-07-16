@@ -4503,14 +4503,33 @@ function buildCharacterBlock() {
     if (s.ledgerInjectRoster !== false) {
         const picked = cast.roster;
         const entryByName = new Map(picked.map(n => [n, ledger[n]]));
+        const _clip = (txt, max) => {
+            let t = (typeof txt === 'string') ? txt.trim().replace(/\s+/g, ' ') : '';
+            if (!t) return '';
+            const cut = t.search(/[.;]\s/);
+            if (cut > 0) t = t.slice(0, cut);
+            if (t.length > max) t = t.slice(0, max - 1).replace(/\s+\S*$/, '').trimEnd() + '\u2026';
+            return t;
+        };
         const items = picked.map((name) => {
             const entry = entryByName.get(name);
-            let core = (entry && typeof entry.core === 'string') ? entry.core.trim().replace(/\s+/g, ' ') : '';
-            if (core) { const cut = core.search(/[.;]\s/); if (cut > 0) core = core.slice(0, cut); }
-            if (core.length > 100) core = core.slice(0, 99).replace(/\s+\S*$/, '').trimEnd() + '…';
-            return core ? (name + ' — ' + core) : name;
+            const core = _clip(entry && entry.core, 100);
+            // The roster used to ship a NAME and a personality fragment and nothing
+            // else — so the storyteller knew Silas existed but had no idea he was in
+            // the east yard taking bets. Off-screen people became furniture, and the
+            // world stopped existing outside the current scene. Their last recorded
+            // state IS where they are: absent evidence they moved, a person stays
+            // where the story left them. Carrying it makes the ledger a live map of
+            // the whole cast instead of a spotlight on six of them — and it invents
+            // nothing, which is the only reason it is allowed.
+            const state = _clip(entry && entry.state, 90);
+            const asOf = (entry && typeof entry._t === 'number') ? entry._t : null;
+            let s = name;
+            if (core) s += ' \u2014 ' + core;
+            if (state) s += ' | last seen' + (asOf !== null ? ' (turn ' + asOf + ')' : '') + ': ' + state;
+            return s;
         }).filter(Boolean);
-        if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen — they have their own lives and can re-enter the story whenever it fits naturally; bring them back when the moment calls for it, and keep each true to who they are: ' + items.join('; ') + '.';
+        if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen \u2014 the story continues around them. "last seen" is where the story left each one; absent something that moved them, that is still where they are and what they are doing, and time has passed since. Use it to keep the world alive off-screen and to bring anyone back when the moment calls for it, true to who they are: ' + items.join('; ') + '.';
     }
 
     if (blocks.length === 0 && !rosterLine) return '';

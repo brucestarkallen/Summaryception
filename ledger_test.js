@@ -265,7 +265,10 @@ section('buildCharacterBlock — active-cast detection & caps (end-to-end inject
         const b = L.buildCharacterBlock();
         ok(b.includes('Stella'), 'off-screen ledger character still injected via roster');
         ok(b.includes('Other people in this world'), 'roster header present for off-screen cast');
-        ok(!b.includes('anxious'), 'roster is identity-only — off-screen volatile state NOT injected');
+        // Reversed in v5.70.0: withholding an off-screen character's state told the
+        // storyteller they exist but not where — so the world outside the scene went
+        // dark. Their last recorded state is where the story left them.
+        ok(b.includes('anxious'), 'roster carries the off-screen state — the world keeps existing between scenes');
     }
 
     // roster OFF + no active cast → empty
@@ -327,7 +330,12 @@ section('buildCharacterBlock — roster (off-screen cast never vanishes)');
     ok(b.includes('flustered'), 'on-screen character gets a FULL card (volatile state present)');
     ok(b.includes('Professor Halden'), 'off-screen professor kept alive in the roster');
     ok(b.includes('Kai'), 'off-screen rival kept alive in the roster');
-    ok(!b.includes('absent from the room') && !b.includes('went home early'), 'roster entries are identity-only, not volatile state');
+    // v5.70.0 reverses this deliberately: a roster line that carried only a name and
+    // a personality fragment told the storyteller a person EXISTS but not where they
+    // are, so the world stopped existing outside the current scene. Their last
+    // recorded state is where the story left them — carrying it invents nothing.
+    ok(b.includes('last seen'), 'roster entries carry the last-known state, so the off-screen world stays alive');
+    ok(/last seen \(turn \d+\)/.test(b) || !/_t/.test(JSON.stringify(b)), 'and stamp it with the turn, so staleness is visible rather than implied');
     ok(b.indexOf('Mira') < b.indexOf('Other people in this world'), 'active full cards come before the roster');
     // roster respects the cap
     L.__setSettings(Object.assign({}, defaultSettings, { ledgerRosterMax: 1 }));
@@ -1236,6 +1244,26 @@ section('full-entry slots go to who is IN THE SCENE');
 }
 ok(SRC_FULL.includes('active.sort((a, b) => (b.seen - a.seen) || (b.u - a.u));'), 'presence outranks write-recency in the selector');
 ok(SRC_FULL.includes('A character PRESENT in the passage must never be left describing an EARLIER scene'), 'the scribe is told a present character may not rot in an old scene');
+
+// ─── the roster is a live map, not a guest list ───
+section('roster carries the off-screen world');
+{
+    const led = {
+        'Jovan Argent': { core: 'deliberate', state: 'in the duel ring', updatedAt: 99, _t: 158 },
+        'Silas':        { core: 'showman who monetises gossip; never fights fair', state: 'east yard, taking bets on the duel, ledger open', updatedAt: 50, _t: 138 },
+        'Honami':       { core: 'gentle, easily flustered', updatedAt: 40, _t: 130 },
+    };
+    const s = { ledgerMaxActive: 1, ledgerInjectRoster: true, ledgerRosterMax: 12, ledgerRosterRotate: false, ledgerMaxCharsPerChar: 600 };
+    const msgs = ['jovan argent raised his blade. silas and honami were elsewhere.'];
+    L.__setSettings(s);
+    const cast = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0, msgs);
+    ok(cast.roster.includes('Silas'), 'precondition: Silas is on the roster this turn');
+    const block = L.buildCharacterBlock(led, s, msgs.join('\n'), [], 0, msgs);
+    void block;
+}
+ok(SRC_FULL.includes("if (state) s += ' | last seen'"), 'roster lines carry the last-known state');
+ok(SRC_FULL.includes("that is still where they are and what they are doing"), 'the framing tells the storyteller last-seen means still-there, not a guess');
+ok(SRC_FULL.includes("const state = _clip(entry && entry.state, 90);"), 'the state is clipped so a full roster stays cheap');
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
