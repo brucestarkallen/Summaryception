@@ -251,7 +251,14 @@ section('buildCharacterBlock — active-cast detection & caps (end-to-end inject
     L.__setSettings(s2);
     const capped = L.buildCharacterBlock();
     const hasStella = capped.includes('Stella'), hasAlexia = capped.includes('Alexia');
-    ok((hasStella ? 1 : 0) + (hasAlexia ? 1 : 0) === 1, 'maxActive=1 injects exactly one character');
+    // v5.71.0: maxActive caps FULL entries, not existence. Exactly one full entry
+    // (only full entries carry the "Nature:" field), but BOTH on-screen characters
+    // still reach the storyteller — the other as a compact entry. The old assertion
+    // measured the block text and so encoded the bug: a character in the room
+    // vanishing entirely once the cap was reached.
+    ok((capped.match(/Nature:/g) || []).length === 1, 'maxActive=1 gives exactly one FULL entry');
+    ok(hasStella && hasAlexia, 'but BOTH on-screen characters still reach the storyteller — nobody in the room is erased by the cap');
+    ok(capped.includes('ALSO PRESENT in this scene'), 'the overflow character arrives under the compact framing');
 
     // disabled → empty
     L.__setSettings(Object.assign({}, defaultSettings, { ledgerEnabled: false }));
@@ -857,13 +864,18 @@ section('computeLedgerCast — panel mirrors injection by construction');
     const cast = L.computeLedgerCast(led, s, recent, [], 0);
     ok(cast.shown.length === 2 && cast.shown[0].name === 'Jovan' && cast.shown[1].name === 'Claire', 'on-screen full entries: recency order, capped');
     ok(cast.roster.length === 2, 'roster: capped slice of the off-screen');
-    ok(cast.roster.includes('Stella'), 'on-screen overflow (Stella, beyond maxActive) falls to the roster line');
-    ok(cast.out.length === 6 - 2 - 2, 'out = everyone not injected this turn');
+    // v5.71.0: on-screen overflow no longer falls to a bare roster line — it gets a
+    // COMPACT entry. A person standing in the scene is never reduced to a name.
+    ok(cast.compact.some(x => x.name === 'Stella'), 'on-screen overflow (Stella, beyond maxActive) gets a COMPACT entry, not a bare name');
+    ok(!cast.roster.includes('Stella'), 'and is not demoted to the off-screen roster while she is in the room');
+    ok(!cast.out.includes('Stella'), 'nobody on screen can land in "not injected"');
+    ok(cast.out.every(n => !cast.roster.includes(n)), 'out and roster never overlap');
     ok(!cast.out.includes('Jovan') && !cast.out.includes('Claire'), 'injected never in out');
     const pinned = L.computeLedgerCast(led, s, recent, ['Emilia'], 0);
     ok(pinned.roster.includes('Emilia'), 'pins ride the roster ahead of rotation');
     const noRoster = L.computeLedgerCast(led, { ...s, ledgerInjectRoster: false }, recent, [], 0);
-    ok(noRoster.roster.length === 0 && noRoster.out.length === 4, 'roster off: only on-screen injected');
+    ok(noRoster.roster.length === 0, 'roster off: no off-screen identity lines');
+    ok(noRoster.shown.concat(noRoster.compact).some(x => x.name === 'Stella'), 'roster off still never drops someone who is on screen');
     const empty = L.computeLedgerCast({}, s, recent, [], 0);
     ok(empty.shown.length === 0 && empty.roster.length === 0 && empty.out.length === 0, 'empty ledger -> empty cast');
 }
@@ -1254,7 +1266,7 @@ section('roster carries the off-screen world');
         'Honami':       { core: 'gentle, easily flustered', updatedAt: 40, _t: 130 },
     };
     const s = { ledgerMaxActive: 1, ledgerInjectRoster: true, ledgerRosterMax: 12, ledgerRosterRotate: false, ledgerMaxCharsPerChar: 600 };
-    const msgs = ['jovan argent raised his blade. silas and honami were elsewhere.'];
+    const msgs = ['jovan argent raised his blade. the others were elsewhere.'];   // Silas/Honami genuinely off screen
     L.__setSettings(s);
     const cast = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0, msgs);
     ok(cast.roster.includes('Silas'), 'precondition: Silas is on the roster this turn');
@@ -1264,6 +1276,27 @@ section('roster carries the off-screen world');
 ok(SRC_FULL.includes("if (state) s += ' | last seen'"), 'roster lines carry the last-known state');
 ok(SRC_FULL.includes("that is still where they are and what they are doing"), 'the framing tells the storyteller last-seen means still-there, not a guess');
 ok(SRC_FULL.includes("const state = _clip(entry && entry.state, 90);"), 'the state is clipped so a full roster stays cheap');
+
+// ─── nobody on screen is ever reduced to a name ───
+section('anti-bias: the cap bounds cost, not existence');
+{
+    const mk = (u) => ({ core: 'x', state: 'doing something', updatedAt: u });
+    const led = { A1: mk(9), B2: mk(8), C3: mk(7), D4: mk(6), E5: mk(5), F6: mk(4), Claire: mk(3), Headmaster: mk(2) };
+    const s = { ledgerMaxActive: 6, ledgerInjectRoster: true, ledgerRosterMax: 12, ledgerRosterRotate: false };
+    const msgs = ['a1 b2 c3 d4 e5 f6 claire headmaster are all in the hall together.'];
+    const cast = L.computeLedgerCast(led, s, msgs[0], [], 0, msgs);
+    ok(cast.shown.length === 6, 'the cap still bounds the expensive full entries');
+    ok(cast.compact.length === 2, 'the two beyond the cap get compact entries');
+    const injected = cast.shown.concat(cast.compact).map(x => x.name);
+    ok(injected.includes('Claire') && injected.includes('Headmaster'), 'THE FIX: the sister and the headmaster are in the room, so they are injected');
+    ok(cast.out.length === 0, 'nobody present is left out entirely');
+    ok(cast.roster.length === 0, 'and nobody present is demoted to the off-screen roster');
+    // Pins are the only signal of IMPORTANCE the system has — the user's own.
+    const pinned = L.computeLedgerCast(led, s, msgs[0], ['Claire'], 0, msgs);
+    ok(pinned.shown.map(x => x.name).includes('Claire'), 'a pinned character on screen takes a FULL slot ahead of the recency race');
+}
+ok(SRC_FULL.includes("ALSO PRESENT in this scene"), 'the compact tier reaches the storyteller with its own framing');
+ok(SRC_FULL.includes('res.compact = active.slice(maxActive);'), 'overflow becomes compact, never nothing');
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

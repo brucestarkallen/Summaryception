@@ -4400,7 +4400,7 @@ function toggleLedgerPin(name) {
 //   out    — in the ledger, NOT injected this turn
 function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs) {
     const names = Object.keys(ledger || {});
-    const res = { shown: [], roster: [], out: [] };
+    const res = { shown: [], compact: [], roster: [], out: [] };
     if (!names.length) return res;
     const ambiguous = _ambiguousTokens(names);
     const active = [];
@@ -4431,8 +4431,22 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
     // last appearance inverts it: present -> injected -> written -> updated.
     active.sort((a, b) => (b.seen - a.seen) || (b.u - a.u));
     const maxActive = Math.max(1, s.ledgerMaxActive ?? 6);
+    // Pins are the user's own answer to "who matters in THIS story". Nothing else in
+    // the system knows that a sister or a headmaster outranks a classmate who
+    // happened to speak last, so a pinned character who is on screen takes a full
+    // slot ahead of the recency race.
+    const pinLower = new Set((pins || []).map(p => String(p).toLowerCase()));
+    active.sort((a, b) => (pinLower.has(b.name.toLowerCase()) ? 1 : 0) - (pinLower.has(a.name.toLowerCase()) ? 1 : 0));
     res.shown = active.slice(0, maxActive);
-    const shownNames = new Set(res.shown.map(a => a.name));
+    // THE ANTI-BIAS TIER. Six full entries and a bare name for everyone else made the
+    // ledger cause the very forgetting it exists to prevent: the storyteller wrote the
+    // six it was handed and the rest of the room evaporated — a best friend, a sister,
+    // a headmaster standing right there reduced to a word. Anyone ON SCREEN past the
+    // cap now gets a COMPACT entry (who they are + what they are doing) instead of a
+    // name. The cap still bounds the expensive full entries; it no longer decides who
+    // exists.
+    res.compact = active.slice(maxActive);
+    const shownNames = new Set(res.shown.concat(res.compact).map(a => a.name));
     if (s.ledgerInjectRoster !== false) {
         const rosterCap = Math.max(0, s.ledgerRosterMax ?? 12);
         const offscreen = names
@@ -4499,6 +4513,30 @@ function buildCharacterBlock() {
     // contradicting them. Identity only — no volatile state — so it stays cheap
     // enough to carry the whole cast. In an academy where no one should vanish, this
     // is what keeps the long-absent professor or classmate a real, returnable person.
+    // On screen, past the full-entry cap: who they are and what they are doing. Never
+    // a bare name — a person standing in the scene the storyteller cannot see is how
+    // the room empties.
+    let compactLine = '';
+    if (cast.compact && cast.compact.length) {
+        const _clipC = (txt, max) => {
+            let t = (typeof txt === 'string') ? txt.trim().replace(/\s+/g, ' ') : '';
+            if (!t) return '';
+            const cut = t.search(/[.;]\s/);
+            if (cut > 0) t = t.slice(0, cut);
+            if (t.length > max) t = t.slice(0, max - 1).replace(/\s+\S*$/, '').trimEnd() + '\u2026';
+            return t;
+        };
+        const citems = cast.compact.map(({ name, entry }) => {
+            const core = _clipC(entry && entry.core, 90);
+            const state = _clipC(entry && entry.state, 90);
+            let s2 = name;
+            if (core) s2 += ' \u2014 ' + core;
+            if (state) s2 += ' | now: ' + state;
+            return s2;
+        }).filter(Boolean);
+        if (citems.length) compactLine = 'ALSO PRESENT in this scene \u2014 they are here and must not vanish from it; give them presence when the moment touches them: ' + citems.join('; ') + '.';
+    }
+
     let rosterLine = '';
     if (s.ledgerInjectRoster !== false) {
         const picked = cast.roster;
@@ -4532,9 +4570,10 @@ function buildCharacterBlock() {
         if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen \u2014 the story continues around them. "last seen" is where the story left each one; absent something that moved them, that is still where they are and what they are doing, and time has passed since. Use it to keep the world alive off-screen and to bring anyone back when the moment calls for it, true to who they are: ' + items.join('; ') + '.';
     }
 
-    if (blocks.length === 0 && !rosterLine) return '';
+    if (blocks.length === 0 && !rosterLine && !compactLine) return '';
 
     let body = blocks.join('\n');
+    if (compactLine) body += (body ? '\n\n' : '') + compactLine;
     if (rosterLine) body += (body ? '\n\n' : '') + rosterLine;
 
     const tpl = s.ledgerInjectTemplate || '\n\n<characters>\n{{characters}}\n</characters>\n';
@@ -5297,13 +5336,14 @@ function renderLedger() {
         const cast = computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick, _panelMsgs);
         const statusOf = new Map();
         cast.shown.forEach(x => statusOf.set(x.name, 'full'));
+        (cast.compact || []).forEach(x => { if (!statusOf.has(x.name)) statusOf.set(x.name, 'compact'); });
         cast.roster.forEach(n => { if (!statusOf.has(n)) statusOf.set(n, 'roster'); });
-        const rank = { full: 0, roster: 1 };
+        const rank = { full: 0, compact: 1, roster: 2 };
         const entries = names
             .map(name => ({ name, entry: ledger[name], u: (ledger[name] && ledger[name].updatedAt) || 0, st: statusOf.get(name) || 'out' }))
             .sort((a, b) => ((rank[a.st] ?? 2) - (rank[b.st] ?? 2)) || (b.u - a.u));
         _ledgerOrder = entries.map(e => e.name);
-        const _nInj = cast.shown.length + cast.roster.length;
+        const _nInj = cast.shown.length + (cast.compact || []).length + cast.roster.length;
 
         const field = (label, val) => {
             if (val === undefined || val === null || !String(val).trim()) return '';
@@ -5340,12 +5380,14 @@ function renderLedger() {
                     ? `<div class="sc-ledger-fresh sc-fresh-lag">⚠ ${_behind} turn(s) not read yet — the next turn picks them up automatically.</div>`
                     : `<div class="sc-ledger-fresh sc-fresh-ok">✓ Current through turn ${_li} (the newest turn). Nothing pending.</div>`;
         } catch (_) { /* no chat loaded */ }
-        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full entr${cast.shown.length === 1 ? 'y' : 'ies'} (on screen) + ${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}.</div>`;
+        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full + ${(cast.compact || []).length} compact (all on screen) + ${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}. Nobody on screen is ever reduced to a name.</div>`;
         entries.forEach(({ name, entry, st }, i) => {
             // Badge = this turn's injection truth, straight from the shared selector.
             const badge = st === 'full'
                 ? '<span class="sc-ledger-badge">💉 injected — full entry (on screen)</span>'
-                : st === 'roster'
+                : st === 'compact'
+                    ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">💉 injected — on screen (compact: nature + now)</span>'
+                    : st === 'roster'
                     ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">🔁 injected — roster line</span>'
                     : '<span class="sc-ledger-badge sc-ledger-outbadge">⏸ not injected this turn</span>';
             const pinned = _pinnedSet.has(name.toLowerCase());
