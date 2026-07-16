@@ -860,7 +860,7 @@ section('computeLedgerCast — panel mirrors injection by construction');
     ok(empty.shown.length === 0 && empty.roster.length === 0 && empty.out.length === 0, 'empty ledger -> empty cast');
 }
 
-ok(SRC_FULL.split('computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick)').length >= 3, 'panel + injection (+ audit) all call the SAME selector with identical inputs — no duplicated selection logic');
+ok(SRC_FULL.split(/computeLedgerCast\(ledger, s, recentLower, getLedgerPins\(\), _rosterTick, /).length >= 4, 'panel + injection + audit all call the SAME selector with the same inputs incl. the per-message window — no duplicated selection logic');
 ok(SRC_FULL.includes('Injected this turn:'), 'panel header states the injection count');
 ok(SRC_FULL.includes('not injected this turn'), 'non-injected entries say so explicitly');
 
@@ -1207,6 +1207,35 @@ section('freshness indicator — no phantom backlog');
     ok(SRC_FULL.includes("const _behind = _range ? _turns.filter(t => t.index >= _range[0]).length : 0;"), 'it counts real assistant TURNS, not a message-index difference');
     ok(!SRC_FULL.includes('const _behind = (_latest >= 0 && _li < _latest) ? (_latest - _li) : 0;'), 'the index-arithmetic version that produced the phantom backlog is gone');
 }
+
+// ─── presence earns the slot (the "best friend went off page" death spiral) ───
+section('full-entry slots go to who is IN THE SCENE');
+{
+    const mk = (u) => ({ core: 'x', updatedAt: u });
+    // Lucien is standing right there in the newest message, but the scribe last wrote
+    // about him 20 turns ago, so his updatedAt is ancient.
+    const led = { Lucien: mk(10), Alexia: mk(90), Stella: mk(80), Silas: mk(70), Honami: mk(60), Emilia: mk(50), Claire: mk(40) };
+    const s = { ledgerMaxActive: 6, ledgerInjectRoster: true, ledgerRosterMax: 12, ledgerRosterRotate: false };
+    const msgs = [
+        'alexia stella silas honami emilia claire all watched from the rail.',
+        'lucien stepped up beside him for the duel.',
+    ];
+    const cast = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0, msgs);
+    const shown = cast.shown.map(x => x.name);
+    ok(shown[0] === 'Lucien', 'THE FIX: the character in the NEWEST message ranks first, however stale his entry');
+    ok(shown.includes('Lucien'), 'the best friend standing in the duel gets a FULL entry');
+    ok(!cast.roster.includes('Lucien'), 'he is not demoted to a bare roster line');
+    ok(cast.shown.length === 6, 'the cap still holds');
+    // Regression witness: without the per-message window the OLD behaviour returns,
+    // so this test cannot pass for free.
+    const oldWay = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0);
+    ok(oldWay.shown.map(x => x.name)[0] === 'Alexia', 'witness: ranking by updatedAt put the freshest-WRITTEN first');
+    ok(!oldWay.shown.map(x => x.name).includes('Lucien'), 'witness: and cut the friend who was actually present — the reported bug');
+    const tie = L.computeLedgerCast({ Ayla: mk(5), Bram: mk(9) }, { ledgerMaxActive: 1, ledgerInjectRoster: false }, 'ayla and bram are here', [], 0, ['ayla and bram are here']);
+    ok(tie.shown[0].name === 'Bram', 'equal presence -> the more recently updated wins (no arbitrary order)');
+}
+ok(SRC_FULL.includes('active.sort((a, b) => (b.seen - a.seen) || (b.u - a.u));'), 'presence outranks write-recency in the selector');
+ok(SRC_FULL.includes('A character PRESENT in the passage must never be left describing an EARLIER scene'), 'the scribe is told a present character may not rot in an old scene');
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
