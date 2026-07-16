@@ -4625,6 +4625,22 @@ function reindexAfterDeletion(store, D) {
     if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= D) {
         store.ledgerLiveIdx = store.ledgerLiveIdx - 1;   // keep the live pointer aligned after a deletion
     }
+    // The notes journal is indexed by turn like everything else, and v5.65.0 forgot
+    // to reindex it: every note sat one turn off the chat afterwards. Worse, the turn
+    // itself is GONE, so the note recording what it changed must go with it — and
+    // once it does, refolding IS the rewind. That is why a single deletion no longer
+    // needs a scribe replay: drop the dead turn's notes, shift the rest down, refold.
+    // (Base notes are carried-over snapshots of everything up to their turn, not a
+    // record of that turn, so they shift rather than vanish.)
+    if (Array.isArray(store.ledgerNotes)) {
+        store.ledgerNotes = store.ledgerNotes
+            .filter(n => !(n && typeof n.t === 'number' && n.t === D && !n.base))
+            .map(n => (n && typeof n.t === 'number' && n.t >= D) ? Object.assign({}, n, { t: n.t - 1 }) : n);
+        if (typeof store.ledgerNotesFrom === 'number' && store.ledgerNotesFrom > D) store.ledgerNotesFrom -= 1;
+        if (notesCover(store, (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : 0)) {
+            store.ledger = foldLedgerNotes(store.ledgerNotes, Infinity);   // exact, instant, zero model calls
+        }
+    }
     if (Array.isArray(store.continuityFlags)) {
         store.continuityFlags = store.continuityFlags.filter(f => {
             if (!f) return false;
@@ -4722,12 +4738,27 @@ function onMessageDeleted(deletedIndex) {
         updateInjection(true);       // active cast may have changed if a recent message went away
         try { updateUI(); } catch (_) {}
         if (_bulkTrim && delta > 1 && newLen > 0) {
-            // A bulk trim (more than one message removed) is a branch in disguise —
-            // auto-rewind the cumulative ledger from a checkpoint. A single-message
-            // deletion (delta === 1) skips this and stays INSTANT: no scribe call. Its
-            // one turn of lingering ledger content is negligible, and the live pass
-            // smooths recent turns on the next message anyway.
+            // A bulk trim is a branch in disguise. With notes this folds instantly;
+            // without them (history older than the notes base) it falls back.
             tryAutoRewindLedger(newLen - 1, 'trim').catch(() => {});
+        } else if (!_bulkTrim && newLen > 0) {
+            // SINGLE deletion. reindexAfterDeletion already dropped the dead turn's
+            // notes and refolded, so the ledger is ALREADY correct — the page no
+            // longer contains anything that turn contributed. Nothing to call.
+            //
+            // Before notes, a rewind meant an expensive scribe replay, so this case
+            // deliberately skipped it and left the deleted message's facts in the
+            // ledger "for one turn". They did not leave: the mismatch was only
+            // discovered on the next chat load, which then looked like a BRANCH and
+            // re-read everything. That is why deleting appeared to need a close and
+            // reopen, and why returning to a chat re-read a ledger that was current.
+            // Legacy chats (history predating the notes base) still need the fallback.
+            const _li = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : -1;
+            if (!notesCover(store, _li) && D >= 0 && D <= _li) {
+                tryAutoRewindLedger(Math.max(0, D - 1), 'delete').catch(() => {});
+            } else {
+                try { renderLedger(); } catch (_) { /* panel may be closed */ }
+            }
         }
     } catch (e) { log('onMessageDeleted error:', e); }
 }

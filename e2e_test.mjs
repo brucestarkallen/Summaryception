@@ -260,6 +260,21 @@ try {
         globalThis.__latency = 250;
     }
 
+    console.log('== 10. DELETE ONE MESSAGE: correct immediately, no reopen, no model call ==');
+    {
+        globalThis.__latency = 250;
+        const before = JSON.parse(JSON.stringify(store().ledger || {}));
+        const callsWere = calls.length;
+        const lenWas = chat.length;
+        void before;
+        chat.splice(chat.length - 1, 1);   // delete the newest message
+        await fire('MESSAGE_DELETED', lenWas - 1);
+        await sleep(1200);
+        ok(calls.length === callsWere, 'deleting one message cost ZERO model calls');
+        ok((store().ledgerNotes || []).every((n) => n.t < lenWas - 1 + 1), 'no note still points past the end of the chat');
+        ok(typeof store().ledgerLiveIdx === 'number' && store().ledgerLiveIdx < lenWas - 1, 'the pointer moved with the deletion — without needing a chat reload');
+    }
+
     console.log('== 9. BRANCH/DELETE now folds the notes — no model call at all ==');
     globalThis.__latency = 250;
     const notesLen = (store().ledgerNotes || []).length;

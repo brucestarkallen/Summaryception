@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering'];
@@ -50,7 +50,7 @@ return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
   __setChat:     (v)=>{ __chat = v; },
-  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
+  stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens,
   _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -1146,6 +1146,53 @@ ok(!/let _recallRemaining=0; let _lastRecallText=''; let _autoRecallBusy=false;/
 ok(SRC_FULL.indexOf('let _autoRecallBusy = false;') > 0 && SRC_FULL.indexOf('let _autoRecallBusy = false;') < SRC_FULL.indexOf('function _llmChannelBusy'), 'recall flag is DECLARED BEFORE the predicate that reads it — no temporal dead zone');
 ok(SRC_FULL.includes("if (_llmChannelBusy()) {\n        if (opts.silent) { log('auto-recall: channel busy — skipping this turn.'); return; }"), 'auto-recall skips a busy channel; manual recall explains itself');
 ok(SRC_FULL.includes("if(s.recallAuto && s.enabled && !_llmChannelBusy()){"), 'the auto-recall trigger checks the channel, not just its own flag');
+
+// ─── deleting one message: the notes ARE the rewind ───
+section('single deletion — notes reindexed, page refolded, no replay');
+{
+    const store = {
+        ledgerLiveIdx: 9, summarizedUpTo: -1, layers: [], ledgerNotesFrom: 0,
+        ledger: {},
+        ledgerNotes: [
+            { t: 3, name: 'Claire Argent', at: 1, core: 'guarded', state: 'corridor' },
+            { t: 5, name: 'Claire Argent', at: 2, state: 'the arch' },        // this turn gets deleted
+            { t: 7, name: 'Claire Argent', at: 3, threads: ['statement'] },
+        ],
+    };
+    L.__setStore(store);
+    L.reindexAfterDeletion(store, 5);
+    ok(!store.ledgerNotes.some(n => n.t === 5), "the deleted turn's own note is gone with it");
+    ok(store.ledgerNotes.some(n => n.t === 6 && Array.isArray(n.threads)), 'later notes shifted down by one — still aligned with the chat');
+    ok(store.ledgerNotes.some(n => n.t === 3 && n.core === 'guarded'), 'earlier notes untouched');
+    ok(store.ledgerLiveIdx === 8, 'the live pointer shifted with them');
+    ok(store.ledger['Claire Argent'].state === 'corridor', 'THE REWIND: Now reverted to before the deleted turn — instantly, with no model call');
+    ok(store.ledger['Claire Argent'].core === 'guarded', 'unrelated fields survive the deletion');
+    ok(JSON.stringify(store.ledger['Claire Argent'].threads) === '["statement"]', 'a later turn\'s contribution survives');
+}
+{
+    // Deleting a turn the ledger never read must change nothing but indices.
+    const store = {
+        ledgerLiveIdx: 4, summarizedUpTo: -1, layers: [], ledgerNotesFrom: 0, ledger: {},
+        ledgerNotes: [{ t: 3, name: 'Stella', at: 1, core: 'brash', state: 'in the hall' }],
+    };
+    L.__setStore(store);
+    L.reindexAfterDeletion(store, 9);
+    ok(store.ledger['Stella'] && store.ledger['Stella'].state === 'in the hall', 'deleting an un-read turn leaves the page intact');
+    ok(store.ledgerNotes[0].t === 3 && store.ledgerLiveIdx === 4, 'nothing shifts below the deletion point');
+}
+{
+    // A base note is a snapshot of everything up to its turn, not a record OF it.
+    const store = {
+        ledgerLiveIdx: 8, summarizedUpTo: -1, layers: [], ledgerNotesFrom: 5, ledger: {},
+        ledgerNotes: [{ t: 5, name: 'Silas', at: 1, base: true, core: 'showman' }],
+    };
+    L.__setStore(store);
+    L.reindexAfterDeletion(store, 5);
+    ok(store.ledgerNotes.length === 1 && store.ledgerNotes[0].t === 4, 'a base note shifts instead of vanishing — carried-over history is never lost');
+    ok(store.ledger['Silas'] && store.ledger['Silas'].core === 'showman', 'and its content survives');
+}
+ok(SRC_FULL.includes("} else if (!_bulkTrim && newLen > 0) {"), 'a single deletion is handled, not skipped');
+ok(!SRC_FULL.includes('deletion (delta === 1) skips this and stays INSTANT'), 'the obsolete "skip the rewind" rationale is gone');
 
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
