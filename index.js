@@ -2363,8 +2363,9 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
             changed++;
         }
     }
-    // The page is the materialized view; the notes are the history behind it. Only
-    // the LIVE page is journalled — a staged rebuild writes its own notes on swap.
+    // The page is the materialized view; the notes are the history behind it. Staged
+    // rebuild merges are NOT journalled here — they are journalled as one re-based
+    // note per character at swap time, where the rebuild's coverage is known.
     if (changed && !target) { try { appendLedgerNotes(deltas, atTurn); } catch (e) { log('appendLedgerNotes failed (non-fatal):', e); } }
     return changed;
 }
@@ -4965,7 +4966,38 @@ function onChatChanged() {
                     } else {
                         // Pointer already reached the target (completion raced the reload):
                         // finish the swap if a staged result is waiting.
-                        if (st.ledgerRebuild.staging && st.ledgerStaging && Object.keys(st.ledgerStaging).length > 0) st.ledger = st.ledgerStaging;
+                        if (st.ledgerRebuild.staging && st.ledgerStaging && Object.keys(st.ledgerStaging).length > 0) {
+                            // The staged page is a clean rebuild of HISTORY — but live passes
+                            // kept running while it worked, advancing both the page and the
+                            // journal to the newest turn. Assigning staging straight over the
+                            // page CLOBBERED all of that: the page snapped back to wherever the
+                            // rebuild ended while the notes still held the truth, so a card
+                            // could read fourteen turns staler than its own history view. That
+                            // is why rebuilding the ledger made things WORSE, and why it kept
+                            // coming back stale no matter how many times it was rebuilt.
+                            // Re-base the journal on the rebuild, then fold back everything the
+                            // rebuild did not cover. Newest value per field still wins, so the
+                            // clean history is kept AND nothing recent is lost.
+                            const _upTo = [st.ledgerRebuild.upTo, st.ledgerRebuild.endIdx, st.ledgerRebuild.cursor]
+                                .find(v => typeof v === 'number' && isFinite(v));
+                            const _at = (typeof _upTo === 'number') ? _upTo : -1;
+                            const _newer = (Array.isArray(st.ledgerNotes) ? st.ledgerNotes : [])
+                                .filter(n => n && typeof n.t === 'number' && n.t > _at);
+                            const _base = [];
+                            for (const [nm, e] of Object.entries(st.ledgerStaging)) {
+                                if (!e || typeof e !== 'object') continue;
+                                const note = { t: _at, name: nm, at: e.updatedAt || Date.now(), base: true };
+                                if (typeof e.core === 'string') note.core = e.core;
+                                if (typeof e.state === 'string') note.state = e.state;
+                                if (typeof e.arc === 'string') note.arc = e.arc;
+                                if (Array.isArray(e.threads)) note.threads = e.threads.slice();
+                                if (typeof e._a === 'number') note.a = e._a;
+                                _base.push(note);
+                            }
+                            st.ledgerNotes = _base.concat(_newer);
+                            st.ledgerNotesFrom = Math.max(0, _at);
+                            st.ledger = foldLedgerNotes(st.ledgerNotes, Infinity);
+                        }
                         st.ledgerStaging = null;
                         st.ledgerRebuild = null;
                     }

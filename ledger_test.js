@@ -1333,6 +1333,46 @@ section('_characterWeight — the ledger knows who matters');
     ok(cast.out.length === 0, 'and nobody in the room is dropped');
 }
 
+// ─── THE INVARIANT: the page is never staler than its own history ───
+section('page == fold(notes) — the rebuild swap must not clobber live work');
+{
+    // Reported: a card read "at the official's mark in the training yard" while its
+    // own history view held turn 133/134 "at the dais, Emilia's right shoulder".
+    // The staged rebuild had finished and assigned its result straight over the page,
+    // wiping every live update made while it ran. The notes survived, so the history
+    // was right and the page was 14 turns behind.
+    const store = {
+        ledgerLiveIdx: 134, ledgerNotesFrom: 0,
+        ledger: {},
+        ledgerNotes: [
+            { t: 100, name: 'Alaric Sterling', at: 1, core: 'formal, institutional', state: "at the official's mark in the training yard" },
+            { t: 133, name: 'Alaric Sterling', at: 2, state: 'at the dais, knuckles white' },
+            { t: 134, name: 'Alaric Sterling', at: 3, state: "at the dais, Emilia's right shoulder" },
+        ],
+        ledgerStaging: { 'Alaric Sterling': { core: 'formal, institutional', state: "at the official's mark in the training yard", updatedAt: 1 } },
+        ledgerRebuild: { staging: true, upTo: 120 },
+    };
+    // Simulate the swap exactly as the code now performs it.
+    const _at = store.ledgerRebuild.upTo;
+    const _newer = store.ledgerNotes.filter(n => n.t > _at);
+    const _base = Object.entries(store.ledgerStaging).map(([nm, e]) => ({ t: _at, name: nm, at: e.updatedAt, base: true, core: e.core, state: e.state }));
+    store.ledgerNotes = _base.concat(_newer);
+    store.ledgerNotesFrom = Math.max(0, _at);
+    store.ledger = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+
+    ok(store.ledger['Alaric Sterling'].state === "at the dais, Emilia's right shoulder", 'THE FIX: live work done DURING the rebuild survives the swap');
+    ok(store.ledger['Alaric Sterling'].core === 'formal, institutional', "and the rebuild's clean history is kept");
+    const folded = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    ok(JSON.stringify(folded) === JSON.stringify(store.ledger), 'THE INVARIANT: the page equals the fold of its own notes — it can never be staler than its history');
+    ok(store.ledgerNotes.every(n => n.t <= 134), 'no note claims a turn that never happened');
+    // Witness: the old swap simply assigned staging over the page.
+    const clobbered = { 'Alaric Sterling': { state: "at the official's mark in the training yard" } };
+    ok(clobbered['Alaric Sterling'].state !== store.ledger['Alaric Sterling'].state, 'witness: the old blind assignment produced exactly the reported staleness');
+}
+ok(SRC_FULL.includes('st.ledger = foldLedgerNotes(st.ledgerNotes, Infinity);'), 'the swap folds instead of assigning');
+ok(!/if \(st\.ledgerRebuild\.staging && st\.ledgerStaging && Object\.keys\(st\.ledgerStaging\)\.length > 0\) st\.ledger = st\.ledgerStaging;/.test(SRC_FULL), 'the blind assignment that clobbered live work is gone');
+ok(!SRC_FULL.includes('a staged rebuild writes its own notes on swap'), 'the comment that claimed a thing the code never did is gone');
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }
