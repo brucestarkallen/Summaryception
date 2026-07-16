@@ -1467,6 +1467,33 @@ section('THE SWAP — staged page installs WITH its journal (production-shaped s
     ok(store.ledger['Silas'].state === 'copilot-corrected: at the gates', 'an external live-page edit made during the rebuild survives the swap');
     ok(store.ledgerNotes.some(n => n.ext && n.state === 'copilot-corrected: at the gates' && n.t <= 134), 'and is journaled (clamped to the swap pointer) so later folds keep it');
 }
+{
+    // THE GUARD: a rebuild RESUMED from persisted pre-journal state reaches the
+    // swap with the old journal NOT covering the pointer (notesFrom far past
+    // liveIdx — the bulk-trim / legacy-resume shape). There, fold(oldNotes) is
+    // not the served baseline, so a page-vs-fold diff cannot isolate edits: a
+    // page-only entry is indistinguishable from abandoned-timeline residue.
+    // Adoption must be SKIPPED — journaling that "diff" at t<=upTo would embed
+    // the doomed page in the rebuilt journal, and every later fold would honor it.
+    const store = {
+        ledgerLiveIdx: 5, ledgerNotesFrom: 99,
+        ledger: {
+            'Claire Argent': { core: 'STALE core from the abandoned timeline', state: 'STALE state', updatedAt: 1 },
+            'Ghost of the old timeline': { core: 'exists only on the doomed page', state: 'never journaled', updatedAt: 1 },
+        },
+        ledgerNotes: [ { t: 99, name: 'Claire Argent', at: 1, base: true, core: 'STALE core from the abandoned timeline', state: 'STALE state' } ],
+        ledgerStaging:      { 'Claire Argent': { core: 'rebuilt: grey-eyed sentinel', state: 'on the platform', _t: 5, updatedAt: 7 } },
+        ledgerStagingNotes: [ { t: 1, name: 'Claire Argent', at: 7, core: 'rebuilt: grey-eyed sentinel', state: 'waiting by the arch' },
+                              { t: 5, name: 'Claire Argent', at: 8, state: 'on the platform' } ],
+        ledgerRebuild: { target: 5, staging: true },
+    };
+    L.__setStore(store);
+    ok(L._swapStagedLedgerIn(store) === true, 'the uncovered-journal swap still installs the staged page');
+    ok(!('Ghost of the old timeline' in store.ledger), 'THE GUARD: nothing from the doomed page is adopted when the old journal cannot vouch for it');
+    ok(store.ledgerNotes.every(n => !String(n.core || '').includes('STALE') && !String(n.state || '').includes('STALE') && n.name !== 'Ghost of the old timeline'), 'the rebuilt journal contains not one note from the abandoned timeline');
+    eq(store.ledger['Claire Argent'].state, 'on the platform', 'the rebuilt truth is what serves');
+    ok(JSON.stringify(L.foldLedgerNotes(store.ledgerNotes, Infinity)) === JSON.stringify(store.ledger), 'invariant page == fold(notes) holds through the guarded swap');
+}
 ok(!/ledgerRebuild\.(upTo|endIdx|cursor)/.test(SRC_FULL), 'the dead-field rebase is gone — nothing reads ledgerRebuild.upTo/.endIdx/.cursor (fields nothing ever wrote)');
 ok(!SRC_FULL.includes('_st.ledger = _st.ledgerStaging;'), 'the in-session blind assignment is gone — the swap goes through _swapStagedLedgerIn');
 ok((SRC_FULL.match(/_swapStagedLedgerIn\(/g) || []).length >= 3, 'both swap sites (in-session + reload race) call the one real swap function');
@@ -1591,7 +1618,7 @@ section('journal hygiene — fallback rewinds cannot leave ghost notes');
 ok(SRC_FULL.includes('_st0.ledgerNotes = [];'), 'turn-0 clear: the journal clears WITH the page (ghosts re-materialized the abandoned ledger)');
 ok(SRC_FULL.includes('store.ledgerNotes = _baseNotesFromPage(store.ledger, ckpt.atTurn);'), 'checkpoint restore: the journal is rebased on the restored page');
 ok(SRC_FULL.includes('cur.ledgerNotes = _baseNotesFromPage(cur.ledger, targetTurn);') && SRC_FULL.includes('cur.ledgerNotesFrom = targetTurn;'), 'staged rebuild entry: the journal is re-based to the serving page — a mid-rebuild fold reproduces the page by construction, and ghost notes cannot exist to paint back');
-ok(/_swapStagedLedgerIn[\s\S]{0,900}adoptExternalLedgerEdits\(st\);/.test(SRC_FULL), 'rebuild swap: external page edits are adopted before the final fold');
+ok(SRC_FULL.includes("if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {"), 'rebuild swap: external page edits are adopted before the final fold — but ONLY when the old journal covers the swap horizon (an uncovered diff is the whole doomed page, not an edit)');
 ok(SRC_FULL.includes('try { adoptExternalLedgerEdits(store); } catch (e)'), 'scribe merge: durable early adoption before new deltas land');
 ok((SRC_FULL.match(/adoptExternalLedgerEdits\(store\);/g) || []).length >= 3, 'rewind, message-deletion refold, and merge all reconcile first');
 ok(SRC_FULL.includes("store.ledgerNotes.push({ t: _t, name: key, at: Date.now(), a: stampAt });"), 'the audit stamp rides the journal (page-only stamps forced endless re-audits)');

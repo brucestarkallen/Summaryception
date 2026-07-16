@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.75.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.75.1';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -2461,7 +2461,7 @@ function _swapStagedLedgerIn(st) {
     // so the "diff" is the ENTIRE pre-rebuild page — adopting it would journal the very
     // timeline the rebuild just discarded, and any later rewind could resurrect it.
     let extNotes = [];
-    if (Array.isArray(st.ledgerNotes)) {
+    if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {
         const _pre = st.ledgerNotes.length;
         try { adoptExternalLedgerEdits(st); } catch (e) { log('swap: external-edit adoption failed (non-fatal):', e); }
         extNotes = st.ledgerNotes.slice(_pre).map(n => Object.assign({}, n, { t: Math.min((typeof n.t === 'number' && isFinite(n.t)) ? n.t : upTo, upTo) }));
@@ -7638,7 +7638,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the staged-rebuild swap now installs the page WITH its journal (the rebuild journals its own reads; one real swap function serves both completion paths), so a rebuild no longer self-undoes at the first fold or rewind after it; the old journal is re-based to the serving page at rebuild start so only genuine external edits are carried across; audit corrections land at each entry's own turn, so the roster's "last seen" and branch decontamination are never falsified by an audit. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the staged-rebuild swap now installs the page WITH its journal (the rebuild journals its own reads; one real swap function serves both completion paths), so a rebuild no longer self-undoes at the first fold or rewind after it; the old journal is re-based to the serving page at rebuild start so only genuine external edits are carried across (and when a resumed legacy rebuild reaches the swap with a journal that cannot vouch for the page, adoption is skipped rather than journaling the doomed page as "edits"); audit corrections land at each entry's own turn, so the roster's "last seen" and branch decontamination are never falsified by an audit. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
