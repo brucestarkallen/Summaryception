@@ -1816,6 +1816,18 @@ section('memory transplant — export, survive an external editor, import into a
     ok(/sc_tp_import[\s\S]*?continuityFlags = \[\]/.test(SRC_FULL), 'import: stale continuity state cleared');
     ok(/sc_tp_import[\s\S]*?recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'import: summarization cursor derives from range-less snippets (fresh)');
     ok(SRC_FULL.includes("fetch(new URL('MEMORY_AUDITOR.md', import.meta.url))"), 'the auditor brief ships with the extension and downloads from its own folder');
+    // The brief's zero-loss compression contract (ENI 8.8 ported): the 8 ordered
+    // techniques, each guardrailed, and a verification that tests SUBSTANCE, not
+    // entry counts. A one-line "tighten wording" produces detail-losing mush.
+    {
+        const brief = require('fs').readFileSync(require('path').join(__dirname, 'MEMORY_AUDITOR.md'), 'utf8');
+        ok(/SEQUENTIAL AGGREGATION[\s\S]*REFERENCE STRIPPING[\s\S]*DIALOGUE SURROUND[\s\S]*EMOTIONAL TEXTURE[\s\S]*SPATIAL\/STAGING[\s\S]*CAUSAL CHAIN NOTATION[\s\S]*REDUNDANT RESTATEMENT[\s\S]*NOTATION COMPRESSION/.test(brief), 'brief: all 8 compression techniques, in the ENI order');
+        ok((brief.match(/Guardrail:/g) || []).length >= 6, 'brief: the techniques carry their guardrails — the KEEP conditions ship with the CUT permissions');
+        ok(brief.includes('4-Question Test'), 'brief: every sentence faces the 4-question test before it dies');
+        ok(brief.includes('ZERO-LOSS VERIFICATION') && brief.includes('"same entry count"\nis the WRONG test'.replace('\n', String.fromCharCode(10))), 'brief: verification tests substance, not counts');
+        ok(brief.includes('zero loss wins'), 'brief: on conflict, zero loss beats smaller');
+        ok(brief.includes('marker lines are untouchable'), 'brief: compression can never eat the import markers');
+    }
 }
 
 section('notepad — one document, two views (panel + full-screen editor)');

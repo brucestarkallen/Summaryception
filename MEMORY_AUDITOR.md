@@ -131,8 +131,72 @@ Two layers, one manifest, NEVER executed without approval:
   flag. If knowledge from a texture moment feeds a spine arc, it is SUPPORT.
   "Keep it" from the author = kept, zero pushback — attachment IS value.
 
-*optimize — tighten wording only. 100% of substance survives in fewer tokens;
-scaffolding phrases and restated headers die. Touches words, never story.
+*optimize — bulletproof token reduction with ZERO information loss. The goal
+is not "smaller file"; it is "smaller file with nothing gone". If both cannot
+be achieved, zero loss wins — a longer file with every detail beats a tighter
+one missing a dialogue beat the author wanted. Cut only filler, redundancy,
+and loose expression. PRESERVE unconditionally: every action, every name,
+every number (ages, counts, distances, dates, money), every causal chain,
+every relationship shift, every revelation/leverage/setup, every dialogue
+line that shifted power or is referenced later, every mature content beat
+(never euphemize), every named system WITH its mechanism.
+
+The Human Memory Test governs every borderline cut: telling this story to a
+friend from memory, would you include it? Moments that made a character FEEL
+something, lines that shifted power, HOW someone won → never cut. Logistics,
+staging, transitions → cut freely.
+
+The 4-Question Test on EVERY sentence before it dies:
+1. Removed → could the Storyteller now generate something contradictory? KEEP.
+2. Removed → vague where specificity matters? KEEP.
+3. Removed → does a later entry stop making sense? KEEP.
+4. Removed → nothing about Storyteller behavior changes? CUT.
+
+The techniques, applied IN THIS ORDER (each runs on the previous one's output;
+each has a guardrail — when the guardrail fires, the content stays):
+
+1. SEQUENTIAL AGGREGATION — consecutive snippets sharing actor, place, and
+   time-window with no load-bearing beat between them merge into one entry
+   keeping all facts and the combined span. Guardrail: a snippet containing a
+   power-shifting line, a relationship shift, a revelation, a causal link, or
+   a growth milestone stays as its own entry — only the truly routine merge.
+2. REFERENCE STRIPPING — the ledger holds identity; snippets hold action.
+   Strip identity re-descriptions (age, rank, traits, appearance) from
+   snippets when the ledger already carries them. Guardrail: a character's
+   first appearance keeps its introduction.
+3. DIALOGUE SURROUND COMPRESSION — keep the load-bearing line VERBATIM;
+   compress the staging exchange around it into one action beat. Load-bearing
+   means: shifted power, established leverage, caused a visible reaction, is
+   referenced later, or revealed information.
+4. EMOTIONAL TEXTURE COMPRESSION — long emotional prose becomes label +
+   cause ("felt dread as he walked away — third time"). Guardrail: a FIRST-
+   time emotion, or one contradicting the character's CORE plot-relevantly,
+   keeps its full texture.
+5. SPATIAL/STAGING COMPRESSION — travel becomes origin → destination +
+   anything significant en route. Guardrail: an encounter, observation, or
+   realization during the travel stays as its own beat.
+6. CAUSAL CHAIN NOTATION — multi-step strategies compress to arrow notation
+   keeping every concrete lever: "scouts→blocked pass→burning depot
+   (urgency)→archer bait→cavalry flank". Guardrail: the mechanism of each
+   step must remain inferable; "plan→executed→won" is loss, not compression.
+7. REDUNDANT RESTATEMENT STRIPPING — if a ledger field restates what a
+   snippet already records (or vice versa), the source of truth keeps it and
+   the restatement keeps only what the other could not convey.
+8. NOTATION COMPRESSION — last, pure notation tightening with zero
+   information content ("she thought about it for a moment" prose, double-
+   framing, restated headers, filler transitions). Guardrail: never introduce
+   parsing ambiguity; marker lines are untouchable.
+
+ZERO-LOSS VERIFICATION (mandatory, after all techniques — "same entry count"
+is the WRONG test, aggregation reduces count by design). Verify instead:
+every load-bearing dialogue line present verbatim; every relationship shift
+still captured; every causal chain's mechanism inferable; every named
+character still appears; every scale-defining number present; every
+revelation/leverage/setup described; every mature beat present un-euphemized;
+the causal web still lets a reader reconstruct what happened, why, and what
+it changed. ANY check fails → the compression was not smart enough: restore
+the missing content and re-compress without losing it. Report token count
+before/after and the verification result as scan evidence.
 
 *brief — write a short handoff paragraph (in chat, not the file) telling a
 fresh Storyteller where the story stands and what is in motion, for use as the
