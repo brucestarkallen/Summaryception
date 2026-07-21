@@ -30,7 +30,7 @@ const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
 const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
-    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches'];
+    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -69,6 +69,7 @@ return {
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
+  _locateSnippetForOp, _applyInverseOp,
 };
 `;
 const L = new Function(sandbox)();
@@ -1871,6 +1872,68 @@ section('export tail — the transplant covers the verbatim window, the session 
     ok(h.includes('Object.assign({}, store, { layers:'), 'export: fresh snippets ride a COPIED view, never the store');
     ok(h.includes('export aborted so you never get a file missing its newest chapter'), 'export: a failed batch aborts loudly — no half-true file that LOOKS complete');
     ok(h.includes('isSummarizing || _llmChannelBusy()') && h.includes('isSummarizing = true;') && h.includes('finally { isSummarizing = false;'), 'export: takes and releases the summarizer channel like every other pass');
+}
+
+section('continuity editor — content is the identity: Apply and Undo never write blind');
+{
+    const S = (t, d) => { const o = { text: t }; if (d) o.detail = d; return o; };
+    const mk = () => ({ layers: [ [S('alpha'), S('bravo', 'detail-b'), S('charlie')], [S('season one')] ], notepad: 'canon' });
+
+    // happy path: id still true
+    let st = mk();
+    let hit = L._locateSnippetForOp(st, { op: 'edit_snippet', expect: 'bravo', layer: 0, idx: 1 });
+    ok(hit && hit.obj === st.layers[0][1] && hit.idx === 1, 'locate: fast path hits when the reviewed content is still at the id');
+
+    // THE APPLY-ALL SHIFT: an earlier delete moved every later index — the old
+    // code re-resolving by id would edit the WRONG snippet; content rescues.
+    st = mk();
+    st.layers[0].splice(0, 1);   // 'alpha' deleted; 'bravo' now idx 0, 'charlie' idx 1
+    hit = L._locateSnippetForOp(st, { op: 'edit_snippet', expect: 'charlie', layer: 0, idx: 2 });
+    ok(hit && hit.obj.text === 'charlie' && hit.idx === 1, 'locate: index shift is rescued by content — the edit lands on WHAT WAS REVIEWED');
+
+    // THE PROMOTION SPLICE: reviewed snippet left layer 0 entirely (merged away)
+    st = mk();
+    st.layers[0].splice(1, 1);   // 'bravo' promoted/merged out of existence
+    ok(L._locateSnippetForOp(st, { op: 'edit_snippet', expect: 'bravo', layer: 0, idx: 1 }) === null, 'locate: content gone → null → the card refuses instead of writing a dead object under a green toast');
+
+    // ambiguity refuses
+    st = mk(); st.layers[1].push(S('bravo'));
+    ok(L._locateSnippetForOp(st, { op: 'edit_snippet', expect: 'bravo' }) === null, 'locate: two identical candidates → refuse, never guess');
+
+    // detail ops match on the DETAIL field
+    st = mk();
+    hit = L._locateSnippetForOp(st, { op: 'edit_detail', expect: 'detail-b', layer: 0, idx: 1 });
+    ok(hit && hit.obj.text === 'bravo', 'locate: detail ops key on the detail field');
+
+    // ── inverses ──
+    // undo an edit: find what we wrote, restore what was there
+    st = mk(); st.layers[0][1].text = 'bravo EDITED';
+    ok(L._applyInverseOp(st, { kind: 'restore', field: 'text', was: 'bravo', now: 'bravo EDITED', layer: 0, idx: 1 }) === true && st.layers[0][1].text === 'bravo', 'inverse: edit restored by content');
+    // CAS skip: the value changed AGAIN after the edit — blind restore would overwrite newer truth
+    st = mk(); st.layers[0][1].text = 'bravo EDITED TWICE';
+    ok(L._applyInverseOp(st, { kind: 'restore', field: 'text', was: 'bravo', now: 'bravo EDITED', layer: 0, idx: 1 }) === false && st.layers[0][1].text === 'bravo EDITED TWICE', 'inverse: changed-again target is SKIPPED, newer truth survives');
+    // undo a delete: the exact object returns, detail and all
+    st = mk(); const gone = st.layers[0].splice(1, 1)[0];
+    ok(L._applyInverseOp(st, { kind: 'insert', layer: 0, idx: 1, obj: gone }) === true && st.layers[0][1].detail === 'detail-b', 'inverse: deleted snippet re-inserted at its place with its detail intact');
+    // undo delete_detail: empty `was` deletes the field rather than writing ''
+    st = mk(); delete st.layers[0][1].detail; st.layers[0][1].detail = 'temp';
+    ok(L._applyInverseOp(st, { kind: 'restore', field: 'detail', was: '', now: 'temp', layer: 0, idx: 1 }) === true && !('detail' in st.layers[0][1]), 'inverse: restoring an empty detail removes the field');
+    // notepad CAS both ways
+    st = mk(); st.notepad = 'edited';
+    ok(L._applyInverseOp(st, { kind: 'notepad', was: 'canon', now: 'edited' }) === true && st.notepad === 'canon', 'inverse: notepad restored');
+    st = mk(); st.notepad = 'edited then hand-tweaked';
+    ok(L._applyInverseOp(st, { kind: 'notepad', was: 'canon', now: 'edited' }) === false && st.notepad === 'edited then hand-tweaked', 'inverse: hand-tweaked notepad is not clobbered');
+
+    // wiring: the snapshot machinery is dead; Apply refuses empties; undo log is chat-scoped
+    ok(!SRC_FULL.includes('_editorUndoSnapshot') && !SRC_FULL.includes('snapshotMemory'), 'the wholesale snapshot (which deleted post-review summaries and left their turns permanently ghosted) is GONE');
+    ok(SRC_FULL.includes("if (pend.op === 'edit_snippet' && !newVal) return 'empty';"), 'a blank snippet edit refuses — the silent success-toast no-op is dead');
+    ok(SRC_FULL.includes('_editorUndoOps = [];                     // inverse ops reference the OLD chat'), 'chat switch clears the undo log');
+    ok(/for \(let i = _editorUndoOps\.length - 1; i >= 0; i--\)/.test(SRC_FULL), 'undo replays inverses LIFO');
+    ok(SRC_FULL.includes("else toastr.warning(`${n} applied; ${stale} card"), 'apply-all reports refused cards and keeps them visible');
+
+    // Continuity Apply carries the same mid-flight discipline as the queues:
+    // identity AND content verified after the fixer's await, or the rewrite dies.
+    ok(/callContinuityFixer[\s\S]{0,900}still\.snippet !== sn \|\| sn\.text !== before/.test(SRC_FULL), 'continuity Apply: a snippet edited or moved during the fixer call is never overwritten with a stale rewrite');
 }
 
 section('notepad — one document, two views (panel + full-screen editor)');

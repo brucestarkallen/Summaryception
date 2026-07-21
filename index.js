@@ -3753,6 +3753,16 @@ async function applyContinuityFix(id) {
     let changed = false;
     try {
         const corrected = await callContinuityFixer(sn.text, flag.fix, buildContinuityRecord());
+        // Mid-flight guard (same rule as the audit and continuity queues): the fixer
+        // computed against `before`. If anything — the editor, the copilot, another
+        // flag's fix, a promotion — changed or moved this snippet during the call,
+        // writing `corrected` would destroy that newer truth or land on a dead
+        // object while logging 'applied'. Verify identity AND content, or discard.
+        const still = _findSnippetByTurnRange(getChatStore(), flag.turnRange);
+        if (!still || still.snippet !== sn || sn.text !== before) {
+            log('applyContinuityFix: snippet changed or moved mid-rewrite — result discarded, flag stays open.');
+            return false;
+        }
         if (corrected && corrected !== before) { sn.text = corrected; changed = true; }
     } catch (e) { log('applyContinuityFix: rewrite failed (non-fatal):', e); return false; }
     const i = list.findIndex(f => f && f.id === flag.id);
@@ -5234,11 +5244,12 @@ function onChatChanged() {
     // edits, or queued audits from the previous chat leak into this one —
     // an Undo here with the old chat's snapshot would corrupt this chat's memory.
     _editorPending = [];
-    _editorUndoSnapshot = null;
+
     _auditQueue = [];
     _ledgerQueue = [];
     _continuityQueue = [];
     _pendingEditedIdx.clear();               // indices from the OLD chat — meaningless (and dangerous) in this one
+    _editorUndoOps = [];                     // inverse ops reference the OLD chat's snippet objects
     clearTimeout(_editRecheckTimer);         // a pending debounce would re-check the WRONG chat's snippets
     clearTimeout(_ledgerEditTimer);          // same class: an armed edit-rewind would rewind the WRONG chat at the old chat's indices
     _ledgerEditTimer = null;
@@ -6097,7 +6108,7 @@ function escapeHtml(text) {
 // summarizer connection + machinery.
 
 let _editorPending = [];
-let _editorUndoSnapshot = null;
+let _editorUndoOps = [];   // inverse ops of applied edits, replayed LIFO on Undo
 let _editorCancelled = false;
 
 // ── Memory Transplant (portable .md) ───────────────────────────────
@@ -6310,6 +6321,68 @@ function buildMemoryDump() {
     return { notepad: store.notepad || '', snippets };
 }
 
+// ── Editor concurrency: locate-by-content (compare-and-swap) ────────
+// Between "Review" and "Apply", background passes legally reshape the layers:
+// a promotion splices old snippets out and pushes a NEW merged object; an
+// earlier delete in the same Apply-All shifts every later index. So neither a
+// cached object reference nor a re-resolved L#-id can be trusted alone — the
+// ref goes dead (edits vanish under a green toast), the id now names a
+// DIFFERENT snippet (the edit lands on the wrong one). The truth that
+// survives both is the CONTENT the user reviewed: resolve the id, verify the
+// field still equals what the card showed; on mismatch, rescue-scan every
+// layer for the reviewed content — exactly one match operates, zero or many
+// refuses honestly. Same discipline on undo, in reverse.
+function _locateSnippetForOp(store, pend) {
+    const field = (pend.op === 'edit_detail' || pend.op === 'delete_detail') ? 'detail' : 'text';
+    const want = String(pend.expect || '');
+    const layers = Array.isArray(store.layers) ? store.layers : [];
+    const tryAt = (layer, idx) => {
+        const arr = layers[layer];
+        const obj = arr && arr[idx];
+        if (obj && String(obj[field] || '') === want) return { obj, arr, layer, idx };
+        return null;
+    };
+    if (typeof pend.layer === 'number' && typeof pend.idx === 'number') {
+        const hit = tryAt(pend.layer, pend.idx);
+        if (hit) return hit;
+    }
+    const matches = [];
+    for (let li = 0; li < layers.length; li++) {
+        const arr = layers[li];
+        if (!Array.isArray(arr)) continue;
+        for (let k = 0; k < arr.length; k++) {
+            const obj = arr[k];
+            if (obj && String(obj[field] || '') === want) matches.push({ obj, arr, layer: li, idx: k });
+        }
+    }
+    return matches.length === 1 ? matches[0] : null;
+}
+// Apply one UNDO inverse against the live store. Content-CAS like the forward
+// direction: an inverse that cannot find its target (the value changed again,
+// by anyone) is SKIPPED, never guessed. Returns true if applied.
+function _applyInverseOp(store, inv) {
+    if (!inv) return false;
+    if (inv.kind === 'notepad') {
+        if (String(store.notepad || '') !== String(inv.now || '')) return false;
+        store.notepad = inv.was;
+        return true;
+    }
+    if (inv.kind === 'insert') {   // undo of delete_snippet: put the exact object back
+        const arr = Array.isArray(store.layers) && store.layers[inv.layer];
+        if (!Array.isArray(arr)) return false;
+        arr.splice(Math.max(0, Math.min(inv.idx, arr.length)), 0, inv.obj);
+        return true;
+    }
+    if (inv.kind === 'restore') {  // undo of an edit: find what we wrote, put back what was there
+        const hit = _locateSnippetForOp(store, { op: inv.field === 'detail' ? 'edit_detail' : 'edit_snippet', expect: inv.now, layer: inv.layer, idx: inv.idx });
+        if (!hit) return false;
+        if (inv.was === undefined || inv.was === '') { if (inv.field === 'detail') delete hit.obj.detail; else hit.obj[inv.field] = String(inv.was || ''); }
+        else hit.obj[inv.field] = inv.was;
+        return true;
+    }
+    return false;
+}
+
 function resolveSnippetId(id) {
     const m = /^L(\d+)#(\d+)$/.exec(String(id || '').trim());
     if (!m) return null;
@@ -6335,19 +6408,21 @@ function recomputeSummarizedUpTo() {
     store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;
 }
 
-function snapshotMemory() {
+// Undo = the recorded inverses, replayed LIFO with the same content-CAS as
+// Apply. This touches ONLY what Apply touched: a snippet the summarizer
+// created after the review is structurally beyond reach — the old snapshot
+// restore deleted such snippets while their turns stayed ghosted, leaving a
+// permanent hole no later pass would refill (ghosted turns are invisible to
+// summarization). An inverse whose target changed again is SKIPPED and
+// reported, never guessed.
+async function undoEditorOps() {
+    if (!_editorUndoOps.length) return;
     const store = getChatStore();
-    _editorUndoSnapshot = {
-        notepad: store.notepad || '',
-        layers: JSON.parse(JSON.stringify(store.layers || [])),
-    };
-}
-
-async function restoreMemorySnapshot() {
-    if (!_editorUndoSnapshot) return;
-    const store = getChatStore();
-    store.notepad = _editorUndoSnapshot.notepad;
-    store.layers = JSON.parse(JSON.stringify(_editorUndoSnapshot.layers));
+    let done = 0, skipped = 0;
+    for (let i = _editorUndoOps.length - 1; i >= 0; i--) {
+        if (_applyInverseOp(store, _editorUndoOps[i])) done++; else skipped++;
+    }
+    _editorUndoOps = [];
     recomputeSummarizedUpTo();
     await saveChatStore();
     updateInjection(true);
@@ -6355,9 +6430,9 @@ async function restoreMemorySnapshot() {
     _syncNotepadUi(store.notepad || '');
     $('#sc_editor_undo').hide();
     $('#sc_editor_review_list').empty();
-    _editorUndoSnapshot = null;
     _editorPending = [];
-    toastr.success('Reverted — memory restored to before the edits.', 'Summaryception', { timeOut: 3000 });
+    if (skipped) toastr.warning(`Reverted ${done} edit${done === 1 ? '' : 's'}; ${skipped} skipped — that memory changed again after the edit, so blind restore would overwrite newer truth.`, 'Summaryception', { timeOut: 6000 });
+    else toastr.success(`Reverted ${done} edit${done === 1 ? '' : 's'} — memory restored to before the edits.`, 'Summaryception', { timeOut: 3000 });
 }
 
 async function runContinuityEditorReview() {
@@ -6397,7 +6472,7 @@ async function runContinuityEditorReview() {
             toastr.info('Co-Writer found nothing that needs changing.', 'Summaryception', { timeOut: 5000 });
             return;
         }
-        snapshotMemory();   // capture pre-edit state so every Apply can be undone
+        _editorUndoOps = [];   // fresh review, fresh undo log — every Apply records its exact inverse
         renderEditorReview(edits);
     } catch (e) {
         log('Continuity editor error:', e);
@@ -6417,16 +6492,18 @@ function renderEditorReview(edits) {
         const op = String(e.op || '');
         let head, kind, oldText;
         if (op === 'edit_notepad') {
-            _editorPending[i] = { op };
             head = '✏️ Notepad (canon)'; kind = 'edit'; oldText = getChatStore().notepad || '';
+            _editorPending[i] = { op, expect: oldText };
         } else if (['edit_snippet', 'delete_snippet', 'edit_detail', 'delete_detail'].includes(op)) {
             const r = resolveSnippetId(e.id);
             if (!r) return;   // id doesn't exist — skip this edit
-            _editorPending[i] = { op, ref: r };
             if (op === 'edit_snippet')       { head = `✏️ Snippet ${e.id}`;   kind = 'edit';   oldText = r.obj.text || ''; }
             else if (op === 'delete_snippet'){ head = `🗑️ Snippet ${e.id}`;   kind = 'delete'; oldText = r.obj.text || ''; }
             else if (op === 'edit_detail')   { head = `✏️ Detail on ${e.id}`; kind = 'edit';   oldText = r.obj.detail || ''; }
             else                             { head = `🗑️ Detail on ${e.id}`; kind = 'delete'; oldText = r.obj.detail || ''; }
+            // Content is the identity: the card operates on WHAT WAS REVIEWED,
+            // wherever background passes move it — or refuses, never guesses.
+            _editorPending[i] = { op, id: String(e.id), layer: r.layer, idx: r.idx, expect: oldText };
         } else { return; }   // unknown op — skip
         shown++;
         const reason = e.reason ? `<div class="sc-editor-reason">${escapeHtml(String(e.reason))}</div>` : '';
@@ -6448,6 +6525,9 @@ function renderEditorReview(edits) {
     $('#sc_editor_review_list').html(shown ? header + cards : '<div class="sc-hint">No applicable edits — the proposed ids weren\'t found in memory.</div>');
 }
 
+// Returns 'applied' | 'stale' | 'empty' | false. 'stale' = the memory the card
+// was reviewed against no longer exists as reviewed (a background pass or an
+// earlier Apply changed it) — the card refuses rather than writing blind.
 async function applyEditorOp(i) {
     const pend = _editorPending[i];
     if (!pend) return false;
@@ -6455,19 +6535,24 @@ async function applyEditorOp(i) {
     const card = $(`.sc-editor-card[data-idx="${i}"]`);
     const newVal = String(card.find('.sc-editor-new').val() ?? '').trim();
     if (pend.op === 'edit_notepad') {
+        if (String(store.notepad || '') !== String(pend.expect || '')) return 'stale';
+        _editorUndoOps.push({ kind: 'notepad', was: pend.expect, now: newVal });
         store.notepad = newVal;
         _syncNotepadUi(newVal);
-    } else if (pend.ref) {
-        const { obj, arr } = pend.ref;   // object reference — stable across splices
-        if (pend.op === 'edit_snippet') { if (newVal) obj.text = newVal; }
-        else if (pend.op === 'edit_detail') { if (newVal) obj.detail = newVal; else delete obj.detail; }
-        else if (pend.op === 'delete_detail') { delete obj.detail; }
-        else if (pend.op === 'delete_snippet') { const k = arr.indexOf(obj); if (k >= 0) arr.splice(k, 1); }
+    } else {
+        if (pend.op === 'edit_snippet' && !newVal) return 'empty';   // a cleared snippet is a delete, not an edit — refuse the silent no-op
+        const hit = _locateSnippetForOp(store, pend);
+        if (!hit) return 'stale';
+        pend.layer = hit.layer; pend.idx = hit.idx;   // refresh the fast path for a second pass
+        if (pend.op === 'edit_snippet') { _editorUndoOps.push({ kind: 'restore', field: 'text', was: pend.expect, now: newVal, layer: hit.layer, idx: hit.idx }); hit.obj.text = newVal; }
+        else if (pend.op === 'edit_detail') { _editorUndoOps.push({ kind: 'restore', field: 'detail', was: pend.expect, now: newVal, layer: hit.layer, idx: hit.idx }); if (newVal) hit.obj.detail = newVal; else delete hit.obj.detail; }
+        else if (pend.op === 'delete_detail') { _editorUndoOps.push({ kind: 'restore', field: 'detail', was: pend.expect, now: '', layer: hit.layer, idx: hit.idx }); delete hit.obj.detail; }
+        else if (pend.op === 'delete_snippet') { _editorUndoOps.push({ kind: 'insert', layer: hit.layer, idx: hit.idx, obj: hit.obj }); hit.arr.splice(hit.idx, 1); }
     }
     recomputeSummarizedUpTo();
     await saveChatStore();
     updateInjection(true);
-    return true;
+    return 'applied';
 }
 
 async function finalizeAfterApply() {
@@ -7031,7 +7116,7 @@ function bindUIEvents() {
 
     // ── Continuity Editor (Co-Writer / Master Novelist) ──
     $(document).on('click', '#sc_editor_review', runContinuityEditorReview);
-    $(document).on('click', '#sc_editor_undo', restoreMemorySnapshot);
+    $(document).on('click', '#sc_editor_undo', undoEditorOps);
     $(document).on('click', '#sc_editor_cancel', function () {
         _editorCancelled = true;
         abortSummarization();
@@ -7052,11 +7137,15 @@ function bindUIEvents() {
     });
     $(document).on('click', '.sc-editor-apply', async function () {
         const i = parseInt($(this).data('idx'), 10);
-        const ok = await applyEditorOp(i);
-        if (ok) {
+        const res = await applyEditorOp(i);
+        if (res === 'applied') {
             $(`.sc-editor-card[data-idx="${i}"]`).slideUp(120, function () { $(this).remove(); });
             await finalizeAfterApply();
             toastr.success('Applied', 'Summaryception', { timeOut: 1200 });
+        } else if (res === 'stale') {
+            toastr.warning('This memory changed since the review (a background pass or an earlier edit) — card refused rather than writing blind. Re-run Review for a fresh look.', 'Summaryception', { timeOut: 6000 });
+        } else if (res === 'empty') {
+            toastr.warning('Empty text — to remove this snippet use a delete, not a blank edit.', 'Summaryception', { timeOut: 5000 });
         }
     });
     $(document).on('click', '.sc-editor-reject', function () {
@@ -7070,14 +7159,16 @@ function bindUIEvents() {
         _editorPending.forEach((p, i) => { if (p) order.push(i); });
         // apply deletes last (object refs keep this safe; this is just tidy ordering)
         order.sort((a, b) => (/^delete_/.test((_editorPending[a] || {}).op) ? 1 : 0) - (/^delete_/.test((_editorPending[b] || {}).op) ? 1 : 0));
-        let n = 0;
+        let n = 0, stale = 0;
         for (const i of order) {
             if ($(`.sc-editor-card[data-idx="${i}"]`).length === 0) continue;   // skip rejected
-            const ok = await applyEditorOp(i);
-            if (ok) n++;
+            const res = await applyEditorOp(i);
+            if (res === 'applied') { n++; $(`.sc-editor-card[data-idx="${i}"]`).remove(); }
+            else if (res === 'stale' || res === 'empty') stale++;
         }
         await finalizeAfterApply();
-        $('#sc_editor_review_list').empty();
+        if (!stale) $('#sc_editor_review_list').empty();
+        else toastr.warning(`${n} applied; ${stale} card${stale === 1 ? '' : 's'} refused (memory changed since review, or empty text) — they stay listed so you can see exactly which.`, 'Summaryception', { timeOut: 7000 });
         toastr.success(`Applied ${n} edit(s)`, 'Summaryception', { timeOut: 2500 });
         btn.prop('disabled', false).text('✅ Apply All');
     });
