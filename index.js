@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.83.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.84.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -7055,15 +7055,23 @@ function bindUIEvents() {
     $(document).on('click', '#sc_notepad_fullscreen', function () {
         if ($('#sc_notepad_fs').length) return;   // already open
         const cur = String(getChatStore().notepad || '');
+        // SELF-CONTAINED overlay: every layout-critical style is INLINE. The class
+        // versions in style.css are theming sugar only. Reason: extension CSS is
+        // browser-cached aggressively; on a device holding a pre-v5.77 style.css
+        // the classed overlay had NO styles at all and rendered as a bare div
+        // dumped at the bottom of the page — one-line textarea, wrapped buttons:
+        // "broken". A full-screen editor must not depend on a stylesheet fetch
+        // to BE a full-screen editor.
+        const _fsBg = 'background:#16171d;color:#e8e8ec;';
         const $ov = $(
-            '<div id="sc_notepad_fs" class="sc-notepad-fs-overlay">'
-            + '<div class="sc-notepad-fs-head">'
-            + '<span class="sc-notepad-fs-title">📝 Manual Notepad (this chat)</span>'
-            + '<span class="sc-notepad-fs-count" id="sc_notepad_fs_count"></span>'
-            + '<button id="sc_notepad_fs_min" class="menu_button" title="Back to the normal panel view — your text is already saved">⤡ Default</button>'
-            + '<button id="sc_notepad_fs_close" class="menu_button" title="Close — your text is already saved">✕</button>'
+            '<div id="sc_notepad_fs" class="sc-notepad-fs-overlay" style="position:fixed;inset:0;top:0;left:0;right:0;bottom:0;width:100%;height:100%;z-index:100000;display:flex;flex-direction:column;box-sizing:border-box;padding:max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));' + _fsBg + '">'
+            + '<div class="sc-notepad-fs-head" style="display:flex;align-items:center;gap:8px;padding:4px 2px 8px 2px;flex:0 0 auto;">'
+            + '<span class="sc-notepad-fs-title" style="font-weight:600;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📝 Manual Notepad (this chat)</span>'
+            + '<span class="sc-notepad-fs-count" id="sc_notepad_fs_count" style="opacity:.6;font-size:.85em;flex:0 0 auto;"></span>'
+            + '<button type="button" id="sc_notepad_fs_min" class="menu_button" title="Back to the normal panel view — your text is already saved">⤡ Default</button>'
+            + '<button type="button" id="sc_notepad_fs_close" class="menu_button" title="Close — your text is already saved">✕</button>'
             + '</div>'
-            + '<textarea id="sc_notepad_fs_text" class="sc-notepad-fs-text" placeholder="Lore this story must never forget — e.g. character names & canon, world rules, locations, ongoing plot facts."></textarea>'
+            + '<textarea id="sc_notepad_fs_text" class="sc-notepad-fs-text" style="flex:1 1 auto;width:100%;min-height:0;resize:none;box-sizing:border-box;font-family:monospace;font-size:.95em;line-height:1.5;background:#0f1014;color:#e8e8ec;border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:10px;" placeholder="Lore this story must never forget — e.g. character names & canon, world rules, locations, ongoing plot facts."></textarea>'
             + '</div>'
         );
         $('body').append($ov);
@@ -8331,7 +8339,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — external-audit hardening: ledger name variants (typos, truncations, diacritic drift, crossed surnames) now resolve to the existing dossier instead of minting duplicates — unique-winner-or-create, names under 4 chars never distance-merge; a verbatim-identical CORE/ARC/THREADS arriving under a different name is dropped at the door (cross-dossier copy contamination); the transplant export brings the ledger current ephemerally (real scribe over the pointer gap into a CLONE — the session's pointer, journal, and store untouched); the epistemic law now reaches THREADS by name and snippet date headers must span their own passage (both patched into saved prompts surgically). Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the full-screen notepad is SELF-CONTAINED: every layout-critical style rides inline on the overlay, so a browser holding a stale cached style.css (the reported breakage: the editor rendered as a bare unstyled div at the page bottom) still gets a true full-screen editor — the stylesheet classes remain as theming only. New permanent gate: dom_test.mjs runs the SHIPPED notepad wiring verbatim under jsdom + real jQuery (open, seed, type-through-the-one-pipeline, sync, all three close paths). Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

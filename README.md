@@ -17,7 +17,7 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
 - **The ledger is injected as compact prose, not JSON.** The scribe *outputs* JSON only so it parses reliably; that JSON is parsed into stored fields and discarded. What reaches the storyteller is one readable line per on‑screen character.
 - **Everything is defensive:** background passes are `try/catch` + `quiet`, guarded against chat switches (epoch token), never throw upward, and the hot injection path is exception‑wrapped. Editing/deleting chat messages is handled (indices are resynced).
 - **Single file does the work:** `index.js` (~7k lines). `settings.html` is the panel, `style.css` the styling, `manifest.json` the metadata. `connectionutil.js` is upstream — don't edit.
-- **⚠️ THE GATE — run all three before every push. Never use `node --check index.js`.**
+- **⚠️ THE GATE — run all of these before every push. Never use `node --check index.js`.**
   SillyTavern loads `index.js` as an **ES module**; `node --check` on a `.js` file parses it as **CommonJS** and silently accepts what ESM rejects (a duplicate top-level `let`, most importantly). That false pass shipped a redeclared identifier in v5.58.0 and the extension **failed to load at all through v5.60.0 while every check reported green**.
 
   ```bash
@@ -28,7 +28,11 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
   node e2e_test.mjs      # 3. PIPELINE: swaps connectionutil.js for a scripted stub and runs the REAL
                          #    index.js end to end — event -> scribe -> ledger -> injection -> checkpoint
                          #    -> auditor -> chat switch. "Passes the unit tests" is not "works".
-  npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 4. STATIC: no-undef / no-redeclare
+  node dom_test.mjs      # 4. REAL DOM: jsdom + real jQuery execute the SHIPPED UI wiring verbatim
+                         #    (open/type/save/close). Catches the class the stubs cannot: markup,
+                         #    delegation, inline-style self-containment. Skips cleanly (exit 0) if
+                         #    jsdom/jquery are absent: npm install --no-save jsdom jquery
+  npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 5. STATIC: no-undef / no-redeclare
                          #    across every code path, including ones no test executes.
   ```
   All three must exit 0. `require-atomic-updates` findings (8 as of v5.81.0; one left with the deleted snapshot-undo code) are false positives on this codebase — every
