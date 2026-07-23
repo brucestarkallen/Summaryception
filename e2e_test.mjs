@@ -403,6 +403,70 @@ try {
         ok(store().ledgerLiveIdx <= chat.length - 1, 'the live pointer lives inside the surviving chat');
     }
 
+    console.log('== 14. BRANCH (new chat via CHAT_CHANGED): the ledger PAGE reverts, not just the pointer ==');
+    {
+        // ST's Branch button copies messages 0..N AND the metadata into a NEW chat
+        // file, then fires CHAT_CHANGED — no deletion event ever fires. The report:
+        // after branching, dossiers keep narrating the abandoned future.
+        const mkBranch = (msgs, meta) => { ctx.chatMetadata = { summaryception: meta }; ctx.chatId = 'branch_' + Math.random().toString(36).slice(2) + '.jsonl'; ctx.chat = msgs; };
+        const baseChat = [
+            mkMsg('Player', 'I enter the grounds.', true),          // 0
+            mkMsg('Narrator', 'Shunsui watched from the rail.'),    // 1
+            mkMsg('Player', 'I bow.', true),                        // 2
+            mkMsg('Narrator', 'Shunsui tipped his hat, unmoved.'),  // 3
+            mkMsg('Player', 'I draw.', true),                       // 4
+        ];
+
+        // Shape A — journal-covered chat, branch to turn 4 of a story whose pointer ran to 9.
+        mkBranch(baseChat.slice(), {
+            ledger: { 'Shunsui': { state: 'FUTURE: watching Jovan cross toward the gate, proclamation stands', core: 'Lazy iron.', _t: 9 } },
+            ledgerNotes: [
+                { t: 1, name: 'Shunsui', at: 1, base: true, core: 'Lazy iron.', state: 'at the rail, hat down' },
+                { t: 3, name: 'Shunsui', at: 2, state: 'tipped his hat, unmoved' },
+                { t: 9, name: 'Shunsui', at: 3, state: 'FUTURE: watching Jovan cross toward the gate, proclamation stands' },
+            ],
+            ledgerNotesFrom: 0, ledgerLiveIdx: 9, summarizedUpTo: -1, layers: [[]],
+        });
+        await fire('CHAT_CHANGED');
+        await sleep(1800);
+        let led = store().ledger || {};
+        ok(led['Shunsui'] && !/FUTURE/.test(String(led['Shunsui'].state)), 'A (journal-covered): the abandoned future leaves the PAGE at the branch');
+        ok(String(led['Shunsui'].state).includes('tipped his hat'), 'A: the page folds to the branch-point truth');
+        ok(store().ledgerLiveIdx <= 4 && store().ledgerLiveIdx >= 0, 'A: the pointer lands inside the branch (not -1, not the future)');
+
+        // Shape B — the SCREENSHOT shape: young chat, NOTHING summarized (summarizedUpTo=-1,
+        // empty layers), ledger built purely by live passes, pointer past the branch.
+        mkBranch(baseChat.slice(), {
+            ledger: { 'Zaraki': { state: 'FUTURE: named the monster, blade between the eyes', _t: 8 } },
+            ledgerNotes: [
+                { t: 1, name: 'Zaraki', at: 1, base: true, state: 'grinning at the rail' },
+                { t: 8, name: 'Zaraki', at: 2, state: 'FUTURE: named the monster, blade between the eyes' },
+            ],
+            ledgerNotesFrom: 0, ledgerLiveIdx: 8, summarizedUpTo: -1, layers: [[]],
+        });
+        await fire('CHAT_CHANGED');
+        await sleep(1800);
+        led = store().ledger || {};
+        ok(led['Zaraki'] && !/FUTURE/.test(String(led['Zaraki'].state)), 'B (young chat, nothing summarized): the future leaves the page even with summarizedUpTo=-1');
+        ok(String(led['Zaraki'].state).includes('grinning'), 'B: folded to the last surviving read');
+
+        // Shape C — TRANSPLANT-then-branch: imported base notes at t=0 (era-bumped, no
+        // checkpoints), live notes on top to t=9, branch to 5 messages.
+        mkBranch(baseChat.slice(), {
+            ledger: { 'Rukia': { state: 'FUTURE: compiled the records, muster done', _t: 9 } },
+            ledgerNotes: [
+                { t: 0, name: 'Rukia', at: 1, base: true, core: 'Imported dossier.', state: 'as of the transplant' },
+                { t: 9, name: 'Rukia', at: 2, state: 'FUTURE: compiled the records, muster done' },
+            ],
+            ledgerNotesFrom: 0, ledgerLiveIdx: 9, summarizedUpTo: -1, layers: [[]], ledgerEra: 3, _ckptLast: -1,
+        });
+        await fire('CHAT_CHANGED');
+        await sleep(1800);
+        led = store().ledger || {};
+        ok(led['Rukia'] && !/FUTURE/.test(String(led['Rukia'].state)), 'C (transplant then branch): the future leaves the page');
+        ok(String(led['Rukia'].state).includes('as of the transplant') && String(led['Rukia'].core || '').includes('Imported'), 'C: folds to the imported base — the transplant is the floor');
+    }
+
     console.log('== 6. a REAL chat switch: new metadata AND new messages ==');
     const oldNames = Object.keys(store().ledger || {});
     ctx.chatMetadata = {};

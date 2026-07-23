@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.84.1';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.85.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1164,12 +1164,15 @@ async function repairIfBranched() {
         ? Math.max(...survivors.map(sn => sn.turnRange[1]))
         : -1;
 
-    // Snippets (and their attached audit notes) were just trimmed to the branch. The
-    // character ledger CANNOT be trimmed the same way — it's cumulative, keyed by name
-    // with no per-turn history, so it still holds states/arcs/threads earned on the
-    // abandoned timeline. Rewind the live pointer so the live pass re-derives current
-    // state forward on THIS branch; older arcs/threads may linger (surfaced in the toast).
-    if (typeof store.ledgerLiveIdx === 'number') store.ledgerLiveIdx = store.summarizedUpTo;
+    // The ledger is NOT touched here — tryAutoRewindLedger below owns it entirely
+    // (journal fold when covered, checkpoint, or staged rebuild). A previous line
+    // here pre-set ledgerLiveIdx = summarizedUpTo "so the live pass re-derives
+    // forward" — a fossil from before the journal existed. Its only surviving
+    // effect was destruction: on a young branch (nothing summarized, pointer at 9)
+    // it nuked the pointer to -1 BEFORE the rewind, and the rewind's clamp only
+    // moves the pointer DOWN — so -1 stuck, and the next live pass re-read the
+    // ENTIRE branch from turn 0 over an already-correct page ("N turns not read
+    // yet" grinding through history after every branch).
 
     // ── 4. Un-ghost everything past the (new) summarized boundary, so no turn is
     //       ever both hidden AND unsummarized. This restores the verbatim window
@@ -8376,7 +8379,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the full-screen notepad now sizes itself in MEASURED PIXELS from the live visual viewport, set by direct JS property assignment — after a real Android device rendered the inline-string geometry as a collapsed strip (percentage heights, fixed containing blocks, and keyboard viewports are where mobile engines disagree; a pixel is a pixel everywhere). It pins to the visual-viewport origin and re-fits on every viewport/keyboard change while open; close unbinds the listeners. The dom_test gate asserts the measured-pixel geometry, the keyboard re-fit, and the cleanup. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — branching is finally first-class for the ledger: a pre-journal fossil in branch repair pre-set the live pointer to summarizedUpTo (-1 on a young branch) BEFORE the real rewind ran — the rewind's clamp only moves the pointer DOWN, so the destroyed pointer stuck and every branch triggered a full re-read of history over an already-correct page. The fossil is gone; tryAutoRewindLedger owns the ledger on branch, and the pipeline now proves all three branch shapes end-to-end: journal-covered, young-chat (nothing summarized), and transplant-then-branch. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
