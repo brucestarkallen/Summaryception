@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.85.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.85.1';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1139,10 +1139,21 @@ async function repairIfBranched() {
     // left ledger content from turns that no longer exist, so repair + the rewind below must
     // run even without a snippet/summary overrun.
     const ledgerAhead = (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= chatLength);
-    if (!summaryOverruns && !snippetOverruns && !verbatimGhosted && !ledgerAhead) return;   // healthy — leave it alone
+    // The POINTER is not the truth — the JOURNAL is. A chat damaged before the
+    // v5.85 fossil fix has a sane-looking pointer (the fossil nuked it, live
+    // passes rebuilt it inside the branch) while the journal and the page still
+    // carry the abandoned future: notes at t=21 in a 9-message chat, entries
+    // stamped _t=21, dossiers narrating events that never happened here. Judge
+    // the timeline by its own records, or such a chat reads 'healthy' forever.
+    const _lastIdx = chatLength - 1;
+    const ledgerNotesAhead = Array.isArray(store.ledgerNotes)
+        && store.ledgerNotes.some(n => n && typeof n.t === 'number' && n.t > _lastIdx);
+    const ledgerStampAhead = !!store.ledger && typeof store.ledger === 'object'
+        && Object.values(store.ledger).some(e => e && typeof e._t === 'number' && e._t > _lastIdx);
+    if (!summaryOverruns && !snippetOverruns && !verbatimGhosted && !ledgerAhead && !ledgerNotesAhead && !ledgerStampAhead) return;   // healthy — leave it alone
 
     const oldSummarizedUpTo = store.summarizedUpTo;
-    const _trigger = [summaryOverruns && 'summaryOverruns', snippetOverruns && 'snippetOverruns', verbatimGhosted && 'verbatimGhosted', ledgerAhead && 'ledgerAhead'].filter(Boolean).join('+');
+    const _trigger = [summaryOverruns && 'summaryOverruns', snippetOverruns && 'snippetOverruns', verbatimGhosted && 'verbatimGhosted', ledgerAhead && 'ledgerAhead', ledgerNotesAhead && 'ledgerNotesAhead', ledgerStampAhead && 'ledgerStampAhead'].filter(Boolean).join('+');
     log(`Repair triggered [${_trigger}]. summarizedUpTo=${oldSummarizedUpTo}, chatLength=${chatLength}, verbatimStartIdx=${verbatimStartIdx}, ledgerLiveIdx=${store.ledgerLiveIdx}. Repairing...`);
 
     // ── 2. Drop Layer 0 snippets that cover turns in the verbatim window or
@@ -8379,7 +8390,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — branching is finally first-class for the ledger: a pre-journal fossil in branch repair pre-set the live pointer to summarizedUpTo (-1 on a young branch) BEFORE the real rewind ran — the rewind's clamp only moves the pointer DOWN, so the destroyed pointer stuck and every branch triggered a full re-read of history over an already-correct page. The fossil is gone; tryAutoRewindLedger owns the ledger on branch, and the pipeline now proves all three branch shapes end-to-end: journal-covered, young-chat (nothing summarized), and transplant-then-branch. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — chats damaged BEFORE the v5.85 fossil fix now self-heal on open: branch repair judges the timeline by the JOURNAL, not the pointer — a chat whose pointer looks sane (the fossil nuked it, live passes rebuilt it inside the branch) while notes or entry stamps still sit beyond the chat end is a timeline breach and rewinds on CHAT_CHANGED. The reported residue (chat at #8, journal at turn 21, dossiers narrating the abandoned future) is scene 15 in the pipeline: heals to the last truth the chat actually contains, journal trimmed, no stamp beyond the chat. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

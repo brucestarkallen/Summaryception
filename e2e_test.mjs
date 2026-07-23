@@ -467,6 +467,43 @@ try {
         ok(String(led['Rukia'].state).includes('as of the transplant') && String(led['Rukia'].core || '').includes('Imported'), 'C: folds to the imported base — the transplant is the floor');
     }
 
+    console.log('== 15. THE RESIDUE (pre-fix damage): sane pointer, journal ahead — heals on chat open ==');
+    {
+        // The reported state, verbatim from the screenshots: chat ends at #8, the
+        // journal shows notes at turn 21, the page narrates turn-21 events — and
+        // the POINTER is a sane 8, because the old fossil nuked it and live
+        // passes rebuilt it inside the branch. Every previous trigger looks at
+        // the pointer and says 'healthy'. The chat must heal anyway: the journal
+        // is the truth, and it says the timeline is breached.
+        ctx.chatMetadata = { summaryception: {
+            ledger: { 'Shunsui': { core: 'Lazy iron.', state: 'STALE21: watching Jovan cross toward the gate, proclamation stands for the 19th', _t: 21 } },
+            ledgerNotes: [
+                { t: 1, name: 'Shunsui', at: 1, base: true, core: 'Lazy iron.', state: 'at the rail, hat down' },
+                { t: 7, name: 'Shunsui', at: 2, state: 'unmoved, watching the duel' },
+                { t: 21, name: 'Shunsui', at: 3, state: 'STALE21: watching Jovan cross toward the gate, proclamation stands for the 19th' },
+            ],
+            ledgerNotesFrom: 0,
+            ledgerLiveIdx: 8,          // ← the lie: pointer looks perfectly healthy
+            summarizedUpTo: -1, layers: [[]],
+        } };
+        ctx.chatId = 'residue.jsonl';
+        ctx.chat = [
+            mkMsg('Player', 'I enter.', true), mkMsg('Narrator', 'Shunsui at the rail.'),
+            mkMsg('Player', 'I bow.', true), mkMsg('Narrator', 'A nod.'),
+            mkMsg('Player', 'I draw.', true), mkMsg('Narrator', 'Steel sang.'),
+            mkMsg('Player', 'I hold.', true), mkMsg('Narrator', 'Shunsui unmoved, watching the duel.'),
+            mkMsg('Player', 'I wait.', true),
+        ];
+        await fire('CHAT_CHANGED');
+        await sleep(1800);
+        const led = store().ledger || {};
+        ok(led['Shunsui'] && !/STALE21/.test(String(led['Shunsui'].state)), 'THE RESIDUE HEALS: the turn-21 state leaves the page even though the pointer claimed health');
+        ok(String(led['Shunsui'].state).includes('watching the duel'), 'the page folds to the last truth this chat actually contains');
+        const notes = store().ledgerNotes || [];
+        ok(notes.length > 0 && notes.every(n => !n || typeof n.t !== 'number' || n.t <= 8), 'the journal is trimmed to the chat — no note beyond turn 8 survives');
+        ok(!Object.values(led).some(e => e && typeof e._t === 'number' && e._t > 8), 'no entry stamp beyond the chat survives');
+    }
+
     console.log('== 6. a REAL chat switch: new metadata AND new messages ==');
     const oldNames = Object.keys(store().ledger || {});
     ctx.chatMetadata = {};
