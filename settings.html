@@ -656,6 +656,36 @@
                     </div>
 
                     <div class="sc-row">
+                        <label class="checkbox_label" for="sc_ledger_mention_recall">
+                            <input type="checkbox" id="sc_ledger_mention_recall" />
+                            <span>Recall a full page on mention</span>
+                        </label>
+                        <small class="sc-hint">When the story's newest prose <strong>names an off-screen character</strong>, inject their full ledger page for that turn — explicitly framed as "mentioned, not in the scene" — so the reference lands true instead of being written from a one-line roster entry. Drops back to the roster line when the conversation moves on.</small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_ledger_mention_max">
+                            <span>Max recalled pages per turn</span>
+                            <small class="sc-hint">Story-investment weight decides who wins the slots.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_ledger_mention_max" min="0" max="6" step="1" />
+                            <span id="sc_ledger_mention_max_val" class="sc-val">3</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_ledger_mention_window">
+                            <span>"Just mentioned" window (messages)</span>
+                            <small class="sc-hint">How many of the newest messages count as the current exchange.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_ledger_mention_window" min="1" max="8" step="1" />
+                            <span id="sc_ledger_mention_window_val" class="sc-val">3</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
                         <label for="sc_ledger_presence_on">
                             <span>On-screen marker (regex)</span>
                             <small class="sc-hint">Capture group 1 = a name that IS in the scene. The newest message matching this is the attendance list.</small>

@@ -2059,14 +2059,15 @@ section('presence markers — the watchlist cast is never "in the scene"');
     const present = cast.shown.concat(cast.compact).map(x => x.name);
     ok(!present.includes('Silas Blackwood'), 'ACW character mentioned in the prose of every message is still NOT injected as present');
     ok(!present.includes('Ivar Var Emrys'), 'second ACW character barred too');
-    ok(cast.roster.includes('Silas Blackwood') && cast.roster.includes('Ivar Var Emrys'), 'barred watchlist cast is guaranteed its off-screen roster line');
+    const carried = (n) => cast.roster.includes(n) || (cast.recalled || []).some(x => x.name === n);
+    ok(carried('Silas Blackwood') && carried('Ivar Var Emrys'), 'barred watchlist cast is always carried off-screen — roster line, or a recalled full page when the prose mentions them (the stronger guarantee)');
     ok(present.includes('Alexia Valois'), 'IST capture "alexia valois" matches the full-name ledger key');
     ok(present.includes('Honami'), 'IST capture "honami ichinose" matches the given-name ledger key via aliases');
     ok(present.includes('Jovan'), 'a character unlisted by the markers but in the prose still falls back to name-in-text presence');
     ok(present.includes('Miranda'), 'listed in IST but silent in the prose: present anyway — the attendance sheet is the appearance');
     ok(!present.includes('Renn'), "an OLDER message's IST line does not grant presence — the newest attendance sheet rules, and stale marker lines are stripped from the prose scan");
     ok(!present.includes('Ghost'), 'a character in neither markers nor prose is not present');
-    ok(cast.roster.includes('Renn'), 'a tracked character who left the scene keeps a guaranteed roster line — off-screen, never erased');
+    ok(carried('Renn'), 'a tracked character who left the scene stays carried off-screen — roster or recalled, never erased, never present');
     ok(cast.out.every(n => !present.includes(n)), 'present and out never overlap under markers');
 
     // NEGATIVE GUARD — reintroduce the bug and watch the old behavior return: with
@@ -2110,6 +2111,77 @@ section('presence markers — the watchlist cast is never "in the scene"');
     const stripped = L._stripPresenceNoise(newest, pm);
     ok(!/\[ist:/.test(stripped) && !/\[acw:/.test(stripped), 'noise strip removes the marker lines from the prose view');
     ok(/jovan set his spoon down/.test(stripped), 'and keeps the story text');
+}
+
+
+// ─── mention recall: the story names them, their page rides along ───
+section('mention recall — full page on prose mention, framed off-screen');
+{
+    const mkE = (u, extra) => Object.assign({ core: 'core of ' + u, state: 'state of ' + u, updatedAt: u }, extra || {});
+    const s = { ledgerMaxActive: 6, ledgerInjectRoster: true, ledgerRosterMax: 8, ledgerRosterRotate: true };
+    const led = {
+        'Jovan': mkE(60), 'Alexia Valois': mkE(50),
+        'Silas Blackwood': mkE(30, { threads: ['letter home', 'the debt'], arc: 'souring' }),
+        'Ivar Var Emrys': mkE(20), 'Ghost': mkE(10),
+    };
+    const newest = 'jovan glanced at alexia. everyone was discussing silas and his headache.\n' +
+        '[ist: jovan | calm]\n[ist: alexia valois | sharp]\n' +
+        '[acw: silas blackwood | his desk | grey]\n[acw: ivar var emrys | emrys academy | waiting]';
+    const msgs = ['an earlier scene with nobody named.', newest];
+    const cast = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0, msgs);
+    const present = cast.shown.concat(cast.compact).map(x => x.name);
+    const recalled = (cast.recalled || []).map(x => x.name);
+    ok(recalled.includes('Silas Blackwood'), 'ACW character named in the newest PROSE gets a recalled page');
+    ok(!present.includes('Silas Blackwood'), 'recall never promotes to present — the bar holds');
+    ok(!recalled.includes('Ivar Var Emrys'), 'ACW character whose name appears ONLY in status lines is not "mentioned" — the story has to say the name');
+    ok(cast.roster.includes('Ivar Var Emrys'), 'unmentioned watchlist character keeps the roster line');
+    ok(!cast.roster.includes('Silas Blackwood'), "a recalled character's roster line is replaced by the full page for the turn");
+    ok(!recalled.includes('Ghost'), 'off-screen and unmentioned: not recalled');
+    ok(cast.out.every(n => !recalled.includes(n)), 'recalled never lands in "not injected"');
+
+    // The mention window is the current exchange, not the whole active window.
+    const staleMsgs = ['everyone was discussing silas.', 'a scene.', 'another scene.', 'the newest scene, nobody named here.\n[ist: jovan | calm]\n[acw: silas blackwood | desk]'];
+    const stale = L.computeLedgerCast(led, { ...s, ledgerMentionWindow: 2 }, staleMsgs.join('\n'), [], 0, staleMsgs);
+    ok(!(stale.recalled || []).map(x => x.name).includes('Silas Blackwood'), 'a mention older than the window has lapsed — back to the roster line');
+
+    // Weight ranks the capped slots.
+    const many = {
+        'Anna': mkE(5, { threads: ['a', 'b', 'c'], arc: 'x', bond: 'y' }), 'Bea': mkE(4), 'Cara': mkE(3), 'Dora': mkE(2),
+        'Jovan': mkE(60),
+    };
+    const mm = 'jovan thought about anna, bea, cara and dora.\n[ist: jovan | calm]\n[acw: anna | away]\n[acw: bea | away]\n[acw: cara | away]\n[acw: dora | away]';
+    const capped = L.computeLedgerCast(many, { ...s, ledgerMentionMax: 1 }, mm, [], 0, [mm]);
+    const cr = (capped.recalled || []).map(x => x.name);
+    ok(cr.length === 1 && cr[0] === 'Anna', 'recall cap respected and story-investment weight decides who wins the slot');
+
+    // Toggle off: no recalls, watchlist keeps roster guarantee.
+    const off = L.computeLedgerCast(led, { ...s, ledgerMentionRecall: false }, msgs.join('\n'), [], 0, msgs);
+    ok((off.recalled || []).length === 0 && off.roster.includes('Silas Blackwood'), 'feature off: no recalled pages, roster line intact');
+
+    // Legacy chats: a prose mention already grants presence, so the tier is empty.
+    const plainMsgs = ['jovan and claire argued in the hall.'];
+    const plain = L.computeLedgerCast({ 'Jovan': mkE(2), 'Claire': mkE(1) }, s, plainMsgs.join('\n'), [], 0, plainMsgs);
+    ok((plain.recalled || []).length === 0, 'no markers: mention = presence, recall tier naturally empty — plain chats unchanged');
+}
+
+section('mention recall — end-to-end injection framing');
+{
+    L.__setSettings(Object.assign({}, defaultSettings, { ledgerInjectRoster: true, ledgerRosterMax: 8 }));
+    setStore({
+        'Jovan': { core: 'steady', state: 'at lunch', updatedAt: 9 },
+        'Silas Blackwood': { core: 'proud, wounded', state: 'skipping lunch, writing home', threads: ['the letter'], updatedAt: 5 },
+    });
+    L.__setChat([
+        { mes: 'Jovan wondered what Silas would write home.\n[IST: Jovan | calm]\n[ACW: Silas Blackwood | his desk | grey]' },
+    ]);
+    const block = L.buildCharacterBlock();
+    ok(block.includes('JUST MENTIONED, NOT IN THE SCENE'), 'recalled section carries the explicit off-screen framing');
+    ok(block.includes('Silas Blackwood') && block.includes('proud, wounded'), "the mentioned character's FULL page is injected, not a bare line");
+    const framingAt = block.indexOf('JUST MENTIONED');
+    const alsoPresentAt = block.indexOf('ALSO PRESENT');
+    ok(alsoPresentAt === -1 || block.slice(alsoPresentAt, framingAt === -1 ? undefined : framingAt).indexOf('Silas') === -1, 'and never as present');
+    const rosterAt = block.indexOf('Other people in this world');
+    ok(framingAt !== -1 && (rosterAt === -1 || framingAt < rosterAt), 'recalled section sits above the roster');
 }
 
 console.log('\n────────────────────────────────────────');

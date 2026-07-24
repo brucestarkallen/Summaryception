@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.87.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.88.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -101,6 +101,10 @@ const defaultSettings = Object.freeze({
     ledgerPresenceMarkers: true,   // read structured presence markers (e.g. a preset's [IST: name|...] in-scene tracker and [ACW: name|...] off-screen watchlist) as GROUND TRUTH for who is on screen — mention in a status block is not presence, and a watchlist prints every off-screen name into every message
     ledgerPresenceOnPattern: '\\[IST:\\s*([^|\\]]+)',   // regex, capture group 1 = a name that IS in the scene; found in the newest message that matches, that message is the authoritative attendance list
     ledgerPresenceOffPattern: '\\[ACW:\\s*([^|\\]]+)',  // regex, capture group 1 = a name explicitly OFF-screen — hard-barred from the present tiers no matter how often the text mentions them, guaranteed a roster line instead
+    ledgerMentionRecall: true,     // when an OFF-SCREEN character is mentioned in the story's recent prose, inject their full page this turn (framed as not-in-scene) — the model remembers Mari the moment Mari comes up, instead of working from a one-line roster entry
+    ledgerMentionWindow: 3,        // how many of the newest messages count as "just mentioned" (the current exchange, not the whole active window)
+    ledgerMentionMax: 3,           // cap on recalled pages per turn (story-investment weight decides who wins the slots)
+    ledgerMentionChars: 500,       // per-character cap for a recalled page — full context for the reference, slightly leaner than an on-screen card
     ledgerMaxActive: 6,            // max characters injected at once
     ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — sized for a dense CURRENT card (behavioral anchor + whereabouts + compressed arc), not for saving tokens. The cap's real job is bounding accumulation so stale/redundant detail can't pile into noise that drifts the model; keep cards dense and current, not merely small.
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
@@ -2111,7 +2115,7 @@ async function auditLedgerEntries(opts = {}) {
             const _msgs = chat.slice(-windowSize).map(m => ((m && typeof m.mes === 'string') ? m.mes : '').toLowerCase());
             const recentLower = _msgs.join('\n');
             const cast = computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick, _msgs);
-            injected = cast.shown.map(x => x.name);
+            injected = cast.shown.map(x => x.name).concat((cast.recalled || []).map(x => x.name));
         } catch (_) { injected = []; }
 
         const targets = _ledgerAuditTargets(ledger, injected, s.ledgerAuditMaxPerRun ?? 4);
@@ -5035,7 +5039,33 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
     // name. The cap still bounds the expensive full entries; it no longer decides who
     // exists.
     res.compact = active;   // on screen but past the cap — compact, never a bare name
-    const shownNames = new Set(res.shown.concat(res.compact).map(a => a.name));
+    // MENTION RECALL. An off-screen character named in the newest prose is the one
+    // the model is about to write ABOUT — and a one-line roster entry is not enough
+    // to write about someone truthfully. The moment the story touches them, their
+    // full page rides along for the turn (framed as not-in-scene), and drops back
+    // to a roster line when the conversation moves on. Marker-stripped text only,
+    // so a watchlist status line is not a "mention" — the story has to say the name.
+    // In legacy (no-marker) chats a prose mention already grants full presence, so
+    // this tier is naturally empty there — no behavior change for plain chats.
+    res.recalled = [];
+    if (s.ledgerMentionRecall !== false) {
+        const mentionWin = Math.max(1, s.ledgerMentionWindow ?? 3);
+        const tail = (Array.isArray(msgsEff) ? msgsEff.slice(-mentionWin) : []).join('\n');
+        if (tail.trim()) {
+            const onNames = new Set(res.shown.concat(res.compact).map(a => a.name));
+            const cand = [];
+            for (const name of names) {
+                if (onNames.has(name)) continue;
+                const entry = ledger[name];
+                if (!entry || typeof entry !== 'object') continue;
+                const aliases = characterAliases(name, ambiguous);
+                if (aliases.some(a => wordPresentInText(tail, a))) cand.push({ name, entry, u: entry.updatedAt || 0 });
+            }
+            for (const c of cand) c.w = _characterWeight(c.entry, pinLower.has(c.name.toLowerCase()));
+            res.recalled = cand.sort((a, b) => (b.w - a.w) || (b.u - a.u)).slice(0, Math.max(0, s.ledgerMentionMax ?? 3));
+        }
+    }
+    const shownNames = new Set(res.shown.concat(res.compact, res.recalled).map(a => a.name));
     if (s.ledgerInjectRoster !== false) {
         const rosterCap = Math.max(0, s.ledgerRosterMax ?? 12);
         const offscreen = names
@@ -5129,6 +5159,17 @@ function buildCharacterBlock() {
         if (citems.length) compactLine = 'ALSO PRESENT in this scene \u2014 they are here and must not vanish from it; give them presence when the moment touches them: ' + citems.join('; ') + '.';
     }
 
+    // Recalled pages: the story just NAMED these people. A reference the model
+    // cannot ground gets invented around — so the full page rides along for the
+    // turn, explicitly framed as off-screen so depth of context is never read as
+    // permission to put them in the room.
+    let recalledBlock = '';
+    if (cast.recalled && cast.recalled.length) {
+        const rcap = Math.max(80, s.ledgerMentionChars ?? 500);
+        const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap)).filter(Boolean);
+        if (rb.length) recalledBlock = 'JUST MENTIONED, NOT IN THE SCENE \u2014 the story referenced these people; know them fully so the reference lands true, but they are OFF-SCREEN and do not appear unless the story brings them in:\n' + rb.join('\n');
+    }
+
     let rosterLine = '';
     if (s.ledgerInjectRoster !== false) {
         const picked = cast.roster;
@@ -5162,10 +5203,11 @@ function buildCharacterBlock() {
         if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen \u2014 the story continues around them. "last seen" is where the story left each one; absent something that moved them, that is still where they are and what they are doing, and time has passed since. Use it to keep the world alive off-screen and to bring anyone back when the moment calls for it, true to who they are: ' + items.join('; ') + '.';
     }
 
-    if (blocks.length === 0 && !rosterLine && !compactLine) return '';
+    if (blocks.length === 0 && !rosterLine && !compactLine && !recalledBlock) return '';
 
     let body = blocks.join('\n');
     if (compactLine) body += (body ? '\n\n' : '') + compactLine;
+    if (recalledBlock) body += (body ? '\n\n' : '') + recalledBlock;
     if (rosterLine) body += (body ? '\n\n' : '') + rosterLine;
 
     const tpl = s.ledgerInjectTemplate || '\n\n<characters>\n{{characters}}\n</characters>\n';
@@ -5763,6 +5805,11 @@ function updateUI() {
         $('#sc_ledger_presence_markers').prop('checked', s.ledgerPresenceMarkers !== false);
         $('#sc_ledger_presence_on').val(s.ledgerPresenceOnPattern ?? defaultSettings.ledgerPresenceOnPattern);
         $('#sc_ledger_presence_off').val(s.ledgerPresenceOffPattern ?? defaultSettings.ledgerPresenceOffPattern);
+        $('#sc_ledger_mention_recall').prop('checked', s.ledgerMentionRecall !== false);
+        $('#sc_ledger_mention_max').val(s.ledgerMentionMax ?? 3);
+        $('#sc_ledger_mention_max_val').text(s.ledgerMentionMax ?? 3);
+        $('#sc_ledger_mention_window').val(s.ledgerMentionWindow ?? 3);
+        $('#sc_ledger_mention_window_val').text(s.ledgerMentionWindow ?? 3);
         $('#sc_ledger_auto_rewind').prop('checked', s.ledgerAutoRewind !== false);
         $('#sc_ledger_max_chars_val').text(s.ledgerMaxCharsPerChar ?? 600);
         $('#sc_editor_system_prompt').val(s.editorSystemPrompt);
@@ -5968,13 +6015,14 @@ function renderLedger() {
         const statusOf = new Map();
         cast.shown.forEach(x => statusOf.set(x.name, 'full'));
         (cast.compact || []).forEach(x => { if (!statusOf.has(x.name)) statusOf.set(x.name, 'compact'); });
+        (cast.recalled || []).forEach(x => { if (!statusOf.has(x.name)) statusOf.set(x.name, 'recalled'); });
         cast.roster.forEach(n => { if (!statusOf.has(n)) statusOf.set(n, 'roster'); });
-        const rank = { full: 0, compact: 1, roster: 2 };
+        const rank = { full: 0, compact: 1, recalled: 2, roster: 3 };
         const entries = names
             .map(name => ({ name, entry: ledger[name], u: (ledger[name] && ledger[name].updatedAt) || 0, st: statusOf.get(name) || 'out' }))
             .sort((a, b) => ((rank[a.st] ?? 2) - (rank[b.st] ?? 2)) || (b.u - a.u));
         _ledgerOrder = entries.map(e => e.name);
-        const _nInj = cast.shown.length + (cast.compact || []).length + cast.roster.length;
+        const _nInj = cast.shown.length + (cast.compact || []).length + (cast.recalled || []).length + cast.roster.length;
 
         const field = (label, val) => {
             if (val === undefined || val === null || !String(val).trim()) return '';
@@ -6011,13 +6059,15 @@ function renderLedger() {
                     ? `<div class="sc-ledger-fresh sc-fresh-lag">⚠ ${_behind} turn(s) not read yet — the next turn picks them up automatically.</div>`
                     : `<div class="sc-ledger-fresh sc-fresh-ok">✓ Current through turn ${_li} (the newest turn). Nothing pending.</div>`;
         } catch (_) { /* no chat loaded */ }
-        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full + ${(cast.compact || []).length} compact (all on screen) + ${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}. Nobody on screen is ever reduced to a name.</div>`;
+        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full + ${(cast.compact || []).length} compact (all on screen) + ${(cast.recalled || []).length ? `${cast.recalled.length} recalled (mentioned, off-screen) + ` : ''}${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}. Nobody on screen is ever reduced to a name.</div>`;
         entries.forEach(({ name, entry, st }, i) => {
             // Badge = this turn's injection truth, straight from the shared selector.
             const badge = st === 'full'
                 ? '<span class="sc-ledger-badge">💉 injected — full entry (on screen)</span>'
                 : st === 'compact'
                     ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">💉 injected — on screen (compact: nature + now)</span>'
+                    : st === 'recalled'
+                    ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">📣 injected — full page, recalled by mention (off-screen)</span>'
                     : st === 'roster'
                     ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">🔁 injected — roster line</span>'
                     : '<span class="sc-ledger-badge sc-ledger-outbadge">⏸ not injected this turn</span>';
@@ -7332,6 +7382,23 @@ function bindUIEvents() {
         saveSettings();
         updateInjection(true);
     });
+    $(document).on('change', '#sc_ledger_mention_recall', function () {
+        getSettings().ledgerMentionRecall = $(this).prop('checked');
+        saveSettings();
+        updateInjection(true);
+    });
+    $(document).on('input', '#sc_ledger_mention_max', function () {
+        getSettings().ledgerMentionMax = parseInt($(this).val()) || 0;
+        $('#sc_ledger_mention_max_val').text(getSettings().ledgerMentionMax);
+        saveSettings();
+        updateInjection(true);
+    });
+    $(document).on('input', '#sc_ledger_mention_window', function () {
+        getSettings().ledgerMentionWindow = Math.max(1, parseInt($(this).val()) || 3);
+        $('#sc_ledger_mention_window_val').text(getSettings().ledgerMentionWindow);
+        saveSettings();
+        updateInjection(true);
+    });
     $(document).on('change', '#sc_ledger_auto_rewind', function () {
         getSettings().ledgerAutoRewind = $(this).prop('checked');
         saveSettings();
@@ -8546,7 +8613,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — mention is not presence: status-block formats print their off-screen watchlist's names into EVERY message, so the name-in-text presence scan injected explicitly absent characters as \"ALSO PRESENT in this scene\" every turn — false attendance handed to the storyteller. The cast selection now reads structured presence markers as ground truth (defaults match [IST: name|…] in-scene and [ACW: name|…] watchlist lines; both regexes configurable): the newest message with an in-scene list is the attendance sheet, watchlist names are hard-barred from the present tiers and guaranteed a priority roster line with their last-seen state, unlisted names fall back to a prose scan over marker-stripped text, and chats without markers behave byte-identically to before. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — recalled by mention: a one-line roster entry is not enough to write ABOUT someone truthfully, so the moment the story's newest prose names an off-screen character, their full ledger page rides along for the turn — explicitly framed as \"JUST MENTIONED, NOT IN THE SCENE\" so depth of context is never read as permission to put them in the room — and drops back to a roster line when the conversation moves on. Marker-stripped prose only (a watchlist status line is not a mention), story-investment weight ranks who wins the capped slots, recalled pages replace the character's roster line for the turn, the panel shows a 📣 recalled badge, and the ledger auditor prioritizes recalled characters alongside injected ones since their content reaches the storyteller verbatim. Legacy no-marker chats are naturally unaffected (a prose mention already grants full presence there). Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
