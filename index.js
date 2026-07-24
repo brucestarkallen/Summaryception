@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.89.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.90.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -126,6 +126,9 @@ const defaultSettings = Object.freeze({
     ledgerInjectRoster: true,      // also inject a compact one-line-per-character roster of EVERYONE off-screen, so long-absent characters are never forgotten and return consistently
     ledgerRosterMax: 12,           // cap on how many off-screen characters the roster lists at once (most-recently-updated first)
     ledgerRosterRotate: true,      // when the off-screen cast exceeds the cap: keep the most-recent anchored and ROTATE the rest through the remaining slots one step per turn, so a small cap still refreshes everyone over time
+    ledgerRegressionWatch: true,   // give the auditor each audited character's OWN arc history, and let it catch a relationship silently rewritten backward — the one error class it is structurally blind to, since a cold current page never contradicts itself
+    ledgerRegressionJump: 0.45,    // how much of the arc text must change between consecutive versions to count as a SNAP worth auditing (0-1; a slow trajectory field should evolve gradually)
+    ledgerRegressionMaxVersions: 6,// how many arc versions ride along in the audit packet (oldest established + the recent walk)
     ledgerAutoRewind: true,        // on branch/bulk-trim, auto-rewind the ledger from a periodic checkpoint and re-derive only the small delta, instead of rebuilding from the whole history
 
     // ── Ledger self-audit ──
@@ -153,6 +156,7 @@ The specific failures you exist to catch:
 - PLANNED, NOT PLAYED — the entry describes an event, notice, meeting, or confrontation that no evidence shows happening on screen. Story plans and author notes are not events.
 - INFERENCE HARDENED INTO FACT — the entry states as certain what the evidence only suggests (a mood read from behavior, a motive guessed at). Correct it to a read ("seems", "reads as"), not a certainty.
 - INVENTED DETAIL — names, places, objects, or history the evidence does not contain.
+- RELATIONSHIP REGRESSION — the record has quietly rewritten a relationship BACKWARD. When <relationship_history> is present it shows how each character's arc read over time, oldest first. Closeness, trust, and loyalty the story spent scenes earning do not evaporate off screen: if the current arc drops an established bond to something colder, more distant, or more formal — a devoted ally back to a wary acquaintance, an earned confidence back to a stranger's caution — and neither the evidence nor prior context shows a RUPTURE that caused it (a betrayal, a discovery, a fight, a revelation), that is regression, not development. Correct the arc to carry the established relationship forward, keeping any genuine change the evidence DOES support. A real rupture, once shown, is legitimate development: keep it, and keep the history that led there. Absence of warmth in one short evidence window is not a rupture.
 
 RULES:
 - If the evidence does not let you JUDGE a claim, LEAVE IT ALONE. You are looking only for claims you can positively show the story does not support. Not seeing something is not the same as disproving it.
@@ -2024,17 +2028,89 @@ async function callLedgerScribe(storyTxt, contextStr, ledgerStr) {
 // Pure: who gets audited this run. Injected characters first (they are shaping the
 // story RIGHT NOW, so their errors are live), then least-recently-audited, so the
 // whole cast cycles through over time. `_a` = turn at which an entry was last audited.
-function _ledgerAuditTargets(ledger, injectedNames, maxPerRun) {
+// Pure: a character's relationship trajectory — every recorded version of their
+// arc, oldest first. The notes journal has always held this; nothing read it.
+function _arcTrajectory(notes, name) {
+    const out = [];
+    let last = null;
+    for (const n of ledgerHistoryFor(notes, name)) {
+        if (typeof n.arc !== 'string') continue;
+        const arc = n.arc.trim();
+        if (!arc || arc === last) continue;
+        out.push({ t: n.t, arc });
+        last = arc;
+    }
+    return out;
+}
+
+// Pure: how violently the arc was rewritten between consecutive versions.
+// DELIBERATELY DIRECTION-AGNOSTIC. Deciding "colder" from free text needs
+// judgment, and a sentiment guess would fire on healthy development as readily as
+// on a regression — false alarms in a continuity record are worse than none. What
+// IS mechanically knowable: arc is the SLOW field, meant to accrete. A wholesale
+// rewrite between two consecutive reads is the fingerprint of a snap, whichever
+// way it snapped. The detector picks the candidate; the auditor — which reads the
+// evidence — is what judges whether the story earned it.
+function _arcSnapScore(traj) {
+    if (!Array.isArray(traj) || traj.length < 2) return 0;
+    let worst = 0;
+    for (let i = 1; i < traj.length; i++) {
+        const a = traj[i - 1].arc, b = traj[i].arc;
+        const span = Math.max(a.length, b.length);
+        if (span < 20) continue;                        // too short to read anything into
+        const d = _lev(a, b, span);
+        const norm = Math.min(1, d / span);
+        // A pure ADDITION is accretion, not a snap: the old text still stands inside
+        // the new one. Only rewriting what was already established counts.
+        if (b.length >= a.length && b.toLowerCase().includes(a.toLowerCase())) continue;
+        if (norm > worst) worst = norm;
+    }
+    return worst;
+}
+
+// Pure: characters whose arc snapped hard enough to be worth a look, worst first.
+function _arcRegressionCandidates(notes, names, threshold) {
+    const lim = (typeof threshold === 'number' && threshold > 0) ? threshold : 0.45;
+    const out = [];
+    for (const n of (names || [])) {
+        const score = _arcSnapScore(_arcTrajectory(notes, n));
+        if (score >= lim) out.push({ name: n, score });
+    }
+    return out.sort((a, b) => b.score - a.score).map(x => x.name);
+}
+
+// Pure: the trajectory as the auditor reads it — the oldest ESTABLISHED version
+// (what the story built) plus the most recent walk (where it stands now). The
+// middle is dropped under the cap, never the anchor: the anchor is the claim the
+// current page has to answer to.
+function _arcHistoryPacket(notes, names, maxVersions) {
+    const cap = Math.max(2, maxVersions | 0 || 6);
+    const parts = [];
+    for (const name of (names || [])) {
+        const traj = _arcTrajectory(notes, name);
+        if (traj.length < 2) continue;
+        let rows = traj;
+        if (traj.length > cap) rows = [traj[0]].concat(traj.slice(-(cap - 1)));
+        parts.push(name + ':\n' + rows.map(r => '  [turn ' + r.t + '] ' + r.arc).join('\n'));
+    }
+    return parts.join('\n\n');
+}
+
+function _ledgerAuditTargets(ledger, injectedNames, maxPerRun, snapped) {
     const names = Object.keys(ledger || {});
     if (names.length === 0) return [];
     const inj = new Set(injectedNames || []);
+    // A snapped relationship outranks the round-robin: audit budget should go where
+    // the record just changed its mind about someone, not to whoever is next in line.
+    const snap = new Set(snapped || []);
     return names
         .map(n => ({
             n,
+            snap: snap.has(n) ? 0 : 1,
             inj: inj.has(n) ? 0 : 1,
             a: (ledger[n] && typeof ledger[n]._a === 'number') ? ledger[n]._a : -1,
         }))
-        .sort((x, y) => (x.inj - y.inj) || (x.a - y.a) || (x.n < y.n ? -1 : 1))
+        .sort((x, y) => (x.snap - y.snap) || (x.inj - y.inj) || (x.a - y.a) || (x.n < y.n ? -1 : 1))
         .slice(0, Math.max(1, maxPerRun | 0))
         .map(x => x.n);
 }
@@ -2131,7 +2207,11 @@ async function auditLedgerEntries(opts = {}) {
             injected = cast.shown.map(x => x.name).concat((cast.recalled || []).map(x => x.name));
         } catch (_) { injected = []; }
 
-        const targets = _ledgerAuditTargets(ledger, injected, s.ledgerAuditMaxPerRun ?? 4);
+        let snapped = [];
+        try {
+            if (s.ledgerRegressionWatch !== false) snapped = _arcRegressionCandidates(store.ledgerNotes, Object.keys(ledger), s.ledgerRegressionJump);
+        } catch (_) { snapped = []; }
+        const targets = _ledgerAuditTargets(ledger, injected, s.ledgerAuditMaxPerRun ?? 4, snapped);
         if (targets.length === 0) return false;
 
         // Ambiguity is a property of the whole cast, not of this run's subset: Claire
@@ -2145,7 +2225,17 @@ async function auditLedgerEntries(opts = {}) {
         const subLedger = {};
         for (const n of targets) subLedger[n] = ledger[n];
         const entriesStr = serializeLedgerForScribe(subLedger, s.ledgerContextMaxChars);
-        const contextStr = buildLedgerContext(chat.length, LEDGER_GIST_CAP);
+        let contextStr = buildLedgerContext(chat.length, LEDGER_GIST_CAP);
+        // The auditor's structural blind spot: it sees only the CURRENT page, so a
+        // relationship rewritten backward never contradicts anything it can read —
+        // and a cold evidence window positively CONFIRMS the cold page. Its own
+        // history is the only witness, and the notes journal has held it all along.
+        try {
+            if (s.ledgerRegressionWatch !== false) {
+                const hist = _arcHistoryPacket(store.ledgerNotes, targets, s.ledgerRegressionMaxVersions ?? 6);
+                if (hist) contextStr += '\n\n<relationship_history>\nHow these characters\' relationships read over time, oldest first. This is what the story ESTABLISHED; the current entry must carry it forward unless the evidence shows a rupture:\n' + hist + '\n</relationship_history>';
+            }
+        } catch (_) { /* history is an enhancement; the audit runs without it */ }
 
         _ledgerAuditActive = true;
         const startEpoch = _chatEpoch;
@@ -5956,6 +6046,7 @@ function updateUI() {
         $('#sc_ledger_presence_markers').prop('checked', s.ledgerPresenceMarkers !== false);
         $('#sc_ledger_presence_on').val(s.ledgerPresenceOnPattern ?? defaultSettings.ledgerPresenceOnPattern);
         $('#sc_ledger_presence_off').val(s.ledgerPresenceOffPattern ?? defaultSettings.ledgerPresenceOffPattern);
+        $('#sc_ledger_regression_watch').prop('checked', s.ledgerRegressionWatch !== false);
         $('#sc_ledger_mention_recall').prop('checked', s.ledgerMentionRecall !== false);
         $('#sc_ledger_mention_max').val(s.ledgerMentionMax ?? 3);
         $('#sc_ledger_mention_max_val').text(s.ledgerMentionMax ?? 3);
@@ -7538,6 +7629,10 @@ function bindUIEvents() {
         saveSettings();
         updateInjection(true);
     });
+    $(document).on('change', '#sc_ledger_regression_watch', function () {
+        getSettings().ledgerRegressionWatch = $(this).prop('checked');
+        saveSettings();
+    });
     $(document).on('change', '#sc_ledger_mention_recall', function () {
         getSettings().ledgerMentionRecall = $(this).prop('checked');
         saveSettings();
@@ -8774,7 +8869,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — flashbacks that arrive on time: summaries keep WHAT happened and lose HOW it was said, so a callback paraphrases a paraphrase. The existing model-selected recall could not close this — its selection is an LLM call, so it gated on the busy channel and fired on GENERATION_ENDED, landing one turn LATE and skipping most turns. Keyword ranking needs no call, so the new flashback pass runs inside the pre-generation injection and lands on the very reply that raised the memory: the live edge of the story (your message + the last reply, meta-stripped) is scored against the memory index by rare-term overlap, with your ledger's own character names weighted heaviest, and the winning scenes are quoted VERBATIM with their in-story date (configurable header regex) plus distance from now. Scenes still inside the verbatim window are never re-quoted, and below the relevance floor it injects nothing — silence beats a wrong memory. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the auditor can finally see a relationship's own history: closeness the story spent scenes earning was evaporating off screen, and the audit was structurally blind to it — it reads only the CURRENT page, which never contradicts itself, while a cold evidence window positively confirms a cold entry. The notes journal has held every past version of each character's arc all along; nothing read it. Now a deterministic, DIRECTION-AGNOSTIC detector finds arcs rewritten wholesale between consecutive reads (pure accretion scores zero — growth is not a snap), those characters jump the audit queue, and the audit packet carries their arc history with the oldest ESTABLISHED version always surviving the cap — it is the claim the current page must answer to. The auditor then judges what the detector cannot: a bond dropped backward with no rupture in the evidence is corrected forward, while a betrayal or falling-out actually shown on screen is kept as genuine development. No numbers are ever injected into the story. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

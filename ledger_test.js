@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -62,7 +62,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -2264,6 +2264,57 @@ section('flashback — end-to-end injection');
     L.__setSettings(Object.assign({}, defaultSettings, { verbatimTurns: 4, flashbackMinScore: 1 }));
     L.__setStore({ ledger: {}, layers: [[]] });
     ok(L.buildFlashbackBlock() === '', 'no memory snippets yet -> silent');
+}
+
+
+// ─── relationship regression: the auditor stops being blind to history ───
+section('relationship regression — arc history + snap detection');
+{
+    const N = (t, name, arc) => ({ t, name, arc, at: t });
+    const grown = [
+        N(10, 'Honami', 'Wary of him; polite distance.'),
+        N(40, 'Honami', 'Wary of him; polite distance. Warmed after the exam — she defends him now.'),
+        N(70, 'Honami', 'Wary of him; polite distance. Warmed after the exam — she defends him now. Trusts him with the table.'),
+    ];
+    const snapped = grown.concat([N(100, 'Honami', 'A classmate she barely knows; keeps her distance.')]);
+
+    const tGrown = L._arcTrajectory(grown, 'Honami');
+    ok(tGrown.length === 3 && tGrown[0].t === 10, 'trajectory = every recorded arc version, oldest first');
+    ok(L._arcTrajectory(grown.concat([N(80, 'Honami', 'Wary of him; polite distance. Warmed after the exam — she defends him now. Trusts him with the table.')]), 'Honami').length === 3, 'an unchanged re-record is not a new version');
+    ok(L._arcTrajectory(grown, 'Nobody').length === 0, 'unknown character -> empty trajectory');
+    ok(L._arcTrajectory(null, 'Honami').length === 0, 'no notes -> empty trajectory, no throw');
+
+    ok(L._arcSnapScore(tGrown) === 0, 'pure accretion (the old text still stands inside the new) scores ZERO — growth is not a snap');
+    ok(L._arcSnapScore(L._arcTrajectory(snapped, 'Honami')) > 0.45, 'a wholesale rewrite of an established arc scores as a snap');
+    ok(L._arcSnapScore([]) === 0 && L._arcSnapScore([{ t: 1, arc: 'x' }]) === 0, 'fewer than two versions cannot snap');
+    ok(L._arcSnapScore([{ t: 1, arc: 'cold' }, { t: 2, arc: 'warm' }]) === 0, 'very short arcs are not read into (noise floor)');
+
+    const cands = L._arcRegressionCandidates(snapped, ['Honami'], 0.45);
+    ok(cands.includes('Honami'), 'snapped character becomes an audit candidate');
+    ok(L._arcRegressionCandidates(grown, ['Honami'], 0.45).length === 0, 'a character who only grew is NOT flagged — no false alarm on healthy development');
+
+    const two = snapped.concat([
+        N(10, 'Silas', 'Rivalrous but respectful.'),
+        N(60, 'Silas', 'Rivalrous but respectful, and increasingly resentful.'),
+    ]);
+    ok(L._arcRegressionCandidates(two, ['Silas', 'Honami'], 0.45)[0] === 'Honami', 'candidates ordered worst-snap first');
+
+    const many = [];
+    for (let i = 1; i <= 12; i++) many.push(N(i * 10, 'Honami', 'version ' + i + ' of a relationship that keeps being rewritten wholesale ' + 'x'.repeat(i)));
+    const packet = L._arcHistoryPacket(many, ['Honami'], 4);
+    ok(packet.includes('[turn 10]'), 'the OLDEST established version always survives the cap — it is the claim the current page must answer to');
+    ok(packet.includes('[turn 120]'), 'and the newest version is present');
+    ok((packet.match(/\[turn /g) || []).length === 4, 'the cap is respected; the middle is what gets dropped');
+    ok(L._arcHistoryPacket(grown, ['Nobody'], 6) === '', 'no history -> empty packet, nothing injected into the audit');
+
+    const led = { Honami: { core: 'x', _a: 999 }, Alexia: { core: 'x', _a: 0 }, Silas: { core: 'x', _a: 1 } };
+    ok(L._ledgerAuditTargets(led, [], 1, ['Honami'])[0] === 'Honami', 'a snapped relationship jumps the audit queue even when freshly audited');
+    ok(L._ledgerAuditTargets(led, [], 1, [])[0] === 'Alexia', 'with nothing snapped, the existing least-recently-audited order is untouched');
+
+    // The doctrine reaches the model, and the history reaches the packet.
+    ok(SRC_FULL.includes('RELATIONSHIP REGRESSION'), 'the auditor prompt carries the regression clause');
+    ok(SRC_FULL.includes('<relationship_history>'), 'arc history is appended to the audit context');
+    ok(SRC_FULL.includes('_arcRegressionCandidates(store.ledgerNotes'), 'candidates are computed from the notes journal at audit time');
 }
 
 console.log('\n────────────────────────────────────────');
