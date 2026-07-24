@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.90.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.91.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -73,6 +73,18 @@ const defaultSettings = Object.freeze({
         `Role: you correct a single memory-snippet to remove a continuity error. You get the current SNIPPET and a CORRECTION (the established truth). Rewrite the snippet so it is fully consistent with the correction, changing ONLY what the correction requires and preserving everything else — length, tone, and all other facts. Do not add commentary or new events. Output ONLY the corrected snippet text — no preamble, no quotes, no labels. If the snippet already matches the correction, output it unchanged.`,
     continuityFixUserPrompt:
         `<snippet>{{snippet}}</snippet>\n<correction>{{story_txt}}</correction>\n<record>{{context_str}}</record>\n\nRewrite <snippet> so it is consistent with <correction>, changing only what is needed and keeping everything else intact. Output only the corrected snippet text.`,
+    // ── Promotion shrink guard ──
+    // Promotion is the one IRREVERSIBLE operation in the memory system: N snippets
+    // are spliced out of a layer and replaced by a single meta-summary. A thin
+    // reply ("The story continued.") destroys every source with no signal and no
+    // way back. Compression is the POINT of promotion, so the guard cannot object
+    // to shrinking — only to collapse.
+    shrinkGuard: true,
+    shrinkMinRatio: 0.12,          // merged text below this fraction of its sources reads as collapse, not compression
+    shrinkMinChars: 120,           // and an absolute floor, so a tiny source set cannot pass a ratio test trivially
+    shrinkRetry: true,             // one stricter retry before accepting a thin merge
+    shrinkStashChars: 4000,        // on a persistent thin merge, keep this many chars of the ORIGINAL snippets on the merged record so nothing is unrecoverable
+
     // ── Pinned Memories + Verbatim Recall ──
     pinMaxChars: 1500,
     pinsMaxTotalChars: 6000,
@@ -4710,6 +4722,34 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
 
 // ─── Core: Layer Promotion ("ception") ──────────────────────────────
 
+// Pure: did the meta-summary COMPRESS its sources, or collapse them?
+// Promotion exists to compress, so a small ratio is normal and expected — the
+// only thing knowable without judgment is that a summary which retains almost
+// nothing of its sources' volume cannot be carrying their content. Both a ratio
+// and an absolute floor, because a tiny source set passes any ratio trivially.
+function _shrinkVerdict(srcLen, outLen, s) {
+    const minRatio = (typeof s?.shrinkMinRatio === 'number') ? s.shrinkMinRatio : 0.12;
+    const minChars = (typeof s?.shrinkMinChars === 'number') ? s.shrinkMinChars : 120;
+    const src = Math.max(0, srcLen | 0);
+    const out = Math.max(0, outLen | 0);
+    const ratio = src > 0 ? (out / src) : 1;
+    // Nothing to judge when the sources are already tiny — a short source set has
+    // no volume to lose, and flagging it would be noise.
+    if (src < 400) return { thin: false, ratio };
+    return { thin: (ratio < minRatio) || (out < minChars), ratio };
+}
+
+// The sources, kept verbatim on the merged record when a thin merge is accepted.
+// Bounded: this rides in chat metadata, and an unbounded stash would trade one
+// failure (silent loss) for another (quota death killing checkpoints).
+function _stashSources(texts, cap) {
+    const lim = Math.max(0, cap | 0);
+    if (!lim || !Array.isArray(texts)) return '';
+    const joined = texts.filter(t => typeof t === 'string' && t.trim()).join('\n\n');
+    if (joined.length <= lim) return joined;
+    return joined.slice(0, lim).replace(/\s+\S*$/, '') + '\n…(stash truncated)';
+}
+
 async function maybePromoteLayer(layerIndex) {
     const s = getSettings();
     const store = getChatStore();
@@ -4760,10 +4800,31 @@ async function maybePromoteLayer(layerIndex) {
         { timeOut: 3000, progressBar: true }
     );
 
-    const metaSummary = await callSummarizer(storyTxt, contextStr);
+    let metaSummary = await callSummarizer(storyTxt, contextStr);
     if (!metaSummary) {
         layer.unshift(...toMerge);
         return;
+    }
+
+    // SHRINK GUARD. Everything below this point destroys `toMerge` permanently.
+    let shrink = { thin: false, ratio: 1 };
+    if (s.shrinkGuard !== false) {
+        shrink = _shrinkVerdict(storyTxt.length, metaSummary.length, s);
+        if (shrink.thin && s.shrinkRetry !== false) {
+            log(`Promotion shrink guard: merged text is ${(shrink.ratio * 100).toFixed(1)}% of its sources — retrying once, stricter.`);
+            try {
+                const retry = await callSummarizer(storyTxt, contextStr, {
+                    userPrompt: (s.summarizerUserPrompt || '') +
+                        '\n\nCRITICAL: the passages above are ALREADY summaries of long scenes — each line is load-bearing. Your job is to MERGE them, not to shorten them further. Every distinct event, name, commitment, and consequence in them must survive into your output. Do not drop a scene because it seems minor. Do not write a one-line gist.',
+                });
+                if (retry) {
+                    const v2 = _shrinkVerdict(storyTxt.length, retry.length, s);
+                    // Keep whichever survives more of the sources — a retry that came
+                    // back thinner is not an improvement.
+                    if (retry.length > metaSummary.length) { metaSummary = retry; shrink = v2; }
+                }
+            } catch (e) { log('Promotion shrink retry failed:', e); }
+        }
     }
 
     // Propagate a covering turnRange so the merged snippet stays recallable.
@@ -4782,6 +4843,21 @@ async function maybePromoteLayer(layerIndex) {
         mergedCount: toMerge.length,
         timestamp: Date.now(),
     };
+    // A thin merge is still accepted — refusing forever would grow the layer without
+    // bound — but it is never accepted SILENTLY, and never irreversibly: the sources
+    // ride along on the record, and the user is told which snippet to look at.
+    if (shrink.thin) {
+        merged.thinMerge = { ratio: Math.round(shrink.ratio * 1000) / 1000, srcChars: storyTxt.length, outChars: metaSummary.length, at: Date.now() };
+        const stash = _stashSources(toMerge.map(sn => sn.text), s.shrinkStashChars ?? 4000);
+        if (stash) merged.thinSources = stash;
+        log(`Promotion shrink guard: ACCEPTED a thin merge (${(shrink.ratio * 100).toFixed(1)}% of sources); originals stashed on the snippet.`);
+        try {
+            toastr.warning(
+                `Memory compression looks lossy: ${toMerge.length} snippets (${storyTxt.length} chars) merged into ${metaSummary.length} chars — only ${(shrink.ratio * 100).toFixed(0)}% survived. The originals were kept on that Layer ${layerIndex + 1} snippet; open the Memory panel to check it.`,
+                'Summaryception', { timeOut: 12000 },
+            );
+        } catch (_) { /* toast is a courtesy, never a dependency */ }
+    }
     if (childRanges.length > 0) {
         merged.turnRange = [
             Math.min(...childRanges.map(r => r[0])),
@@ -6059,6 +6135,7 @@ function updateUI() {
         $('#sc_recall_k').val(s.recallMaxSnippets??4);
         $('#sc_recall_persist').val(s.recallPersist??1);
         $('#sc_recall_auto').prop('checked', s.recallAuto===true);
+        $('#sc_shrink_guard').prop('checked', s.shrinkGuard !== false);
         $('#sc_flashback_enabled').prop('checked', s.flashbackEnabled !== false);
         $('#sc_flashback_max').val(s.flashbackMax ?? 2);
         $('#sc_flashback_chars').val(s.flashbackMaxChars ?? 2500);
@@ -6385,11 +6462,24 @@ function updateSnippetBrowser() {
                     detailRow = `<div class="sc-detail-row" data-layer="${i}" data-idx="${j}">${detailText}${detailRedo}${detailDel}${ledgerBtn}</div>`;
                 }
 
+                // A merge that kept almost nothing of its sources says so, and offers
+                // the originals back. Silent lossy compression is the failure this
+                // row exists to make impossible.
+                let thinRow = '';
+                if (sn.thinMerge) {
+                    const pct = Math.round((sn.thinMerge.ratio || 0) * 100);
+                    const restoreBtn = sn.thinSources
+                        ? `<button class="sc-thin-restore menu_button" data-layer="${i}" data-idx="${j}" title="Replace this snippet's text with the original snippets it was merged from">↩ Restore originals</button>`
+                        : '';
+                    thinRow = `<div class="sc-thin-row" data-layer="${i}" data-idx="${j}">⚠ Lossy merge: ${sn.thinMerge.srcChars} chars of source became ${sn.thinMerge.outChars} (${pct}% kept).${sn.thinSources ? ' The originals were preserved.' : ''} ${restoreBtn}</div>`;
+                }
+
                 html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}">
                 <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" title="Click to edit">${escapeHtml(sn.text)}</span>
                 <span class="sc-snippet-meta">${rangeStr}${seedStr}</span>
                 ${redoBtn}
                 <button class="sc-snippet-delete menu_button fa-solid fa-xmark" title="Delete this snippet"></button>
+                ${thinRow}
                 ${detailRow}
                 </div>`;
             }
@@ -6447,6 +6537,21 @@ function updateSnippetBrowser() {
     });
 
     // Redo snippet
+    $('.sc-thin-restore').off('click').on('click', async function () {
+        const i = parseInt($(this).data('layer'), 10);
+        const j = parseInt($(this).data('idx'), 10);
+        const st = getChatStore();
+        const sn = st.layers?.[i]?.[j];
+        if (!sn || !sn.thinSources) { toastr.error('Those originals are no longer available.', 'Summaryception'); return; }
+        sn.text = sn.thinSources;
+        delete sn.thinSources;
+        delete sn.thinMerge;
+        await saveChatStore();
+        updateInjection(true);
+        updateUI();
+        toastr.success('Restored the original snippets into this memory. Edit it down by hand if it is too long.', 'Summaryception', { timeOut: 6000 });
+    });
+
     $('.sc-snippet-redo').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-snippet').data('layer'));
         const snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
@@ -7855,6 +7960,7 @@ function bindUIEvents() {
     $(document).on('input', '#sc_recall_k', function(){ getSettings().recallMaxSnippets=parseInt($(this).val())||4; saveSettings(); });
     $(document).on('change', '#sc_recall_auto', function(){ getSettings().recallAuto=$(this).prop('checked'); saveSettings(); if(!$(this).prop('checked')) clearRecall(); });
     $(document).on('input', '#sc_recall_persist', function(){ getSettings().recallPersist=parseInt($(this).val())||1; saveSettings(); });
+    $(document).on('change', '#sc_shrink_guard', function(){ getSettings().shrinkGuard=$(this).prop('checked'); saveSettings(); });
     $(document).on('change', '#sc_flashback_enabled', function(){ getSettings().flashbackEnabled=$(this).prop('checked'); saveSettings(); updateInjection(true); });
     $(document).on('input', '#sc_flashback_max', function(){ getSettings().flashbackMax=Math.max(1,parseInt($(this).val())||2); saveSettings(); updateInjection(true); });
     $(document).on('input', '#sc_flashback_chars', function(){ getSettings().flashbackMaxChars=Math.max(400,parseInt($(this).val())||2500); saveSettings(); updateInjection(true); });
@@ -8869,7 +8975,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the auditor can finally see a relationship's own history: closeness the story spent scenes earning was evaporating off screen, and the audit was structurally blind to it — it reads only the CURRENT page, which never contradicts itself, while a cold evidence window positively confirms a cold entry. The notes journal has held every past version of each character's arc all along; nothing read it. Now a deterministic, DIRECTION-AGNOSTIC detector finds arcs rewritten wholesale between consecutive reads (pure accretion scores zero — growth is not a snap), those characters jump the audit queue, and the audit packet carries their arc history with the oldest ESTABLISHED version always surviving the cap — it is the claim the current page must answer to. The auditor then judges what the detector cannot: a bond dropped backward with no rupture in the evidence is corrected forward, while a betrayal or falling-out actually shown on screen is kept as genuine development. No numbers are ever injected into the story. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — lossy compression can no longer happen quietly: layer promotion is the one IRREVERSIBLE operation in the memory system, splicing N snippets out and replacing them with a single meta-summary, so a thin reply destroyed every source with no signal and no way back. The guard measures how much of the sources survived (a ratio AND an absolute floor, because a small source set passes any ratio trivially; compression is the point of promotion, so only collapse is flagged, never healthy shrinkage), retries once with a stricter merge instruction, and takes the retry only if it survives MORE of the sources. A still-thin merge is accepted rather than refused — refusing forever would grow the layer without bound — but never silently and never irreversibly: the originals are stashed on the snippet (bounded, so it cannot trade silent loss for quota death), a warning names the snippet, and the Memory panel offers one-click restore. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

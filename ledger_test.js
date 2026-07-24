@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -62,7 +62,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -78,6 +78,7 @@ const L = new Function(sandbox)();
 let pass = 0, fail = 0;
 const fails = [];
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; fails.push(msg); console.log('  ✗ ' + msg); } }
+function _S(v){ return v || {}; }
 function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + `  [got ${JSON.stringify(a)} want ${JSON.stringify(b)}]`); }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
@@ -2315,6 +2316,39 @@ section('relationship regression — arc history + snap detection');
     ok(SRC_FULL.includes('RELATIONSHIP REGRESSION'), 'the auditor prompt carries the regression clause');
     ok(SRC_FULL.includes('<relationship_history>'), 'arc history is appended to the audit context');
     ok(SRC_FULL.includes('_arcRegressionCandidates(store.ledgerNotes'), 'candidates are computed from the notes journal at audit time');
+}
+
+
+// ─── shrink guard: promotion can no longer destroy its sources silently ───
+section('shrink guard — lossy merges are caught, warned, and reversible');
+{
+    const s = { shrinkMinRatio: 0.12, shrinkMinChars: 120 };
+    const big = 5000;
+    ok(_S(L._shrinkVerdict(big, 2000, s)).thin === false, 'healthy compression (40% kept) is NOT flagged — compression is the point of promotion');
+    ok(_S(L._shrinkVerdict(big, 900, s)).thin === false, 'ordinary strong compression (18%) is still fine');
+    ok(_S(L._shrinkVerdict(big, 200, s)).thin === true, 'a collapse (4% kept) IS flagged');
+    ok(_S(L._shrinkVerdict(800, 100, s)).thin === true, 'ratio passes (12.5%) but the absolute char floor does not — still flagged, so a small source set cannot slip through on ratio alone');
+    ok(_S(L._shrinkVerdict(300, 20, s)).thin === false, 'a tiny source set is never flagged — no volume to lose, flagging it would be noise');
+    ok(_S(L._shrinkVerdict(0, 0, s)).ratio === 1, 'empty source cannot divide by zero');
+    const v = _S(L._shrinkVerdict(1000, 100, s));
+    ok(Math.abs(v.ratio - 0.1) < 1e-9, 'ratio is reported for the warning text');
+
+    // The stash keeps the originals recoverable, bounded so it cannot kill the quota.
+    const stash = L._stashSources(['alpha scene text', 'beta scene text'], 4000);
+    ok(stash.includes('alpha scene text') && stash.includes('beta scene text'), 'stash preserves every source snippet verbatim');
+    const capped = L._stashSources(['x'.repeat(9000)], 500);
+    ok(capped.length <= 540 && /stash truncated/.test(capped), 'stash is bounded — an unbounded one would trade silent loss for quota death');
+    ok(L._stashSources(['a'], 0) === '' && L._stashSources(null, 4000) === '', 'stash disabled or absent -> empty, no throw');
+
+    // Wiring contracts: the guard actually sits on the destructive path.
+    ok(SRC_FULL.includes('let metaSummary = await callSummarizer(storyTxt, contextStr);'), 'the merge result is mutable so a stricter retry can replace it');
+    ok(SRC_FULL.includes('if (retry.length > metaSummary.length) { metaSummary = retry; shrink = v2; }'), 'a retry is only taken when it survives MORE of the sources');
+    ok(SRC_FULL.includes('merged.thinMerge ='), 'a thin merge is recorded on the snippet, never accepted silently');
+    ok(SRC_FULL.includes('if (stash) merged.thinSources = stash;'), 'and the originals ride along so the loss is reversible');
+    ok(SRC_FULL.includes('sc-thin-restore'), 'the Memory panel offers a one-click restore');
+    ok(SRC_FULL.includes("sn.text = sn.thinSources;"), 'restore puts the original snippets back into the memory');
+    ok(/sc-thin-restore[\s\S]{0,900}await saveChatStore\(\)/.test(SRC_FULL), 'restore persists through saveChatStore — the one real persistence path (a saveChatDebounced call here is a ReferenceError; this extension never imports it)');
+    ok(!/saveChatDebounced/.test(SRC_FULL), 'saveChatDebounced is never referenced anywhere — it is not imported in this extension');
 }
 
 console.log('\n────────────────────────────────────────');

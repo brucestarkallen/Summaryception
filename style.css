@@ -479,6 +479,25 @@
 /* ─── Sister Detail Notes ─────────────────────────────────────── */
 .sc-snippet { flex-wrap: wrap; }               /* let the detail row drop to its own line */
 
+.sc-thin-row {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 4px 8px;
+    border-left: 2px solid rgba(255, 180, 60, 0.7);
+    background: rgba(255, 180, 60, 0.08);
+    font-size: 0.9em;
+    opacity: 0.95;
+}
+
+.sc-thin-row .sc-thin-restore {
+    font-size: 0.9em;
+    padding: 2px 8px;
+}
+
 .sc-detail-row {
     flex-basis: 100%;
     display: flex;

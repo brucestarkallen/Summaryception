@@ -839,6 +839,14 @@
                     <div class="sc-row"><label>Max snippets (K) <input id="sc_recall_k" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label> <label>Persist (messages) <input id="sc_recall_persist" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label></div>
 
                     <div class="sc-row">
+                        <label class="checkbox_label" for="sc_shrink_guard">
+                            <input type="checkbox" id="sc_shrink_guard" />
+                            <span>Warn when memory compression looks lossy</span>
+                        </label>
+                        <small class="sc-hint">Promotion is the one <strong>irreversible</strong> step in the memory system: several snippets are replaced by a single merged one, and a thin reply would destroy them silently. This measures how much of the sources survived, retries once with a stricter instruction, and if the result is still a collapse it <strong>keeps the originals on that snippet</strong>, warns you, and offers a one-click restore in the Memory panel.</small>
+                    </div>
+
+                    <div class="sc-row">
                         <label class="checkbox_label" for="sc_flashback_enabled">
                             <input type="checkbox" id="sc_flashback_enabled" />
                             <span>Flashbacks (automatic, no extra model call)</span>
