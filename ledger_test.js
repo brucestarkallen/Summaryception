@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -62,7 +62,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -2182,6 +2182,88 @@ section('mention recall — end-to-end injection framing');
     ok(alsoPresentAt === -1 || block.slice(alsoPresentAt, framingAt === -1 ? undefined : framingAt).indexOf('Silas') === -1, 'and never as present');
     const rosterAt = block.indexOf('Other people in this world');
     ok(framingAt !== -1 && (rosterAt === -1 || framingAt < rosterAt), 'recalled section sits above the roster');
+}
+
+
+// ─── flashbacks: the exact words, dated, with zero model calls ───
+section('flashback — keyword-ranked verbatim recall');
+{
+    // Query tokenizer drops stopwords and noise, keeps the distinctive vocabulary.
+    const tk = L._fbTokens('The princess and the TEACUP at the refectory table.');
+    ok(tk.includes('princess') && tk.includes('teacup') && tk.includes('refectory'), 'tokenizer keeps distinctive words');
+    ok(!tk.includes('the') && !tk.includes('and') && !tk.includes('at'), 'tokenizer drops stopwords');
+    ok(new Set(tk).size === tk.length, 'tokens deduped');
+
+    // Ranking: the snippet sharing the query's rare terms wins; name boost decides ties.
+    const snips = [
+        { text: 'Jovan and Alexia argued about the rematch terms on the platform.', a: 0, b: 3 },
+        { text: 'Honami served lunch and the weather was mild.', a: 4, b: 7 },
+        { text: 'Thibault shouted about hospitality in the yard.', a: 8, b: 11 },
+    ];
+    const q = L._fbTokens('alexia rematch terms');
+    const ranked = L._fbScore(q, snips, new Set(['alexia', 'jovan']), 3).sort((x, y) => y.score - x.score);
+    ok(ranked[0].sn.a === 0, 'the scene sharing the query vocabulary ranks first');
+    ok(ranked[0].score > ranked[1].score, 'and scores strictly higher than an unrelated scene');
+    const noHit = L._fbScore(L._fbTokens('dragons volcano prophecy'), snips, new Set(), 3);
+    ok(noHit.every(r => r.score === 0), 'a query sharing nothing scores zero — the floor keeps silence');
+    const boosted = L._fbScore(L._fbTokens('alexia'), snips, new Set(['alexia']), 5);
+    const plain = L._fbScore(L._fbTokens('alexia'), snips, new Set(), 5);
+    ok(boosted[0].score > plain[0].score, 'ledger names outrank common words (name boost applied)');
+
+    // Date labelling reads the scene header; falls back to distance.
+    const sFb = { flashbackDatePattern: '^\\[[^\\]]*?\\u2014\\s*([^|\\]]+)' };
+    const withHeader = '[Refectory, Marcroft Academy \u2014 Tideday, Seedfall 8, 1024 AM | 12:16 | bright]\nJovan set his spoon down.';
+    const lbl = L._fbDateLabel(withHeader, sFb, 10, 20, 61);
+    ok(/Tideday, Seedfall 8, 1024 AM/.test(lbl), 'in-story date extracted from the scene header');
+    ok(/40 messages earlier/.test(lbl), 'and paired with distance from now');
+    ok(/messages earlier/.test(L._fbDateLabel('No header here at all.', sFb, 10, 20, 61)), 'no header -> distance-only label');
+    ok(typeof L._fbDateLabel('x', { flashbackDatePattern: '([unclosed' }, 1, 2, 9) === 'string', 'invalid date regex never throws');
+}
+
+section('flashback — end-to-end injection');
+{
+    const mkChat = (n) => {
+        const c = [];
+        for (let i = 0; i < n; i++) c.push({ mes: 'filler turn ' + i, is_user: i % 2 === 0 });
+        return c;
+    };
+    const chat = mkChat(40);
+    chat[4] = { mes: '[Platform 3, Marcroft \u2014 Duskday, Seedfall 1, 1024 AM | 07:40]\n"When I beat you, I want it to mean something," Alexia said, and threw the sword.' };
+    chat[5] = { mes: 'Jovan said nothing.' };
+    chat[38] = { mes: 'Alexia mentioned the thrown sword and what she said about it meaning something.', is_user: true };
+    L.__setChat(chat);
+    L.__setSettings(Object.assign({}, defaultSettings, { verbatimTurns: 4, flashbackMax: 2, flashbackMinScore: 1 }));
+    L.__setStore({
+        ledger: { 'Alexia Valois': { core: 'proud', updatedAt: 1 } },
+        layers: [[
+            { text: 'Alexia threw the sword on the platform and said beating him must mean something.', turnRange: [4, 5] },
+            { text: 'Honami arranged the lunch table and poured tea for everyone.', turnRange: [8, 9] },
+        ]],
+    });
+    const block = L.buildFlashbackBlock();
+    ok(block.includes('<recalled_scenes>'), 'flashback block emitted when an old scene matches');
+    ok(block.includes('I want it to mean something'), 'the ORIGINAL words are quoted verbatim, not the summary');
+    ok(block.includes('Duskday, Seedfall 1, 1024 AM'), 'the flashback carries its in-story date');
+    ok(block.includes('PAST events, already over'), 'framed as past so it is never replayed as the present scene');
+    ok(!block.includes('Honami arranged the lunch table'), 'irrelevant scenes are not injected');
+
+    // Silence when nothing is relevant — a wrong memory is worse than none.
+    L.__setChat(chat.slice(0, 38).concat([{ mes: 'The weather turned cold and nothing else happened.', is_user: true }]));
+    ok(L.buildFlashbackBlock() === '', 'no relevant scene -> nothing injected');
+
+    // Toggle off.
+    L.__setChat(chat);
+    L.__setSettings(Object.assign({}, defaultSettings, { verbatimTurns: 4, flashbackEnabled: false, flashbackMinScore: 1 }));
+    ok(L.buildFlashbackBlock() === '', 'feature off -> nothing injected');
+
+    // Never quote what is already verbatim in context.
+    L.__setSettings(Object.assign({}, defaultSettings, { verbatimTurns: 40, flashbackMinScore: 1 }));
+    ok(L.buildFlashbackBlock() === '', 'a scene still inside the verbatim window is never re-quoted');
+
+    // No snippets at all (fresh chat) -> silent, no throw.
+    L.__setSettings(Object.assign({}, defaultSettings, { verbatimTurns: 4, flashbackMinScore: 1 }));
+    L.__setStore({ ledger: {}, layers: [[]] });
+    ok(L.buildFlashbackBlock() === '', 'no memory snippets yet -> silent');
 }
 
 console.log('\n────────────────────────────────────────');

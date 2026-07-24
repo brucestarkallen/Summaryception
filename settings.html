@@ -829,6 +829,27 @@
                     <div class="sc-row"><input id="sc_recall_query" class="text_pole" type="text" placeholder="e.g. the bridge battle promise" /></div>
                     <div class="sc-row sc-editor-actions"><button id="sc_recall_go" class="menu_button">🔎 Recall</button><button id="sc_recall_clear" class="menu_button">Clear</button><button id="sc_recall_to_notepad" class="menu_button">→ Notepad</button></div>
                     <div class="sc-row"><label>Max snippets (K) <input id="sc_recall_k" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label> <label>Persist (messages) <input id="sc_recall_persist" class="text_pole" type="number" min="1" max="10" style="width:70px" /></label></div>
+
+                    <div class="sc-row">
+                        <label class="checkbox_label" for="sc_flashback_enabled">
+                            <input type="checkbox" id="sc_flashback_enabled" />
+                            <span>Flashbacks (automatic, no extra model call)</span>
+                        </label>
+                        <small class="sc-hint">Summaries keep <em>what</em> happened and lose <em>how it was said</em>. When the current scene touches an old beat, this finds the original scene by keyword and quotes it <strong>word-for-word with its date</strong>, so a callback echoes the real line instead of a paraphrase. Ranked using your ledger's character names, computed <strong>before</strong> generation — so it lands on the very reply that raised the memory, unlike the model-selected recall above. Injects nothing when nothing is relevant.</small>
+                    </div>
+
+                    <div class="sc-row">
+                        <label>Max scenes <input id="sc_flashback_max" class="text_pole" type="number" min="1" max="5" style="width:70px" /></label>
+                        <label>Budget (chars) <input id="sc_flashback_chars" class="text_pole" type="number" min="400" max="12000" step="100" style="width:90px" /></label>
+                        <label>Relevance floor <input id="sc_flashback_score" class="text_pole" type="number" min="0" max="20" step="0.5" style="width:70px" /></label>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_flashback_date"><span>In-story date pattern (regex)</span>
+                            <small class="sc-hint">Read from a recalled scene's header line, capture group 1 = the date shown on the flashback. Blank = label by distance only.</small>
+                        </label>
+                        <input id="sc_flashback_date" type="text" class="text_pole" placeholder="^\[[^\]]*?—\s*([^|\]]+)" />
+                    </div>
                     </details>
                     <details class="sc-collapse">
                         <summary class="sc-section-title">🚚 Memory Transplant (fresh chat · external audit)</summary>

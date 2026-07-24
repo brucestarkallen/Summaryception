@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.88.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.89.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -83,6 +83,19 @@ const defaultSettings = Object.freeze({
     recallDepth: 6,
     recallRole: 0,
     recallAuto: false,
+    // ── Flashback: keyword-ranked verbatim recall, ZERO model calls ──
+    // The LLM-selected recall above cannot serve the moment it is needed: its
+    // selection is a model call, so it gates on the busy channel and fires on
+    // GENERATION_ENDED — one turn LATE and usually skipped. Keyword ranking needs
+    // no call, so this runs inside the pre-generation injection pass and lands on
+    // the very reply that raised the memory.
+    flashbackEnabled: true,
+    flashbackMax: 2,               // max recalled scenes per turn
+    flashbackMaxChars: 2500,       // total budget for the flashback block
+    flashbackMinScore: 2.5,        // relevance floor — below this, inject nothing (silence beats a wrong memory)
+    flashbackQueryWindow: 2,       // newest messages that form the query (your message + the last reply)
+    flashbackNameBoost: 3,         // extra weight for query terms that are ledger character names — the story's own proper nouns rank a scene far better than common words
+    flashbackDatePattern: '^\\[[^\\]]*?\\u2014\\s*([^|\\]]+)',   // regex over a passage's first line, capture 1 = the in-story date/time header (default matches "[Place, Setting — Tideday, Seedfall 8, 1024 AM | ...]")
     recallSystemPrompt: 'Role: memory index selector. You receive a query and a catalog of memory snippets (JSON array of {id,text,detail}). Output STRICT JSON ONLY: an array of the snippet id strings most relevant to the query, most relevant first, maximum {{k}} ids, e.g. ["L0#3","L1#0"]. No prose, no markdown, no explanation. If nothing is relevant output [].',
 
     sisterSystemPrompt:
@@ -5216,6 +5229,143 @@ function buildCharacterBlock() {
 
 // ─── Core: Assemble Full Summary Block ──────────────────────────────
 
+// ─── Flashback: keyword-ranked verbatim recall (no model call) ───────
+// Summaries preserve WHAT happened and lose HOW it was said. When the current
+// scene touches an old beat, the exact words are what make a callback land —
+// the promise as phrased, the threat as worded. This finds the original scene by
+// keyword and quotes it verbatim with its date, so the storyteller can echo the
+// real line instead of paraphrasing a paraphrase.
+const _FB_STOP = new Set(('the a an and or but if then than that this these those of to in on at by for with from as is are was were be been being it its he she they them his her their you your i me my we our not no so do does did done have has had will would can could should just about into over under again more most very much many much what which who whom whose when where why how all any both each few other some such only own same too s t don now'.split(/\s+/)));
+
+function _fbTokens(text) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of String(text || '').toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+        const w = raw.trim();
+        if (w.length < 3 || _FB_STOP.has(w)) continue;
+        if (seen.has(w)) continue;
+        seen.add(w);
+        out.push(w);
+    }
+    return out;
+}
+
+// Relevance = how much of the query's DISTINCTIVE vocabulary a snippet carries.
+// A term appearing in many snippets says little (idf); a term that is a character
+// name in this story says a lot (nameBoost) — the ledger already knows the cast,
+// so the story's own proper nouns do the discriminating instead of common words.
+function _fbScore(qTokens, snippets, nameTokens, boost) {
+    const N = Math.max(1, snippets.length);
+    const df = new Map();
+    const docTokens = snippets.map(sn => new Set(_fbTokens((sn.text || '') + ' ' + (sn.detail || ''))));
+    for (const d of docTokens) for (const t of d) df.set(t, (df.get(t) || 0) + 1);
+    const nameSet = nameTokens instanceof Set ? nameTokens : new Set(nameTokens || []);
+    const nb = (typeof boost === 'number' && boost > 0) ? boost : 1;
+    return snippets.map((sn, i) => {
+        let score = 0;
+        const hits = [];
+        for (const t of qTokens) {
+            if (!docTokens[i].has(t)) continue;
+            const idf = Math.log(1 + N / (1 + (df.get(t) || 0)));
+            score += idf * (nameSet.has(t) ? nb : 1);
+            hits.push(t);
+        }
+        return { sn, score, hits };
+    });
+}
+
+// A memory the storyteller cannot place in time is a memory it will misuse. The
+// in-story date lives in the passage's own scene header when the format writes
+// one (configurable regex); turn distance is the always-available fallback.
+function _fbDateLabel(passage, s, a, b, chatLen) {
+    let when = '';
+    try {
+        const pat = (typeof s.flashbackDatePattern === 'string' && s.flashbackDatePattern.trim()) ? s.flashbackDatePattern : '';
+        if (pat) {
+            const firstLines = String(passage || '').split('\n').slice(0, 4);
+            const re = new RegExp(pat, 'u');
+            for (const line of firstLines) {
+                const m = re.exec(line.trim());
+                if (m && m[1] && m[1].trim()) { when = m[1].trim().replace(/\s+/g, ' '); break; }
+            }
+        }
+    } catch (_) { /* bad user regex -> fall back to turn distance */ }
+    const back = Math.max(0, (chatLen - 1) - b);
+    const dist = back > 0 ? `~${back} messages earlier` : 'earlier';
+    return when ? `${when} \u2014 ${dist}` : dist;
+}
+
+function buildFlashbackBlock() {
+    const s = getSettings();
+    if (s.flashbackEnabled === false) return '';
+    const store = getChatStore();
+    try {
+        const { chat } = SillyTavern.getContext();
+        if (!Array.isArray(chat) || !chat.length) return '';
+        const dump = buildMemoryDump();
+        const pool = dump.snippets.filter(x => x && x.turns);
+        if (!pool.length) return '';
+
+        // THE QUERY is the live edge of the story — your message and the reply it
+        // answers — read through the same meta-strip the rest of the pipeline uses,
+        // so status blocks and watchlist agendas never drive the search.
+        const qWin = Math.max(1, s.flashbackQueryWindow ?? 2);
+        const qText = chat.slice(-qWin).map(m => stripMetaBlocks(String((m && m.mes) || '').trim())).join('\n');
+        const qTokens = _fbTokens(qText);
+        if (qTokens.length < 2) return '';
+
+        const nameTokens = new Set();
+        try {
+            for (const n of Object.keys(store.ledger || {})) for (const t of _fbTokens(n)) nameTokens.add(t);
+        } catch (_) { /* no ledger yet */ }
+
+        // Never quote what is already verbatim in context — the recent window is
+        // right there, and re-injecting it is pure waste.
+        const asst = getAssistantTurns(chat);
+        const keep = Math.max(0, asst.length - (s.verbatimTurns ?? 9));
+        const verbatimFrom = (keep < asst.length && asst[keep]) ? asst[keep].index : chat.length;
+
+        const parsed = [];
+        for (const x of pool) {
+            const m = /^(\d+)-(\d+)$/.exec(String(x.turns));
+            if (!m) continue;
+            const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+            if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) continue;
+            if (b >= verbatimFrom) continue;   // already in context verbatim
+            parsed.push({ text: x.text, detail: x.detail, a, b });
+        }
+        if (!parsed.length) return '';
+
+        const floor = (typeof s.flashbackMinScore === 'number') ? s.flashbackMinScore : 2.5;
+        const ranked = _fbScore(qTokens, parsed, nameTokens, s.flashbackNameBoost ?? 3)
+            .filter(r => r.score >= floor)
+            .sort((x, y) => y.score - x.score)
+            .slice(0, Math.max(0, s.flashbackMax ?? 2));
+        if (!ranked.length) return '';
+
+        const cap = Math.max(200, s.flashbackMaxChars ?? 2500);
+        let body = '';
+        let used = 0;
+        for (const r of ranked) {
+            const passage = buildPassageFromRange(chat, r.sn.a, r.sn.b);
+            if (!passage || !passage.trim()) continue;
+            const head = '\n\u25b8 [' + _fbDateLabel(passage, s, r.sn.a, r.sn.b, chat.length) + ']\n';
+            if (used + head.length + passage.length > cap) {
+                const room = cap - used - head.length;
+                if (room < 200) break;
+                body += head + passage.slice(0, room).replace(/\s+\S*$/, '') + '\n\u2026(trimmed)\n';
+                break;
+            }
+            body += head + passage + '\n';
+            used += head.length + passage.length;
+        }
+        if (!body.trim()) return '';
+        return '\n\n<recalled_scenes>\nEarlier moments this scene is touching, quoted word-for-word from when they happened \u2014 this is what was ACTUALLY said and done, so honour the exact wording, promises, and phrasing when the story refers back to it. These are PAST events, already over; do not replay them as if they are happening now:' + body + '</recalled_scenes>\n';
+    } catch (e) {
+        return '';   // the hot injection path never throws
+    }
+}
+
 function assembleSummaryBlock() {
     const s = getSettings();
     const store = getChatStore();
@@ -5274,11 +5424,12 @@ function assembleSummaryBlock() {
 
     const pinnedPart = (s.injectPinned !== false) ? buildPinnedBlock() : '';
     const charPart   = (s.injectLedger !== false) ? buildCharacterBlock() : '';
+    const flashPart  = buildFlashbackBlock();
 
     // Stable canon first (notepad → pinned → active-cast character state), then the
     // narrative (summary gist → recent-detail specifics). Grouping "who these people
     // are" ahead of "what happened" frames the scene for the storyteller.
-    return notesPart + pinnedPart + charPart + summaryPart + detailPart + continuityPart;
+    return notesPart + pinnedPart + charPart + summaryPart + detailPart + flashPart + continuityPart;
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
@@ -5817,6 +5968,11 @@ function updateUI() {
         $('#sc_recall_k').val(s.recallMaxSnippets??4);
         $('#sc_recall_persist').val(s.recallPersist??1);
         $('#sc_recall_auto').prop('checked', s.recallAuto===true);
+        $('#sc_flashback_enabled').prop('checked', s.flashbackEnabled !== false);
+        $('#sc_flashback_max').val(s.flashbackMax ?? 2);
+        $('#sc_flashback_chars').val(s.flashbackMaxChars ?? 2500);
+        $('#sc_flashback_score').val(s.flashbackMinScore ?? 2.5);
+        $('#sc_flashback_date').val(s.flashbackDatePattern ?? defaultSettings.flashbackDatePattern);
         renderPins();
         // ── Prompt preset migration & sync ──
         // Migration: existing users with the old game-state default get upgraded to narrative.
@@ -7604,6 +7760,11 @@ function bindUIEvents() {
     $(document).on('input', '#sc_recall_k', function(){ getSettings().recallMaxSnippets=parseInt($(this).val())||4; saveSettings(); });
     $(document).on('change', '#sc_recall_auto', function(){ getSettings().recallAuto=$(this).prop('checked'); saveSettings(); if(!$(this).prop('checked')) clearRecall(); });
     $(document).on('input', '#sc_recall_persist', function(){ getSettings().recallPersist=parseInt($(this).val())||1; saveSettings(); });
+    $(document).on('change', '#sc_flashback_enabled', function(){ getSettings().flashbackEnabled=$(this).prop('checked'); saveSettings(); updateInjection(true); });
+    $(document).on('input', '#sc_flashback_max', function(){ getSettings().flashbackMax=Math.max(1,parseInt($(this).val())||2); saveSettings(); updateInjection(true); });
+    $(document).on('input', '#sc_flashback_chars', function(){ getSettings().flashbackMaxChars=Math.max(400,parseInt($(this).val())||2500); saveSettings(); updateInjection(true); });
+    $(document).on('input', '#sc_flashback_score', function(){ const v=parseFloat($(this).val()); getSettings().flashbackMinScore=Number.isFinite(v)?v:2.5; saveSettings(); updateInjection(true); });
+    $(document).on('input', '#sc_flashback_date', function(){ getSettings().flashbackDatePattern=$(this).val(); saveSettings(); updateInjection(true); });
 
     $(document).on('change', '#sc_debug_mode', function () {
         getSettings().debugMode = $(this).prop('checked');
@@ -8613,7 +8774,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — recalled by mention: a one-line roster entry is not enough to write ABOUT someone truthfully, so the moment the story's newest prose names an off-screen character, their full ledger page rides along for the turn — explicitly framed as \"JUST MENTIONED, NOT IN THE SCENE\" so depth of context is never read as permission to put them in the room — and drops back to a roster line when the conversation moves on. Marker-stripped prose only (a watchlist status line is not a mention), story-investment weight ranks who wins the capped slots, recalled pages replace the character's roster line for the turn, the panel shows a 📣 recalled badge, and the ledger auditor prioritizes recalled characters alongside injected ones since their content reaches the storyteller verbatim. Legacy no-marker chats are naturally unaffected (a prose mention already grants full presence there). Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — flashbacks that arrive on time: summaries keep WHAT happened and lose HOW it was said, so a callback paraphrases a paraphrase. The existing model-selected recall could not close this — its selection is an LLM call, so it gated on the busy channel and fired on GENERATION_ENDED, landing one turn LATE and skipping most turns. Keyword ranking needs no call, so the new flashback pass runs inside the pre-generation injection and lands on the very reply that raised the memory: the live edge of the story (your message + the last reply, meta-stripped) is scored against the memory index by rare-term overlap, with your ledger's own character names weighted heaviest, and the winning scenes are quoted VERBATIM with their in-story date (configurable header regex) plus distance from now. Scenes still inside the verbatim window are never re-quoted, and below the relevance floor it injects nothing — silence beats a wrong memory. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
