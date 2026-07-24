@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.86.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.87.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -98,6 +98,9 @@ const defaultSettings = Object.freeze({
     //    window) is injected. ──
     ledgerEnabled: true,
     ledgerActiveWindow: 12,        // recent messages scanned to decide who is "on screen"
+    ledgerPresenceMarkers: true,   // read structured presence markers (e.g. a preset's [IST: name|...] in-scene tracker and [ACW: name|...] off-screen watchlist) as GROUND TRUTH for who is on screen — mention in a status block is not presence, and a watchlist prints every off-screen name into every message
+    ledgerPresenceOnPattern: '\\[IST:\\s*([^|\\]]+)',   // regex, capture group 1 = a name that IS in the scene; found in the newest message that matches, that message is the authoritative attendance list
+    ledgerPresenceOffPattern: '\\[ACW:\\s*([^|\\]]+)',  // regex, capture group 1 = a name explicitly OFF-screen — hard-barred from the present tiers no matter how often the text mentions them, guaranteed a roster line instead
     ledgerMaxActive: 6,            // max characters injected at once
     ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — sized for a dense CURRENT card (behavioral anchor + whereabouts + compressed arc), not for saving tokens. The cap's real job is bounding accumulation so stale/redundant detail can't pile into noise that drifts the model; keep cards dense and current, not merely small.
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
@@ -4865,25 +4868,136 @@ function toggleLedgerPin(name) {
 //   shown  — full entries injected (on screen, recency-ordered, capped)
 //   roster — identity-line injected this turn (pins first, then rotation)
 //   out    — in the ledger, NOT injected this turn
+// Structured presence. A status-block format (like a preset's {PULSE}/{WATCHLIST})
+// prints the names of explicitly OFF-screen characters into EVERY message, so
+// name-in-text stops meaning person-in-scene: the watchlist cast is detected as
+// standing in the room every turn, injected as "ALSO PRESENT", and the storyteller
+// is handed five false attendees per message. But the same format also WRITES the
+// correct answer each turn — an in-scene list and an off-screen list. This reads
+// them. The newest message with at least one on-screen capture is the authoritative
+// attendance sheet; its off-screen captures are hard-barred from the present tiers
+// (mention is not presence) and guaranteed a roster line. No markers in the window
+// -> byte-identical legacy behavior, so plain chats are untouched.
+function _parsePresenceMarkers(recentMsgs, s) {
+    const res = { found: false, on: [], off: [], msgIdx: -1, stripRes: [], tracked: [] };
+    try {
+        if (!s || s.ledgerPresenceMarkers === false) return res;
+        if (!Array.isArray(recentMsgs) || !recentMsgs.length) return res;
+        const onSrc = (typeof s.ledgerPresenceOnPattern === 'string' && s.ledgerPresenceOnPattern.trim()) ? s.ledgerPresenceOnPattern : '\\[IST:\\s*([^|\\]]+)';
+        const offSrc = (typeof s.ledgerPresenceOffPattern === 'string' && s.ledgerPresenceOffPattern.trim()) ? s.ledgerPresenceOffPattern : '\\[ACW:\\s*([^|\\]]+)';
+        let onRe, offRe;
+        try { onRe = new RegExp(onSrc, 'giu'); offRe = new RegExp(offSrc, 'giu'); } catch (_) { return res; }
+        const grab = (re, txt) => {
+            const captured = [];
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(txt)) !== null) {
+                const cap = String(m[1] != null ? m[1] : m[0]).trim().toLowerCase();
+                if (cap) captured.push(cap);
+                if (m.index === re.lastIndex) re.lastIndex++;   // zero-width safety
+            }
+            return captured;
+        };
+        for (let i = recentMsgs.length - 1; i >= 0; i--) {
+            const txt = recentMsgs[i];
+            if (!txt || typeof txt !== 'string') continue;
+            const on = grab(onRe, txt);
+            const off = grab(offRe, txt);
+            if (!on.length && !off.length) continue;
+            if (!res.found && on.length) {
+                res.found = true;
+                res.on = on;
+                res.off = off;
+                res.msgIdx = i;
+                try { res.stripRes = [new RegExp(onSrc + '[^\\n]*', 'giu'), new RegExp(offSrc + '[^\\n]*', 'giu')]; } catch (_) { res.stripRes = []; }
+            }
+            // Every capture the format EVER produced in the window, newest sheet or
+            // older: a character the format tracks lives and dies by the sheets — if
+            // the newest one omits them, they left the scene, and their prose line
+            // from two messages ago must not resurrect them as "present".
+            for (const c of on.concat(off)) res.tracked.push(c);
+        }
+    } catch (_) { /* malformed input never breaks the cast */ }
+    return res;
+}
+
+// Marker-mode prose view: the fallback prose scan (for characters the markers do
+// not list) and the seen-recency ranking must read STORY text, not status blocks —
+// otherwise a watchlist agenda line ("Silas wants his version home") still fakes
+// narrative presence for unlisted names. Marker lines are removed mechanically
+// from the configured patterns; stripMetaBlocks applies the user's existing
+// meta-strip configuration on top, the same cleaning the summarizer already reads
+// through. Only ever called in marker mode, so legacy behavior stays untouched.
+function _stripPresenceNoise(text, mk) {
+    let out = String(text || '');
+    try { out = stripMetaBlocks(out); } catch (_) { /* keep raw */ }
+    try {
+        if (mk && Array.isArray(mk.stripRes)) {
+            for (const re of mk.stripRes) { re.lastIndex = 0; out = out.replace(re, ''); }
+        }
+    } catch (_) { /* keep partial */ }
+    return out;
+}
+
 function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs) {
     const names = Object.keys(ledger || {});
     const res = { shown: [], compact: [], roster: [], out: [] };
     if (!names.length) return res;
     const ambiguous = _ambiguousTokens(names);
+    const mk = _parsePresenceMarkers(recentMsgs, s);
+    let msgsEff = recentMsgs;
+    let lowerEff = recentLower;
+    if (mk.found) {
+        msgsEff = recentMsgs.map(t => _stripPresenceNoise(t, mk));
+        lowerEff = msgsEff.join('\n');
+    }
+    // Capture-side ambiguity: a token shared by two captures ("var", "emrys" across
+    // "miranda var emrys" and "ivar var emrys") identifies nobody — without this, a
+    // surname alias matches a SIBLING's attendance line and smuggles an off-screen
+    // character past the bar. The ledger-side ambiguous set can't see this when the
+    // ledger keys are short but the captures are full names.
+    let capAmb = null;
+    if (mk.found) {
+        const tokCount = new Map();
+        for (const c of mk.on.concat(mk.off, mk.tracked)) {
+            for (const t of new Set(String(c).split(/\s+/).filter(x => x.length > 2))) tokCount.set(t, (tokCount.get(t) || 0) + 1);
+        }
+        capAmb = new Set();
+        for (const [t, n] of tokCount) { if (n > 1) capAmb.add(t); }
+    }
+    const offBarred = [];
     let active = [];
     for (const name of names) {
         const entry = ledger[name];
         if (!entry || typeof entry !== 'object') continue;
         const aliases = characterAliases(name, ambiguous);
-        if (recentLower && aliases.some(a => wordPresentInText(recentLower, a))) {
+        // Marker verdict: 1 = listed in the scene, -1 = off-screen (listed in the
+        // watchlist, OR tracked by an earlier sheet but absent from the newest one —
+        // omission from the current attendance list means they left the scene),
+        // 0 = the format has never tracked them, fall back to the prose scan.
+        // On beats off — if the newest sheet says they are in the room, they are.
+        let listed = 0;
+        if (mk.found) {
+            const nameLower = String(name).trim().toLowerCase();
+            const mAliases = aliases.filter(a => { const al = a.toLowerCase(); return al === nameLower || !capAmb.has(al); });
+            const hit = (caps) => mAliases.some(a => caps.some(c => wordPresentInText(c, a)));
+            if (hit(mk.on)) listed = 1;
+            else if (hit(mk.off) || hit(mk.tracked)) listed = -1;
+        }
+        if (listed === -1) { offBarred.push(name); continue; }   // mention is not presence
+        const inProse = !!(lowerEff && aliases.some(a => wordPresentInText(lowerEff, a)));
+        if (listed === 1 || inProse) {
             // How recently they were ON SCREEN — the newest message they appear in.
             let seen = -1;
-            if (Array.isArray(recentMsgs)) {
-                for (let i = recentMsgs.length - 1; i >= 0; i--) {
-                    const low = recentMsgs[i];
+            if (Array.isArray(msgsEff)) {
+                for (let i = msgsEff.length - 1; i >= 0; i--) {
+                    const low = msgsEff[i];
                     if (low && aliases.some(a => wordPresentInText(low, a))) { seen = i; break; }
                 }
             }
+            // Listed but silent in the prose (present without a line this window):
+            // the attendance sheet itself is their most recent appearance.
+            if (listed === 1 && seen < 0) seen = mk.msgIdx;
             active.push({ name, entry, u: entry.updatedAt || 0, seen });
         }
     }
@@ -4930,7 +5044,10 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
             .filter(o => o.entry && typeof o.entry === 'object')
             .sort((a, b) => b.u - a.u);
         const rotate = s.ledgerRosterRotate !== false;
-        res.roster = _composeRoster(offscreen.map(o => o.name), pins, rosterCap, rosterTick, rotate);
+        // The watchlist cast is the story's ACTIVELY TRACKED off-screen people — the
+        // ones most worth carrying. Guarantee their roster line ahead of rotation,
+        // the same always-included treatment pins get.
+        res.roster = _composeRoster(offscreen.map(o => o.name), (pins || []).concat(offBarred), rosterCap, rosterTick, rotate);
     }
     const injected = new Set([...shownNames, ...res.roster]);
     res.out = names.filter(n => !injected.has(n));
@@ -5643,6 +5760,9 @@ function updateUI() {
         $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? 12);
         $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? 12);
         $('#sc_ledger_roster_rotate').prop('checked', s.ledgerRosterRotate !== false);
+        $('#sc_ledger_presence_markers').prop('checked', s.ledgerPresenceMarkers !== false);
+        $('#sc_ledger_presence_on').val(s.ledgerPresenceOnPattern ?? defaultSettings.ledgerPresenceOnPattern);
+        $('#sc_ledger_presence_off').val(s.ledgerPresenceOffPattern ?? defaultSettings.ledgerPresenceOffPattern);
         $('#sc_ledger_auto_rewind').prop('checked', s.ledgerAutoRewind !== false);
         $('#sc_ledger_max_chars_val').text(s.ledgerMaxCharsPerChar ?? 600);
         $('#sc_editor_system_prompt').val(s.editorSystemPrompt);
@@ -7197,6 +7317,21 @@ function bindUIEvents() {
         saveSettings();
         updateInjection(true);
     });
+    $(document).on('change', '#sc_ledger_presence_markers', function () {
+        getSettings().ledgerPresenceMarkers = $(this).prop('checked');
+        saveSettings();
+        updateInjection(true);
+    });
+    $(document).on('input', '#sc_ledger_presence_on', function () {
+        getSettings().ledgerPresenceOnPattern = $(this).val();
+        saveSettings();
+        updateInjection(true);
+    });
+    $(document).on('input', '#sc_ledger_presence_off', function () {
+        getSettings().ledgerPresenceOffPattern = $(this).val();
+        saveSettings();
+        updateInjection(true);
+    });
     $(document).on('change', '#sc_ledger_auto_rewind', function () {
         getSettings().ledgerAutoRewind = $(this).prop('checked');
         saveSettings();
@@ -8411,7 +8546,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the protagonist finally has a name of their own: a per-chat 🎭 Protagonist name (above the notepad) separates the story's MC from the SillyTavern persona — in director-style play the persona (e.g. "LO") issues instructions ABOUT the MC (e.g. "Jovan"), but every pass was told the player IS the persona, so dossiers keyed arcs to the director ("With LO: ..."). With the name set, the summarizer, ledger scribe, auditors, and editor all treat it as the player character, and user turns in passages carry it; empty keeps the old persona behavior. Existing "With LO" text converges as audits and new reads re-derive against the true name. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — mention is not presence: status-block formats print their off-screen watchlist's names into EVERY message, so the name-in-text presence scan injected explicitly absent characters as \"ALSO PRESENT in this scene\" every turn — false attendance handed to the storyteller. The cast selection now reads structured presence markers as ground truth (defaults match [IST: name|…] in-scene and [ACW: name|…] watchlist lines; both regexes configurable): the newest message with an in-scene list is the attendance sheet, watchlist names are hard-barred from the present tiers and guaranteed a priority roster line with their last-seen state, unlisted names fall back to a prose scan over marker-stripped text, and chats without markers behave byte-identically to before. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

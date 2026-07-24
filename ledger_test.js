@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -62,7 +62,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -2038,6 +2038,78 @@ section('notepad — one document, two views (panel + full-screen editor)');
     ok(SRC_FULL.includes("$('#sc_notepad').val(v).trigger('input');"), 'the full-screen editor writes THROUGH the panel input pipeline — one store path');
     ok(SRC_FULL.includes('window._closeNotepadFs === '.slice(0, 24)) && /onChatChanged\(\) \{\n    try \{ if \(typeof window/.test(SRC_FULL), 'a chat switch closes an open editor — its text belongs to the chat being left');
     ok(SRC_FULL.includes("if (e.key === 'Escape' && $('#sc_notepad_fs').length) _closeNotepadFs();"), 'Escape closes the editor');
+}
+
+
+// ─── structured presence markers: mention is not presence ───
+section('presence markers — the watchlist cast is never "in the scene"');
+{
+    const mkE = (u) => ({ core: 'core text', state: 'doing something', updatedAt: u });
+    const led = {
+        'Jovan': mkE(60), 'Alexia Valois': mkE(50), 'Honami': mkE(40), 'Miranda': mkE(35),
+        'Silas Blackwood': mkE(30), 'Ivar Var Emrys': mkE(20), 'Ghost': mkE(10), 'Renn': mkE(5),
+    };
+    const s = { ledgerMaxActive: 6, ledgerInjectRoster: true, ledgerRosterMax: 6, ledgerRosterRotate: true };
+    const older = 'renn waved once.\n[ist: renn | cheerful | here]\n[acw: silas blackwood | his desk | grey]';
+    const newest = 'jovan set his spoon down. alexia stared down the table. honami poured the tea. everyone discussed silas and his headache.\n' +
+        '{pulse}\n[ist: alexia valois | flayed-proud | agenda: terms]\n[ist: honami ichinose | glowing | agenda: table]\n[ist: miranda var emrys | feasting | agenda: letters]\n{/pulse}\n' +
+        '{watchlist}\n[acw: silas blackwood | his desk, fifth draft | grey]\n[acw: ivar var emrys | emrys academy | waiting]\n{/watchlist}';
+    const msgs = [older, newest];
+    const cast = L.computeLedgerCast(led, s, msgs.join('\n'), [], 0, msgs);
+    const present = cast.shown.concat(cast.compact).map(x => x.name);
+    ok(!present.includes('Silas Blackwood'), 'ACW character mentioned in the prose of every message is still NOT injected as present');
+    ok(!present.includes('Ivar Var Emrys'), 'second ACW character barred too');
+    ok(cast.roster.includes('Silas Blackwood') && cast.roster.includes('Ivar Var Emrys'), 'barred watchlist cast is guaranteed its off-screen roster line');
+    ok(present.includes('Alexia Valois'), 'IST capture "alexia valois" matches the full-name ledger key');
+    ok(present.includes('Honami'), 'IST capture "honami ichinose" matches the given-name ledger key via aliases');
+    ok(present.includes('Jovan'), 'a character unlisted by the markers but in the prose still falls back to name-in-text presence');
+    ok(present.includes('Miranda'), 'listed in IST but silent in the prose: present anyway — the attendance sheet is the appearance');
+    ok(!present.includes('Renn'), "an OLDER message's IST line does not grant presence — the newest attendance sheet rules, and stale marker lines are stripped from the prose scan");
+    ok(!present.includes('Ghost'), 'a character in neither markers nor prose is not present');
+    ok(cast.roster.includes('Renn'), 'a tracked character who left the scene keeps a guaranteed roster line — off-screen, never erased');
+    ok(cast.out.every(n => !present.includes(n)), 'present and out never overlap under markers');
+
+    // NEGATIVE GUARD — reintroduce the bug and watch the old behavior return: with
+    // markers disabled, the same input makes the watchlist character "present".
+    const off = L.computeLedgerCast(led, { ...s, ledgerPresenceMarkers: false }, msgs.join('\n'), [], 0, msgs);
+    const offPresent = off.shown.concat(off.compact).map(x => x.name);
+    ok(offPresent.includes('Silas Blackwood'), 'guard proven: disabling markers resurrects the false-presence bug, so the bar is what blocks it');
+
+    // On beats off: if the attendance sheet says they are in the room, they are.
+    const both = 'stella grinned.\n[ist: stella vermillion | smug]\n[acw: stella vermillion | also listed here by mistake]';
+    const castBoth = L.computeLedgerCast({ 'Stella': mkE(9) }, s, both, [], 0, [both]);
+    ok(castBoth.shown.some(x => x.name === 'Stella'), 'a name in both lists counts as ON screen — on beats off');
+
+    // Fallback identity: a chat with no markers behaves byte-identically, feature on or off.
+    const plainMsgs = ['jovan and claire argued in the hall.', 'stella watched from the door.'];
+    const plainLed = { 'Jovan': mkE(3), 'Claire': mkE(2), 'Stella': mkE(1), 'Emilia': mkE(0) };
+    const a = L.computeLedgerCast(plainLed, s, plainMsgs.join('\n'), [], 0, plainMsgs);
+    const b = L.computeLedgerCast(plainLed, { ...s, ledgerPresenceMarkers: false }, plainMsgs.join('\n'), [], 0, plainMsgs);
+    ok(JSON.stringify(a) === JSON.stringify(b), 'no markers in the window -> identical cast with the feature on or off (zero regression for plain chats)');
+
+    // A malformed user pattern never breaks the cast — it just disables marker mode.
+    const bad = L.computeLedgerCast(plainLed, { ...s, ledgerPresenceOnPattern: '([unclosed' }, plainMsgs.join('\n'), [], 0, plainMsgs);
+    ok(JSON.stringify(bad) === JSON.stringify(b), 'invalid regex in settings: no throw, silent fallback to legacy detection');
+
+    // A ledger character sharing a surname with a TRACKED (older-sheet) character
+    // must not be barred by that collision — ambiguity covers the tracked set too.
+    const sur = 'elyse spoke softly.\n[ist: mara sterling | calm]';
+    const surOld = '[acw: alaric sterling | far end | glacial]';
+    const surCast = L.computeLedgerCast({ 'Elyse Sterling': mkE(4), 'Alaric Sterling': mkE(3), 'Mara Sterling': mkE(2) }, s, surOld + '\n' + sur, [], 0, [surOld, sur]);
+    const surPresent = surCast.shown.concat(surCast.compact).map(x => x.name);
+    ok(surPresent.includes('Elyse Sterling'), 'untracked character with a surname shared across sheets is matched by prose, not mis-barred');
+    ok(!surPresent.includes('Alaric Sterling'), 'while the genuinely tracked sibling stays barred');
+
+    // Parser unit checks.
+    const pm = L._parsePresenceMarkers(msgs, s);
+    ok(pm.found && pm.msgIdx === 1, 'parser picks the NEWEST message with an in-scene capture');
+    ok(pm.on.length === 3 && pm.on[0] === 'alexia valois', 'parser captures every IST name from that message');
+    ok(pm.off.length === 2 && pm.off.includes('ivar var emrys'), 'parser captures every ACW name from the same message');
+    ok(L._parsePresenceMarkers(plainMsgs, s).found === false, 'no markers -> found:false');
+    ok(L._parsePresenceMarkers(msgs, { ...s, ledgerPresenceMarkers: false }).found === false, 'feature off -> parser inert');
+    const stripped = L._stripPresenceNoise(newest, pm);
+    ok(!/\[ist:/.test(stripped) && !/\[acw:/.test(stripped), 'noise strip removes the marker lines from the prose view');
+    ok(/jovan set his spoon down/.test(stripped), 'and keeps the story text');
 }
 
 console.log('\n────────────────────────────────────────');
