@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -44,7 +44,9 @@ function getChatStore(){ return __store; }
 function log(){}
 const document = { createElement(){ let _v = ''; return { set textContent(x){ _v = String(x); }, get innerHTML(){ return _v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); } }; } };
 function toastr_noop(){}
-const SillyTavern = { getContext(){ return { chat: __chat }; } };
+let __ctxExtra = {};
+const SillyTavern = { getContext(){ return Object.assign({ chat: __chat }, __ctxExtra); } };
+function setCtxExtra(o){ __ctxExtra = o || {}; }
 let __dom = {};   // selector -> { val, text, present }
 function __resetDom(present){ __dom = {}; for (const k of (present||[])) __dom[k] = { val: '', text: '', present: true }; }
 function $(sel){
@@ -59,10 +61,11 @@ ${body}
 return {
   __setSettings: (v)=>{ __settings = v; },
   __setStore:    (v)=>{ __store = v; },
+  __setCtxExtra: (v)=>{ __ctxExtra = v || {}; },
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -2404,6 +2407,49 @@ section('persona/MC identity — the record stops inventing a second person');
     // The code-level bar exists so the fix does not depend on the model obeying.
     ok(SRC_FULL.includes("rawName = _sp.mc;"), 'a delta filed under the persona handle is REDIRECTED to the protagonist, not dropped');
     ok(SRC_FULL.includes('_healPersonaEntry(ledger, sp.persona, sp.mc)'), 'existing chats heal automatically on the next merge — no manual step');
+}
+
+
+// ─── autonomous identity: nobody should have to fill in a field ───
+section('MC name — resolved automatically, override only to correct');
+{
+    const setCtx = (o) => L.__setCtxExtra(o);
+    // Layer order is by AUTHORITY: human > sibling extension > self-learned > label.
+    L.__setStore({ ledger: {}, mcName: 'Manual Name', mcLearned: 'Learned Name' });
+    setCtx({ name1: 'LO', name2: 'Narrator', chatMetadata: { arbiter: { mcName: 'Arbiter Name' } } });
+    ok(L.resolveMcName() === 'Manual Name', 'an explicit human answer outranks everything');
+
+    L.__setStore({ ledger: {}, mcLearned: 'Learned Name' });
+    ok(L.resolveMcName() === 'Arbiter Name', "a sibling extension's learned name is used with NO user action — same chat, same universe");
+
+    setCtx({ name1: 'LO', name2: 'Narrator', chatMetadata: {} });
+    ok(L.resolveMcName() === 'Learned Name', 'without Arbiter, this extension uses what it learned itself');
+
+    L.__setStore({ ledger: {} });
+    ok(L.resolveMcName() === '', 'nothing known yet -> empty, and getPlayerName falls back to the persona label as before');
+
+    // Arbiter reader is defensive: absent/garbage metadata never throws.
+    setCtx({ name1: 'LO', chatMetadata: null });
+    ok(L.resolveMcName() === '', 'missing chat metadata is safe');
+    setCtx({ name1: 'LO', chatMetadata: { arbiter: { mcName: '   ' } } });
+    ok(L.resolveMcName() === '', 'blank sibling value is ignored');
+
+    // What the scribe reports is filtered before it is trusted.
+    ok(L._acceptLearnedMc('Jovan Oda', 'LO', 'Narrator') === 'Jovan Oda', 'a real story name is accepted');
+    ok(L._acceptLearnedMc('  Jovan   Oda  ', 'LO', 'Narrator') === 'Jovan Oda', 'whitespace is normalised');
+    ok(L._acceptLearnedMc('LO', 'LO', 'Narrator') === '', 'the persona label is rejected — that is the bug, not the answer');
+    ok(L._acceptLearnedMc('lo', 'LO', 'Narrator') === '', 'and case-insensitively so');
+    ok(L._acceptLearnedMc('Marcroft Chronicle', 'LO', 'Marcroft Chronicle') === '', 'the CARD name is rejected — the storyteller card is not the player (fixture uses a name no other rule would catch)');
+    ok(L._acceptLearnedMc('Player', 'LO', 'Narrator') === '' && L._acceptLearnedMc('MC', 'LO', 'N') === '', 'placeholder words are rejected');
+    ok(L._acceptLearnedMc('{{user}}', 'LO', 'N') === '', 'an unexpanded macro is rejected');
+    ok(L._acceptLearnedMc('', 'LO', 'N') === '' && L._acceptLearnedMc('J', 'LO', 'N') === '', 'empty and one-character answers are rejected');
+    ok(L._acceptLearnedMc('x'.repeat(200), 'LO', 'N').length === 60, 'absurd length is clamped');
+
+    // Wiring contracts.
+    ok(SRC_FULL.includes('is_player_character'), 'the scribe is asked to mark the player character on the entry it already writes — no extra model call');
+    ok(SRC_FULL.includes('if (!resolveMcName())'), 'learning only ever FILLS an unknown name; it can never overwrite a working setup');
+    ok(SRC_FULL.includes("chatMetadata.arbiter.mcName") || SRC_FULL.includes("chatMetadata && chatMetadata.arbiter"), 'the sibling extension is read directly');
+    ok(!/must be set|please set the/i.test(SRC_FULL.slice(SRC_FULL.indexOf('function resolveMcName'), SRC_FULL.indexOf('function resolveMcName') + 1200)), 'the resolver never demands user input');
 }
 
 console.log('\n────────────────────────────────────────');
