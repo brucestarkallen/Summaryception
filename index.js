@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.91.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.92.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1584,8 +1584,40 @@ function abortSummarization() {
 // (and $` / $' would splice the rest of the prompt into it). A function replacer
 // inserts the value verbatim. Use for EVERY {{token}} whose value is user- or
 // model-supplied. Replaces the FIRST match, matching prior String.replace semantics.
+// String.replace with a STRING needle substitutes only the FIRST match. Every
+// prompt here uses its tokens repeatedly — {{player_name}} appears 5x in the
+// summarizer user prompt and 8x in the ledger system prompt — so all but the
+// first arrived at the model as the literal text "{{player_name}}". The
+// psychologist was being told to track "this character's relationship with
+// {{player_name}}" and had to GUESS who that was from the raw chat, where the
+// persona handle and the protagonist's name both appear: exactly how the ledger
+// ends up treating the player and their own character as two different people.
+// split/join replaces every occurrence and inserts the value literally (no $&
+// interpretation), which is what the token substitution always meant.
 function subst(tpl, token, value) {
-    return String(tpl == null ? '' : tpl).replace(token, () => (value == null ? '' : String(value)));
+    return String(tpl == null ? '' : tpl).split(token).join(value == null ? '' : String(value));
+}
+
+// The player and their protagonist are one participant. When a chat names the MC
+// separately from the persona, every pass must be told so explicitly — otherwise
+// the persona handle looks like just another name in the text, and the record
+// grows an entry for it and writes relationship notes between the player and the
+// character the player IS. Returns null when there is no split to explain.
+function _personaSplit() {
+    try {
+        const mc = String(getChatStore().mcName || '').trim();
+        if (!mc) return null;
+        const { name1 } = SillyTavern.getContext();
+        const persona = String(name1 || '').trim();
+        if (!persona || persona.toLowerCase() === mc.toLowerCase()) return null;
+        return { persona, mc };
+    } catch (_) { return null; }
+}
+
+function _identityNote() {
+    const sp = _personaSplit();
+    if (!sp) return '';
+    return `\n\nIDENTITY — READ BEFORE ANYTHING ELSE: "${sp.persona}" is the handle of the human player, who directs the protagonist ${sp.mc}. ${sp.persona} and ${sp.mc} are ONE participant seen from two sides of the screen, never two people. "${sp.persona}" is NOT a character in the story: never create or keep a record for that name, never place them in a scene, and never describe a relationship, interaction, or absence of interaction BETWEEN ${sp.mc} and ${sp.persona} — a sentence like "${sp.mc} has never interacted with ${sp.persona} directly" is a category error, not a fact. Anything the player says or instructs as ${sp.persona} belongs to ${sp.mc}.`;
 }
 
 async function callSummarizer(storyTxt, contextStr, opts = {}) {
@@ -1599,7 +1631,13 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
         enabled: s.enabled,
     });
 
-    const sysPrompt = opts.systemPrompt || s.summarizerSystemPrompt;
+    // The system prompt carries the RULES (how to address the player character,
+    // whose relationships the arc field tracks) and was never substituted at all —
+    // it reached the model with raw {{player_name}} placeholders in every rule.
+    // Only the identity token is safe to substitute here: the content tokens
+    // ({{story_txt}}, {{ledger}}, …) belong to the user turn and would duplicate
+    // the whole payload if expanded in the system message.
+    const sysPrompt = subst(opts.systemPrompt || s.summarizerSystemPrompt, '{{player_name}}', getPlayerName()) + _identityNote();
     const userTpl = opts.userPrompt || s.summarizerUserPrompt;
     let prompt = userTpl;
     prompt = subst(prompt, '{{player_name}}', getPlayerName());
@@ -2788,6 +2826,61 @@ function rewindLedgerFromNotes(targetTurn) {
     return true;
 }
 
+// Pure: the record can hold at most ONE entry for the player's participant. A
+// phantom entry under the persona handle is folded into the protagonist's, field
+// by field — the protagonist's own text always wins, and the phantom only fills
+// fields the real entry never had, so nothing observed is lost and nothing true
+// is overwritten. Returns the names whose TEXT still mentions the persona as a
+// third party; those are claims only a judgment pass can safely rewrite, so they
+// are handed to the auditor rather than edited by string surgery here.
+function _healPersonaEntry(ledger, persona, mc) {
+    const res = { folded: false, suspect: [] };
+    if (!ledger || typeof ledger !== 'object' || !persona || !mc) return res;
+    const pLow = String(persona).trim().toLowerCase();
+    const mLow = String(mc).trim().toLowerCase();
+    if (!pLow || pLow === mLow) return res;
+
+    let pKey = null, mKey = null;
+    for (const k of Object.keys(ledger)) {
+        const kl = k.trim().toLowerCase();
+        if (kl === pLow) pKey = k;
+        else if (kl === mLow) mKey = k;
+    }
+    if (pKey) {
+        const src = ledger[pKey] || {};
+        if (!mKey) {
+            // No protagonist entry yet: the phantom WAS the protagonist's record all
+            // along, mis-keyed. Rename it rather than discard hard-won observation.
+            ledger[mc] = src;
+            mKey = mc;
+        } else {
+            const dst = ledger[mKey] || {};
+            for (const f of ['core', 'state', 'arc']) {
+                if (!String(dst[f] || '').trim() && String(src[f] || '').trim()) dst[f] = src[f];
+            }
+            if (!Array.isArray(dst.threads) || !dst.threads.length) {
+                if (Array.isArray(src.threads) && src.threads.length) dst.threads = src.threads.slice();
+            }
+            dst.updatedAt = Math.max(dst.updatedAt || 0, src.updatedAt || 0);
+            ledger[mKey] = dst;
+        }
+        delete ledger[pKey];
+        res.folded = true;
+    }
+
+    // Sentences like "<mc> has never interacted with <persona> directly" are the
+    // visible symptom. They are prose, and rewriting prose by pattern is guesswork —
+    // flag them for re-derivation instead.
+    const re = new RegExp('(^|[^\\p{L}])' + _escapeRegex(String(persona).trim()) + '([^\\p{L}]|$)', 'iu');
+    for (const k of Object.keys(ledger)) {
+        const e = ledger[k];
+        if (!e || typeof e !== 'object') continue;
+        const blob = [e.core, e.state, e.arc, Array.isArray(e.threads) ? e.threads.join(' ') : ''].join(' ');
+        if (re.test(blob)) res.suspect.push(k);
+    }
+    return res;
+}
+
 function mergeLedgerDeltas(deltas, target, atTurn) {
     if (!Array.isArray(deltas) || deltas.length === 0) return 0;
     let ledger = target;
@@ -2798,6 +2891,16 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
         // Durable early adoption: a copilot edit made since the last pass is
         // journaled BEFORE new deltas land on top of it.
         try { adoptExternalLedgerEdits(store); } catch (e) { log('adoptExternalLedgerEdits failed (non-fatal):', e); }
+        try {
+            const sp = _personaSplit();
+            if (sp) {
+                const h = _healPersonaEntry(ledger, sp.persona, sp.mc);
+                if (h.folded) log(`Ledger identity: folded the phantom '${sp.persona}' entry into '${sp.mc}'.`);
+                // Entries whose prose still speaks of the persona as a third party go
+                // to the front of the audit queue to be re-derived against the story.
+                for (const n of h.suspect) { if (ledger[n]) ledger[n]._a = -1; }
+            }
+        } catch (e) { log('persona heal failed (non-fatal):', e); }
     }
     let changed = 0;
     // Cross-dossier copy guard. An external audit caught a dossier wearing another
@@ -2823,8 +2926,17 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
     let _contam = 0;
     for (const d of deltas) {
         if (!d || typeof d !== 'object') continue;
-        const rawName = typeof d.name === 'string' ? d.name.trim() : '';
+        let rawName = typeof d.name === 'string' ? d.name.trim() : '';
         if (!rawName) continue;
+        // The player's handle is not a character. A delta filed under it is an
+        // observation about the protagonist, so it is REDIRECTED rather than
+        // dropped — the prompt tells the scribe this, and this makes it true
+        // regardless of whether the scribe listened.
+        const _sp = _personaSplit();
+        if (_sp && rawName.toLowerCase() === _sp.persona.toLowerCase()) {
+            log(`Ledger identity: delta filed under the persona handle '${rawName}' — redirected to the protagonist '${_sp.mc}'.`);
+            rawName = _sp.mc;
+        }
         const key = resolveLedgerKey(ledger, rawName);
         const entry = ledger[key] || {};
         let touched = false;
@@ -8975,7 +9087,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — lossy compression can no longer happen quietly: layer promotion is the one IRREVERSIBLE operation in the memory system, splicing N snippets out and replacing them with a single meta-summary, so a thin reply destroyed every source with no signal and no way back. The guard measures how much of the sources survived (a ratio AND an absolute floor, because a small source set passes any ratio trivially; compression is the point of promotion, so only collapse is flagged, never healthy shrinkage), retries once with a stricter merge instruction, and takes the retry only if it survives MORE of the sources. A still-thin merge is accepted rather than refused — refusing forever would grow the layer without bound — but never silently and never irreversibly: the originals are stashed on the snippet (bounded, so it cannot trade silent loss for quota death), a warning names the snippet, and the Memory panel offers one-click restore. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the player and their protagonist are one participant: the record was growing a phantom entry for the persona handle and writing notes like \"<MC> has never interacted with <persona> directly\". Root cause was two layers down and nothing to do with the model. subst() used String.replace with a string needle, which substitutes only the FIRST match — {{player_name}} appears 5x in the summarizer user prompt and 8x in the ledger system prompt, so every later site arrived as literal placeholder text; and the SYSTEM prompt, where the core/arc rules live, was never substituted at all. The psychologist was told to track 'this character's relationship with {{player_name}}' and had to guess who that was from the raw chat, where the persona handle and the protagonist's name both appear. Now every occurrence is substituted, the system prompt is substituted too, an explicit identity note rides on every pass, deltas filed under the persona handle are REDIRECTED to the protagonist in code (not left to the model's obedience), and existing chats self-heal — the phantom entry folds into the protagonist's without ever overwriting observed text, and prose still naming the persona as a third party goes to the front of the audit queue to be re-derived. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

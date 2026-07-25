@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -62,7 +62,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -2349,6 +2349,61 @@ section('shrink guard — lossy merges are caught, warned, and reversible');
     ok(SRC_FULL.includes("sn.text = sn.thinSources;"), 'restore puts the original snippets back into the memory');
     ok(/sc-thin-restore[\s\S]{0,900}await saveChatStore\(\)/.test(SRC_FULL), 'restore persists through saveChatStore — the one real persistence path (a saveChatDebounced call here is a ReferenceError; this extension never imports it)');
     ok(!/saveChatDebounced/.test(SRC_FULL), 'saveChatDebounced is never referenced anywhere — it is not imported in this extension');
+}
+
+
+// ─── identity: the player and their protagonist are one participant ───
+section('persona/MC identity — the record stops inventing a second person');
+{
+    // THE BUG AT THE BOTTOM: token substitution replaced only the FIRST match, so
+    // every later {{player_name}} reached the model as literal placeholder text.
+    const tpl = 'track {{player_name}} and how they address {{player_name}} and {{player_name}} again';
+    const done = L.subst(tpl, '{{player_name}}', 'Jovan');
+    ok(!done.includes('{{player_name}}'), 'EVERY occurrence is substituted — a single leftover placeholder is what forced the scribe to guess who the player character is');
+    ok((done.match(/Jovan/g) || []).length === 3, 'all three sites carry the real name');
+    ok(L.subst('a $& b {{x}}', '{{x}}', '$&') === 'a $& b $&', 'the value is inserted literally — no $-pattern interpretation');
+    ok(L.subst(null, '{{x}}', 'y') === '' && L.subst('none here', '{{x}}', 'y') === 'none here', 'null template and absent token are safe');
+
+    // The system prompt — where the arc/core RULES live — must carry the name too.
+    ok(/const sysPrompt = subst\(opts\.systemPrompt \|\| s\.summarizerSystemPrompt, '\{\{player_name\}\}', getPlayerName\(\)\)/.test(SRC_FULL), 'the SYSTEM prompt is substituted, not just the user prompt');
+    ok(SRC_FULL.includes('_identityNote()'), 'and the identity note rides on every pass');
+    ok(/never describe a relationship, interaction, or absence of interaction BETWEEN/.test(SRC_FULL), 'the note forbids exactly the "never interacted with" category error');
+
+    // Folding a phantom persona entry into the protagonist.
+    const led = {
+        'LO': { core: 'director handle', arc: 'Jovan has never interacted with LO directly.', threads: ['phantom thread'], updatedAt: 5 },
+        'Jovan': { core: 'steady, unhurried', state: 'at lunch', updatedAt: 9 },
+        'Alexia': { core: 'proud', arc: 'Wary of Jovan.', updatedAt: 7 },
+    };
+    const h = L._healPersonaEntry(led, 'LO', 'Jovan');
+    ok(h.folded === true, 'the phantom persona entry is folded away');
+    ok(!Object.prototype.hasOwnProperty.call(led, 'LO'), 'and no longer exists in the record');
+    ok(led['Jovan'].core === 'steady, unhurried', "the protagonist's own observed text is never overwritten by the phantom's");
+    ok(led['Jovan'].arc === 'Jovan has never interacted with LO directly.', 'an EMPTY protagonist field does adopt the phantom\'s content — nothing observed is discarded');
+    ok(led['Jovan'].updatedAt === 9, 'newest timestamp wins');
+    ok(h.suspect.includes('Jovan'), 'text still naming the persona as a third party is flagged for re-derivation, not rewritten by string surgery');
+    ok(!h.suspect.includes('Alexia'), 'an entry that merely mentions the protagonist is not flagged');
+
+    // Mis-keyed record with no protagonist entry: rename, never discard.
+    const only = { 'LO': { core: 'hard-won observation', updatedAt: 3 } };
+    ok(L._healPersonaEntry(only, 'LO', 'Jovan').folded === true && only['Jovan'].core === 'hard-won observation' && !only['LO'], 'when there is no protagonist entry the phantom is RENAMED, so observation is preserved');
+
+    // Word-boundary safety: a real character whose name contains the handle stays.
+    const near = { 'Lorenzo': { core: 'Lorenzo keeps his distance from Jovan.', updatedAt: 1 }, 'Jovan': { core: 'x', updatedAt: 2 } };
+    const hn = L._healPersonaEntry(near, 'LO', 'Jovan');
+    ok(!!near['Lorenzo'] && hn.folded === false, 'a character whose name merely CONTAINS the handle is untouched');
+    ok(!hn.suspect.includes('Lorenzo'), "the handle appearing INSIDE a longer word ('Lorenzo' contains 'LO') is not a mention — word boundaries, not substring");
+
+    // No split configured -> nothing happens at all.
+    const plain = { 'Jovan': { core: 'x', updatedAt: 1 } };
+    const before = JSON.stringify(plain);
+    const hp = L._healPersonaEntry(plain, '', 'Jovan');
+    ok(JSON.stringify(plain) === before && hp.folded === false, 'no persona split -> the record is untouched');
+    ok(L._healPersonaEntry(plain, 'Jovan', 'Jovan').folded === false, 'persona identical to the MC name is not a split');
+
+    // The code-level bar exists so the fix does not depend on the model obeying.
+    ok(SRC_FULL.includes("rawName = _sp.mc;"), 'a delta filed under the persona handle is REDIRECTED to the protagonist, not dropped');
+    ok(SRC_FULL.includes('_healPersonaEntry(ledger, sp.persona, sp.mc)'), 'existing chats heal automatically on the next merge — no manual step');
 }
 
 console.log('\n────────────────────────────────────────');
