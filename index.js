@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.93.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.94.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -658,6 +658,8 @@ function getChatStore() {
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityFlags)) chatMetadata[MODULE_NAME].continuityFlags = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityDismissed)) chatMetadata[MODULE_NAME].continuityDismissed = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityResolved)) chatMetadata[MODULE_NAME].continuityResolved = [];
+    // One key space for page and journal. Idempotent, guarded by a stored version.
+    _canonicalizeLedgerNotes(chatMetadata[MODULE_NAME]);
     return chatMetadata[MODULE_NAME];
 }
 
@@ -2577,6 +2579,65 @@ function stripLeadingLabel(v) {
 // The page itself (store.ledger) stays materialized so every consumer — injection,
 // panel, roster, audit — is untouched. Notes are the source of truth for TIME.
 
+// The newest point on the journal's timeline. A statement about NOW — the user
+// deleting a character, an external edit being adopted — must be stamped here, or
+// an existing note at a higher turn out-orders it in the fold and the statement
+// silently reverts. `withLive` is false only while a staged rebuild is serving a
+// deliberately trimmed page, where the live pointer is not the journal's horizon.
+function _journalNow(store, floor, withLive) {
+    let t = (typeof floor === 'number' && isFinite(floor)) ? Math.max(0, Math.floor(floor)) : 0;
+    if (withLive !== false && store && typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > t) t = store.ledgerLiveIdx;
+    const notes = (store && Array.isArray(store.ledgerNotes)) ? store.ledgerNotes : [];
+    for (const n of notes) if (n && typeof n.t === 'number' && isFinite(n.t) && n.t > t) t = n.t;
+    return t;
+}
+
+// ONE key space. The page decides a character's key once (resolveLedgerKey against
+// the whole cast) and every writer — scribe merge, audit stamp, external adoption,
+// deletion — records that key. Journals written before v5.94.0 recorded the SCRIBE'S
+// name instead, so the two drifted apart and folding compensated by re-running the
+// fuzzy resolver. This rewrites those legacy names into the page's key space once;
+// after that the journal is canonical at the source and folding is exact.
+const _NOTES_CANON_V = 1;
+
+// Pure-ish: rewrite each note's name to the key its page already uses. A name the
+// page does not know resolves to itself and is left alone (a deleted character keeps
+// its own history rather than being grafted onto a survivor).
+function _canonNotesAgainst(notes, page) {
+    if (!Array.isArray(notes) || !page || typeof page !== 'object') return 0;
+    if (Object.keys(page).length === 0) return 0;   // optimization only — resolveLedgerKey against an empty page already returns the name unchanged
+    const seen = new Map();
+    let n = 0;
+    for (const note of notes) {
+        if (!note || typeof note.name !== 'string') continue;
+        const raw = note.name.trim();
+        if (!raw) continue;
+        let k = seen.get(raw);
+        if (k === undefined) { k = resolveLedgerKey(page, raw); seen.set(raw, k); }
+        if (k !== note.name) { note.name = k; n++; }
+    }
+    return n;
+}
+
+// Runs once per store, from getChatStore — the single door every path goes through.
+function _canonicalizeLedgerNotes(store) {
+    if (!store || (store.ledgerNotesCanon | 0) >= _NOTES_CANON_V) return 0;
+    let n = 0;
+    try {
+        // The PAGE is the authority for the key space, so an unmaterialized page is
+        // not an answer — it is an absence of one. Stamping on it would burn the
+        // one-shot migration on a store whose ledger simply had not loaded yet, and
+        // the legacy names would then stay fragmented forever. Wait for a page.
+        const notes = Array.isArray(store.ledgerNotes) ? store.ledgerNotes : [];
+        const page = (store.ledger && typeof store.ledger === 'object') ? store.ledger : {};
+        if (notes.length > 0 && Object.keys(page).length === 0) return 0;
+        n += _canonNotesAgainst(notes, page);
+        n += _canonNotesAgainst(store.ledgerStagingNotes, store.ledgerStaging);
+    } catch (e) { log('ledger notes canonicalization failed (non-fatal):', e); return 0; }
+    store.ledgerNotesCanon = _NOTES_CANON_V;
+    return n;
+}
+
 // Pure: fold notes into a page-per-character. Newest value per field wins; a field
 // nobody has rewritten keeps its value forever, which is correct (Claire's Nature
 // from turn 12 is still true at turn 200 unless something changed it).
@@ -2588,7 +2649,18 @@ function foldLedgerNotes(notes, maxTurn) {
         .filter(n => n && typeof n.t === 'number' && n.t <= lim && typeof n.name === 'string' && n.name.trim())
         .sort((a, b) => (a.t - b.t) || ((a.at || 0) - (b.at || 0)));
     for (const n of rows) {
-        const key = resolveLedgerKey(out, n.name.trim());
+        // EXACT. The note already carries the key the ledger resolved when it was
+        // written, so the fold has nothing left to decide. Re-resolving here (through
+        // v5.93.0) judged ambiguity against a HALF-BUILT page whose cast shrinks with
+        // every tombstone and every maxTurn cap, so one note could land on different
+        // keys depending on where the fold stopped. Two page keys could then collapse
+        // onto one fold key — and adoptExternalLedgerEdits could never close its diff:
+        // it wrote the note under the page key, the fold aliased it away, and the next
+        // fold adopted the same difference again. Every fold appended one more note at
+        // the same turn; that is the history filling with identical rows. A tombstone
+        // was resolved the same way, so deleting one character could delete a different
+        // one from the fold — which is why deletion was the trigger.
+        const key = n.name.trim();
         if (n.gone === true) { delete out[key]; continue; }   // tombstone: deleted here; a LATER note lawfully re-introduces them
         const e = out[key] || {};
         if (typeof n.core === 'string') e.core = n.core;
@@ -2748,14 +2820,14 @@ function adoptExternalLedgerEdits(store, tFloor) {
     const page = store.ledger;
     const fold = foldLedgerNotes(store.ledgerNotes, Infinity);
     const rebuildActive = !!(store.ledgerRebuild && store.ledgerRebuild.staging);
-    let tNow = (typeof tFloor === 'number' && isFinite(tFloor)) ? Math.max(0, Math.floor(tFloor)) : 0;
-    if (!rebuildActive && typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > tNow) tNow = store.ledgerLiveIdx;
-    for (const n of store.ledgerNotes) if (n && typeof n.t === 'number' && n.t > tNow) tNow = n.t;
+    const tNow = _journalNow(store, tFloor, !rebuildActive);
     let adopted = 0;
     for (const [name, e] of Object.entries(page)) {
         if (!e || typeof e !== 'object') continue;
-        const fk = Object.prototype.hasOwnProperty.call(fold, name) ? name : resolveLedgerKey(fold, name);
-        const f = Object.prototype.hasOwnProperty.call(fold, fk) ? fold[fk] : null;
+        // Exact. Page and journal share one key space, so a fuzzy lookup here could
+        // only ever compare a page entry against a DIFFERENT character's folded entry
+        // — and then adopt that difference on every fold, forever.
+        const f = Object.prototype.hasOwnProperty.call(fold, name) ? fold[name] : null;
         // A page entry whose last shaping turn is PROVABLY behind the journal's is
         // not an external edit — it is the persisted pre-v5.73 clobber (the page
         // saved 14 turns staler than its own history). Adopting it would freeze the
@@ -2781,8 +2853,7 @@ function adoptExternalLedgerEdits(store, tFloor) {
     // journal character was removed.
     if (!rebuildActive && Object.keys(page).length > 0) {
         for (const name of Object.keys(fold)) {
-            const pk = Object.prototype.hasOwnProperty.call(page, name) ? name : resolveLedgerKey(page, name);
-            if (Object.prototype.hasOwnProperty.call(page, pk)) continue;
+            if (Object.prototype.hasOwnProperty.call(page, name)) continue;
             store.ledgerNotes.push({ t: tNow, name, at: Date.now(), gone: true, ext: true });
             adopted++;
         }
@@ -2925,7 +2996,7 @@ function _healPersonaEntry(ledger, persona, mc) {
     return res;
 }
 
-function mergeLedgerDeltas(deltas, target, atTurn) {
+function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
     if (!Array.isArray(deltas) || deltas.length === 0) return 0;
     let ledger = target;
     if (!ledger || typeof ledger !== 'object') {
@@ -2947,6 +3018,10 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
         } catch (e) { log('persona heal failed (non-fatal):', e); }
     }
     let changed = 0;
+    // What actually LANDED, under the key the page filed it as. This — not the raw
+    // scribe reply — is what gets journaled, so the journal and the page can never
+    // describe the same character under two different keys.
+    const _applied = [];
     // Cross-dossier copy guard. An external audit caught a dossier wearing another
     // character's skin: CORE, ARC, and THREADS copied character-for-character from
     // a different entry (only STATE was his own) — which is simultaneously an
@@ -3009,10 +3084,11 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
         }
         const key = resolveLedgerKey(ledger, rawName);
         const entry = ledger[key] || {};
+        const applied = { name: key };
         let touched = false;
-        if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { const dup = _dupOf('core', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' core arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.core = v; _seenBatch.core.set(v, key); touched = true; } } }
-        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; touched = true; } }
-        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);   if (v) { const dup = _dupOf('arc', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' arc arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.arc = v; _seenBatch.arc.set(v, key); touched = true; } } }
+        if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { const dup = _dupOf('core', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' core arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.core = v; applied.core = v; _seenBatch.core.set(v, key); touched = true; } } }
+        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; applied.state = v; touched = true; } }
+        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);   if (v) { const dup = _dupOf('arc', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' arc arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.arc = v; applied.arc = v; _seenBatch.arc.set(v, key); touched = true; } } }
         if (Array.isArray(d.threads)) {
             const tv = d.threads
                 .filter(t => typeof t === 'string' && t.trim())
@@ -3021,19 +3097,21 @@ function mergeLedgerDeltas(deltas, target, atTurn) {
             const joined = tv.join('\n');
             const dup = joined ? _dupOf('threads', joined, key) : null;
             if (dup) { _contam++; log(`Ledger contamination guard: '${key}' threads arrived verbatim-identical to '${dup}' — dropped.`); }
-            else { entry.threads = tv; if (joined) _seenBatch.threads.set(joined, key); touched = true; }
+            else { entry.threads = tv; applied.threads = tv.slice(); if (joined) _seenBatch.threads.set(joined, key); touched = true; }
         }
         if (touched) {
             entry.updatedAt = Date.now();
             if (typeof atTurn === 'number' && isFinite(atTurn)) entry._t = atTurn;   // last turn that shaped this entry — lets rewinds drop future-derived state instantly
             ledger[key] = entry;
             changed++;
+            _applied.push(applied);
         }
     }
     // The page is the materialized view; the notes are the history behind it. Staged
     // rebuild merges are NOT journalled here — they are journalled as one re-based
     // note per character at swap time, where the rebuild's coverage is known.
-    if (changed && !target) { try { appendLedgerNotes(deltas, atTurn); } catch (e) { log('appendLedgerNotes failed (non-fatal):', e); } }
+    if (Array.isArray(appliedOut)) for (const a of _applied) appliedOut.push(a);
+    if (changed && !target) { try { appendLedgerNotes(_applied, atTurn); } catch (e) { log('appendLedgerNotes failed (non-fatal):', e); } }
     return changed;
 }
 
@@ -3697,13 +3775,16 @@ async function processLedgerQueue() {
                     continue;
                 }
                 const _tgt = job.staging ? (getChatStore().ledgerStaging || (getChatStore().ledgerStaging = {})) : undefined;
-                const changed = mergeLedgerDeltas(deltas, _tgt, (typeof job.liveEnd === 'number' ? job.liveEnd : undefined));
+                const _applied = [];
+                const changed = mergeLedgerDeltas(deltas, _tgt, (typeof job.liveEnd === 'number' ? job.liveEnd : undefined), _applied);
                 // A staged rebuild journals its own reads: the swap installs page AND
                 // journal together, or the first fold after it undoes the rebuild.
+                // From what LANDED on the staging page, under the staging page's keys —
+                // this journal becomes the live one at the swap.
                 if (job.staging && changed > 0 && typeof job.liveEnd === 'number') {
                     const _stJ = getChatStore();
                     if (Array.isArray(_stJ.ledgerStagingNotes)) {
-                        for (const n of _notesFromDeltas(deltas, job.liveEnd)) _stJ.ledgerStagingNotes.push(n);
+                        for (const n of _notesFromDeltas(_applied, job.liveEnd)) _stJ.ledgerStagingNotes.push(n);
                     }
                 }
                 if (job.live && typeof job.liveEnd === 'number') {
@@ -7959,14 +8040,18 @@ function bindUIEvents() {
         if (name === undefined || name === null) return;
         const store = getChatStore();
         if (store.ledger && Object.prototype.hasOwnProperty.call(store.ledger, name)) {
-            const _e = store.ledger[name];
+            // A chat whose journal has not started yet gets one now, based on the page
+            // as it stands BEFORE the removal — so the character's history survives the
+            // deletion and the tombstone below has something to be a tombstone for.
+            ensureLedgerNotes(store);
             delete store.ledger[name];
             // Journal the deletion. Without a tombstone the very next fold (one
-            // message deletion was enough) resurrected the character in full.
+            // message deletion was enough) resurrected the character in full. Stamped
+            // at the journal's horizon, not the live pointer: a note at a higher turn
+            // (an adopted external edit, a summarization pass running ahead of the live
+            // pass) sorts after a tombstone stamped too low and quietly undeletes them.
             if (Array.isArray(store.ledgerNotes)) {
-                let _t = (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= 0) ? store.ledgerLiveIdx : 0;
-                if (_e && typeof _e._t === 'number' && _e._t > _t) _t = _e._t;
-                store.ledgerNotes.push({ t: _t, name, at: Date.now(), gone: true });
+                store.ledgerNotes.push({ t: _journalNow(store), name, at: Date.now(), gone: true });
             }
             // dropping a character also drops any pin on them, so no orphan pins linger
             const pins = getLedgerPins();
@@ -9161,7 +9246,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — nobody has to tell it who the protagonist is. Asking the user to fill in a field was the bug, not the safeguard: the answer already exists in the chat. The name now resolves automatically, ordered by AUTHORITY rather than convenience — an explicit human answer, then the same chat's Arbiter metadata (one chat is one universe; if a sibling extension already learned it, asking again is absurd), then what this extension learned itself, then the persona label. Self-learning rides the ledger scribe pass that already runs every turn: it marks the player's character on the entry it was already writing, so there is no extra model call. A learned name is filtered before it is trusted (the persona label, the card/narrator name, placeholder words, unexpanded macros, and junk lengths are all rejected) and can only ever FILL an unknown name — never overwrite a working setup. The 🎭 Protagonist name field remains, now purely to CORRECT a wrong guess, and its placeholder shows what was detected. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the character ledger's page and its notes journal now share ONE key space. The page decided a character's key (short/long form, case, typo repair) and then journaled the SCRIBE'S name instead, so folding re-ran the fuzzy resolver against a half-built page whose cast shrinks with every tombstone and every rewind cap — the same note could land on different keys depending on where the fold stopped. Two page keys could collapse onto one folded key, and then the external-edit reconciler could never close its diff: it wrote the note under the page key, the fold aliased it away, and the next fold adopted the same difference again, forever, every note stamped the same turn. That is why deleting one character filled its neighbours' history with identical rows — and why a tombstone, fuzzy-resolved too, could delete a different character than the one you clicked. Every writer now records the key the page assigned, folding is exact and order-independent, deletions are stamped at the journal's horizon so no later note can quietly undelete them, and existing journals are migrated into their page's key space once, on open. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

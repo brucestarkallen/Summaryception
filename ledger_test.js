@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -70,6 +70,7 @@ return {
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
+  _journalNow, _canonNotesAgainst, _canonicalizeLedgerNotes,
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
@@ -1537,7 +1538,212 @@ section('tombstones — a deletion is journaled; folds cannot resurrect');
     const rewound = L.foldLedgerNotes(notes, 7);
     ok(rewound['Silas'] && rewound['Silas'].state === 'in the library', 'rewinding BELOW the tombstone brings them back — deletion is an event in time, not an erasure of history');
 }
-ok(SRC_FULL.includes("store.ledgerNotes.push({ t: _t, name, at: Date.now(), gone: true });"), 'panel delete writes the tombstone (page-only deletes resurrected on the next fold)');
+ok(SRC_FULL.includes("store.ledgerNotes.push({ t: _journalNow(store), name, at: Date.now(), gone: true });"), 'panel delete writes the tombstone (page-only deletes resurrected on the next fold)');
+
+// ─── ONE KEY SPACE: page and journal agree, so a fold decides nothing ───
+section('journal key space — the page decides the key once, the fold obeys it');
+{
+    // v5.93.0 and earlier: the journal recorded the SCRIBE'S name while the page
+    // recorded the key it resolved that name to, and foldLedgerNotes re-ran the fuzzy
+    // resolver to bridge the gap — against a HALF-BUILT page. Two page keys could
+    // collapse onto one fold key; adoptExternalLedgerEdits then wrote its note under
+    // the page key, the fold aliased it away, and the SAME difference was adopted
+    // again on the next fold. The history filled with identical rows all stamped the
+    // same turn, and it grew without bound.
+    const store = {
+        ledgerLiveIdx: 1, ledgerNotesFrom: 0, ledgerNotesCanon: 1,
+        ledger: {
+            'Ichigo': { core: 'short-form dossier', state: 'on the roof', _t: 1, updatedAt: 1 },
+            'Ichigo Kurosaki': { core: 'long-form dossier', state: 'in the shop', _t: 1, updatedAt: 2 },
+        },
+        ledgerNotes: [
+            { t: 1, name: 'Ichigo', at: 100, core: 'short-form dossier', state: 'on the roof' },
+        ],
+    };
+    L.__setStore(store);
+    const fold0 = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    ok(Object.keys(fold0).length === 1 && 'Ichigo' in fold0, 'the fold keys EXACTLY on the note name — a short form is never re-aliased onto a long one mid-fold');
+
+    const counts = [];
+    for (let i = 0; i < 6; i++) counts.push(L.adoptExternalLedgerEdits(store));
+    ok(counts[0] === 1, 'the one genuinely unjournaled page entry is adopted once (got ' + counts[0] + ')');
+    ok(counts.slice(1).every(c => c === 0), 'and never again — adoption CONVERGES [' + counts.join(',') + ']');
+    ok(store.ledgerNotes.length === 2, 'the journal stops growing (got ' + store.ledgerNotes.length + ' notes)');
+    ok(L.ledgerHistoryFor(store.ledgerNotes, 'Ichigo').length === 1, 'one history row for the short form, not a stack of identical ones');
+    ok(L.ledgerHistoryFor(store.ledgerNotes, 'Ichigo Kurosaki').length === 1, 'one history row for the long form');
+    const foldN = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    eq(Object.keys(foldN).sort(), Object.keys(store.ledger).sort(), 'page == fold(notes): same key space, exactly');
+}
+
+section('deleting one character cannot touch another');
+{
+    // The reported trigger. Three characters share a given name; deleting the third
+    // used to make the short/long match unambiguous, so the fold merged two page keys
+    // into one and the tombstone — fuzzy-resolved too — took the merged entry with it.
+    const store = {
+        ledgerLiveIdx: 1, ledgerNotesFrom: 0, ledgerNotesCanon: 1,
+        ledger: {
+            'Rose': { core: 'short', _t: 1, updatedAt: 1 },
+            'Rose Otoribashi': { core: 'long', _t: 1, updatedAt: 2 },
+            'Rose Hitsugaya': { core: 'third', _t: 1, updatedAt: 3 },
+        },
+        ledgerNotes: [
+            { t: 1, name: 'Rose', at: 100, core: 'short' },
+            { t: 1, name: 'Rose Otoribashi', at: 101, core: 'long' },
+            { t: 1, name: 'Rose Hitsugaya', at: 102, core: 'third' },
+        ],
+    };
+    L.__setStore(store);
+    // exactly what the panel's delete handler does
+    L.ensureLedgerNotes(store);
+    delete store.ledger['Rose Hitsugaya'];
+    store.ledgerNotes.push({ t: L._journalNow(store), name: 'Rose Hitsugaya', at: Date.now(), gone: true });
+
+    const fold = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    eq(Object.keys(fold).sort(), ['Rose', 'Rose Otoribashi'], 'the tombstone removes EXACTLY the deleted character');
+    eq(Object.keys(fold).sort(), Object.keys(store.ledger).sort(), 'and the page still equals the fold');
+    const grew = [];
+    for (let i = 0; i < 6; i++) grew.push(L.adoptExternalLedgerEdits(store));
+    ok(grew.every(c => c === 0), 'nothing is adopted after the deletion — no runaway [' + grew.join(',') + ']');
+    ok(L.ledgerHistoryFor(store.ledgerNotes, 'Rose').length === 1, "the survivor's history is not duplicated by the deletion");
+}
+
+section('_journalNow — a statement about NOW outranks every existing note');
+{
+    const st = { ledgerLiveIdx: 4, ledgerNotes: [{ t: 11, name: 'A', at: 1 }, { t: 7, name: 'B', at: 2 }] };
+    ok(L._journalNow(st) === 11, 'the horizon is the newest note, not the live pointer (got ' + L._journalNow(st) + ')');
+    ok(L._journalNow({ ledgerLiveIdx: 30, ledgerNotes: [{ t: 2, name: 'A', at: 1 }] }) === 30, 'the live pointer wins when it is ahead');
+    ok(L._journalNow({}) === 0, 'an empty store is turn 0');
+    ok(L._journalNow(st, 99) === 99, 'an explicit floor is respected');
+    ok(L._journalNow(st, undefined, false) === 11, 'withLive=false ignores the live pointer (staged rebuild) but still clears the notes');
+    // The regression this guards: a tombstone stamped at the LIVE pointer while a
+    // note sits at a higher turn sorts first, and the character quietly undeletes.
+    const notes = [{ t: 11, name: 'A', at: 1, core: 'still here' }];
+    notes.push({ t: 4, name: 'A', at: 2, gone: true });
+    ok('A' in L.foldLedgerNotes(notes, Infinity), 'proof of the failure mode: a tombstone stamped too low does NOT delete');
+    const notes2 = [{ t: 11, name: 'A', at: 1, core: 'still here' }];
+    notes2.push({ t: L._journalNow({ ledgerLiveIdx: 4, ledgerNotes: notes2 }), name: 'A', at: 2, gone: true });
+    ok(!('A' in L.foldLedgerNotes(notes2, Infinity)), 'stamped at the horizon, the deletion holds');
+}
+
+section('the journal records the DECISION, not the scribe\u2019s text');
+{
+    const store = {
+        ledger: { 'Alexia Valois': { core: 'proud duelist', _t: 3 } },
+        ledgerNotes: [{ t: 3, name: 'Alexia Valois', at: 1, core: 'proud duelist' }],
+        ledgerNotesFrom: 0, ledgerNotesCanon: 1, ledgerLiveIdx: 3,
+    };
+    L.__setStore(store);
+    L.__setSettings(Object.assign({}, defaultSettings));
+    // The scribe says the short form; the page files it under the long key it already has.
+    L.mergeLedgerDeltas([{ name: 'Alexia', state: 'nursing a bruised ego' }], undefined, 4);
+    eq(Object.keys(store.ledger), ['Alexia Valois'], 'the page keeps ONE entry');
+    eq(store.ledgerNotes.map(n => n.name), ['Alexia Valois', 'Alexia Valois'], 'and the new note is journaled under the RESOLVED key, not "Alexia"');
+    eq(store.ledgerNotes[1].state, 'nursing a bruised ego', 'carrying the field that actually landed');
+    eq(Object.keys(L.foldLedgerNotes(store.ledgerNotes, Infinity)), ['Alexia Valois'], 'so the fold reproduces the page with no resolving of its own');
+
+    // Contaminated fields are dropped from the page — they must not survive in the note.
+    const store2 = {
+        ledger: { 'Kira': { core: 'A'.repeat(60), _t: 1 } },
+        ledgerNotes: [], ledgerNotesFrom: 0, ledgerNotesCanon: 1, ledgerLiveIdx: 1,
+    };
+    L.__setStore(store2);
+    L.mergeLedgerDeltas([{ name: 'Shuhei', core: 'A'.repeat(60), state: 'his own state' }], undefined, 2);
+    ok(store2.ledger['Shuhei'] && store2.ledger['Shuhei'].core === undefined, 'the copied core never reaches the page');
+    const note = store2.ledgerNotes.find(n => n.name === 'Shuhei');
+    ok(note && note.core === undefined, 'and the journal does not smuggle it back in on the next fold');
+    ok(note && note.state === 'his own state', 'the legitimate field is journaled');
+
+    // A delta filed under the player's handle is redirected on the page — and journaled redirected.
+    const store3 = { ledger: {}, ledgerNotes: [], ledgerNotesFrom: 0, ledgerNotesCanon: 1, ledgerLiveIdx: 1, mcName: 'Jovan' };
+    L.__setStore(store3);
+    L.__setCtxExtra({ name1: 'LO' });
+    L.mergeLedgerDeltas([{ name: 'LO', state: 'issuing orders' }], undefined, 2);
+    L.__setCtxExtra({});
+    eq(Object.keys(store3.ledger), ['Jovan'], 'the persona handle is redirected to the protagonist on the page');
+    eq(store3.ledgerNotes.map(n => n.name), ['Jovan'], 'and the journal records the redirect — no phantom persona resurrects at the next fold');
+
+    // A staged merge journals nothing on the live journal, but reports what landed.
+    const store4 = { ledger: {}, ledgerNotes: [], ledgerNotesFrom: 0, ledgerNotesCanon: 1 };
+    L.__setStore(store4);
+    const staging = { 'Renji Abarai': { core: 'loyal', _t: 1 } };
+    const applied = [];
+    L.mergeLedgerDeltas([{ name: 'Renji', state: 'on patrol' }], staging, 5, applied);
+    eq(store4.ledgerNotes.length, 0, 'a staged merge never writes the LIVE journal');
+    eq(applied.map(a => a.name), ['Renji Abarai'], 'but it reports the staging page\u2019s resolved key for the staging journal');
+    eq(L._notesFromDeltas(applied, 5).map(n => n.name), ['Renji Abarai'], 'which _notesFromDeltas shapes into a canonical staging note');
+}
+
+section('legacy journals are migrated into the page\u2019s key space once');
+{
+    const store = {
+        ledger: { 'Alexia Valois': { core: 'proud duelist' }, 'Mara': { core: 'terse' } },
+        ledgerStaging: null, ledgerStagingNotes: null,
+        ledgerNotes: [
+            { t: 1, name: 'Alexia', at: 1, core: 'proud duelist' },
+            { t: 2, name: 'alexia valois', at: 2, state: 'in the yard' },
+            { t: 3, name: 'Mara', at: 3, core: 'terse' },
+            { t: 4, name: 'Silas', at: 4, core: 'deleted long ago' },
+        ],
+    };
+    const n = L._canonicalizeLedgerNotes(store);
+    ok(n === 2, 'exactly the two divergent names are rewritten (got ' + n + ')');
+    eq(store.ledgerNotes.map(x => x.name), ['Alexia Valois', 'Alexia Valois', 'Mara', 'Silas'], 'short form and case drift both resolve to the page key; a name the page does not know is left alone');
+    ok(store.ledgerNotesCanon === 1, 'the store is stamped so the migration runs once');
+    ok(L._canonicalizeLedgerNotes(store) === 0, 'and re-running it is a no-op');
+    // WHY the stamp matters, beyond not re-scanning the journal on every getChatStore:
+    // the page is a moving target. Delete a character and re-run an unstamped
+    // migration, and that character's legacy notes resolve onto whoever is left.
+    delete store.ledger['Mara'];
+    store.ledger['Mara Vex'] = { core: 'a later arrival who happens to share the given name' };
+    ok(L._canonicalizeLedgerNotes(store) === 0, 'a migration that already ran does NOT re-resolve against a page that has since changed');
+    eq(store.ledgerNotes.map(x => x.name), ['Alexia Valois', 'Alexia Valois', 'Mara', 'Silas'], "and the departed character's history is not grafted onto a survivor");
+    const fold = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    ok(fold['Alexia Valois'] && fold['Alexia Valois'].state === 'in the yard', 'the migrated history folds into one dossier');
+    ok(fold['Silas'] && fold['Silas'].core === 'deleted long ago', "a deleted character keeps its own history rather than being grafted onto a survivor");
+
+    // An empty page is not an authority: nothing is rewritten against it, and the
+    // one-shot migration is NOT burned on a store whose ledger has not loaded yet.
+    const store2 = { ledger: {}, ledgerNotes: [{ t: 1, name: 'Alexia', at: 1 }] };
+    ok(L._canonicalizeLedgerNotes(store2) === 0, 'an empty page rewrites nothing');
+    ok(!store2.ledgerNotesCanon, 'and does not stamp the store — an unmaterialized page is an absence of an answer, not an answer');
+    store2.ledger = { 'Alexia Valois': { core: 'proud duelist' } };
+    ok(L._canonicalizeLedgerNotes(store2) === 1, 'the migration still runs once the page is there');
+    eq(store2.ledgerNotes.map(x => x.name), ['Alexia Valois'], 'and lands the legacy name in the page\u2019s key space');
+    // A store with no notes at all is trivially canonical and IS stamped.
+    const store2b = { ledger: {}, ledgerNotes: [] };
+    L._canonicalizeLedgerNotes(store2b);
+    ok(store2b.ledgerNotesCanon === 1, 'a store with no journal is canonical by definition');
+    // The staging journal is migrated against the staging page.
+    const store3 = {
+        ledger: {}, ledgerNotes: [],
+        ledgerStaging: { 'Renji Abarai': { core: 'loyal' } },
+        ledgerStagingNotes: [{ t: 1, name: 'Renji', at: 1, core: 'loyal' }],
+    };
+    L._canonicalizeLedgerNotes(store3);
+    eq(store3.ledgerStagingNotes.map(x => x.name), ['Renji Abarai'], 'the staging journal is migrated too — the swap installs a canonical journal');
+    ok(SRC_FULL.includes('_canonicalizeLedgerNotes(chatMetadata[MODULE_NAME]);'), 'and it runs from getChatStore — the one door every path goes through');
+}
+
+section('the fold no longer re-resolves anything');
+{
+    ok(!/const key = resolveLedgerKey\(out, n\.name\.trim\(\)\);/.test(SRC_FULL), 'foldLedgerNotes does not run the fuzzy resolver');
+    ok(!/const fk = Object\.prototype\.hasOwnProperty\.call\(fold, name\) \? name : resolveLedgerKey\(fold, name\);/.test(SRC_FULL), 'adoptExternalLedgerEdits does not fuzzy-match page entries onto other characters\u2019 folded entries');
+    ok(!/const pk = Object\.prototype\.hasOwnProperty\.call\(page, name\) \? name : resolveLedgerKey\(page, name\);/.test(SRC_FULL), 'and its deletion sweep is exact too');
+    ok(SRC_FULL.includes('appendLedgerNotes(_applied, atTurn)'), 'the live journal is written from what landed, never from the raw deltas');
+    ok(SRC_FULL.includes('_notesFromDeltas(_applied, job.liveEnd)'), 'the staging journal too');
+    // Order independence: the same notes in any order fold to the same page.
+    const notes = [
+        { t: 1, name: 'Rose', at: 1, core: 'a' },
+        { t: 1, name: 'Rose Otoribashi', at: 2, core: 'b' },
+        { t: 2, name: 'Rose Hitsugaya', at: 3, core: 'c' },
+    ];
+    const a = L.foldLedgerNotes(notes, Infinity);
+    const b = L.foldLedgerNotes(notes.slice().reverse(), Infinity);
+    eq(Object.keys(a).sort(), Object.keys(b).sort(), 'folding is order-independent');
+    const capped = L.foldLedgerNotes(notes, 1);
+    eq(Object.keys(capped).sort(), ['Rose', 'Rose Otoribashi'], 'and a maxTurn cap changes WHICH notes are read, never how they are keyed');
+}
 
 section('adoptExternalLedgerEdits — copilot page edits survive every fold');
 {
