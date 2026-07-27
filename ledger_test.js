@@ -1842,10 +1842,51 @@ section('journal hygiene — fallback rewinds cannot leave ghost notes');
 ok(SRC_FULL.includes('_st0.ledgerNotes = [];'), 'turn-0 clear: the journal clears WITH the page (ghosts re-materialized the abandoned ledger)');
 ok(SRC_FULL.includes('store.ledgerNotes = _baseNotesFromPage(store.ledger, ckpt.atTurn);'), 'checkpoint restore: the journal is rebased on the restored page');
 ok(SRC_FULL.includes('cur.ledgerNotes = _baseNotesFromPage(cur.ledger, effTarget);') && SRC_FULL.includes('cur.ledgerNotesFrom = effTarget;'), 'staged rebuild entry: the journal is re-based to the serving page — a mid-rebuild fold reproduces the page by construction, and ghost notes cannot exist to paint back');
-ok(SRC_FULL.includes("if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {"), 'rebuild swap: external page edits are adopted before the final fold — but ONLY when the old journal covers the swap horizon (an uncovered diff is the whole doomed page, not an edit)');
+ok(SRC_FULL.includes("if (Array.isArray(st.ledgerNotes) && st.ledgerNotes.length > 0 && notesCover(st, upTo)) {"), 'rebuild swap: external page edits are adopted before the final fold — but ONLY when the old journal covers the swap horizon AND actually holds history to diff against (an uncovered or empty diff is the whole doomed page, not an edit)');
 ok(SRC_FULL.includes('try { adoptExternalLedgerEdits(store); } catch (e)'), 'scribe merge: durable early adoption before new deltas land');
 ok((SRC_FULL.match(/adoptExternalLedgerEdits\(store\);/g) || []).length >= 3, 'rewind, message-deletion refold, and merge all reconcile first');
 ok(SRC_FULL.includes("store.ledgerNotes.push({ t: _t, name: key, at: Date.now(), a: stampAt });"), 'the audit stamp rides the journal (page-only stamps forced endless re-audits)');
+
+section('deleting the turn that created a character removes them');
+{
+    // THE REPORTED BUG. A three-message chat: greeting, user, the AI's first reply.
+    // The live pass reads turn 2 and writes the ledger. The user deletes message 2.
+    // The character stayed. Two independent defects, both on this one path.
+    const store = { ledger: {}, layers: [], summarizedUpTo: -1, ghostedIndices: [] };
+    L.__setStore(store);
+    L.__setSettings(Object.assign({}, defaultSettings));
+    L.mergeLedgerDeltas([{ name: 'Rukia', core: 'sharp-tongued', state: 'on the roof' }], undefined, 2);
+    store.ledgerLiveIdx = 2;   // processLedgerQueue advances the pointer AFTER the merge
+
+    // (1) The journal must not contain a carried-over BASE snapshot of a page this
+    //     very pass just wrote. Base notes survive turn-based dropping forever.
+    ok(store.ledgerNotes.length === 1, 'the first pass journals ONE note, not a note plus an immortal base (got ' + store.ledgerNotes.length + ')');
+    ok(!store.ledgerNotes.some(n => n.base), 'nothing this pass wrote is filed as pre-journal history');
+    eq(store.ledgerNotes.map(n => n.t), [2], 'and it is stamped at the turn it actually came from, not turn 0');
+    eq(Object.keys(L.foldLedgerNotes(store.ledgerNotes, 1)), [], 'so folding BELOW that turn produces an empty page — the character did not exist yet');
+
+    // reindexAfterDeletion(store, 2), the single-deletion path
+    const D = 2;
+    store.ledgerLiveIdx -= 1;
+    L.adoptExternalLedgerEdits(store);
+    store.ledgerNotes = store.ledgerNotes
+        .filter(n => !(n && typeof n.t === 'number' && n.t === D && !n.base))
+        .map(n => (n && typeof n.t === 'number' && n.t >= D) ? Object.assign({}, n, { t: n.t - 1 }) : n);
+
+    // (2) The journal is now EMPTY — which is the answer, not an absence of one.
+    ok(store.ledgerNotes.length === 0, 'the deleted turn takes its note with it');
+    ok(L.notesCover(store, store.ledgerLiveIdx) === true, 'an established journal that holds nothing still covers the horizon — it says "nothing survives"');
+    store.ledger = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    eq(Object.keys(store.ledger), [], 'THE FIX: deleting the only turn that ever mentioned her removes her from the ledger');
+}
+
+section('notesCover — absence is an unset floor, never an empty list');
+{
+    ok(L.notesCover({ ledgerNotes: [], ledgerNotesFrom: 0 }, 5) === true, 'established and empty: covered');
+    ok(L.notesCover({ ledgerNotes: [] }, 5) === false, 'established but with no authoritative floor: not covered');
+    ok(L.notesCover({ ledgerNotes: [{ t: 9, name: 'A', at: 1 }], ledgerNotesFrom: 7 }, 5) === false, 'a target below the floor is not covered');
+    ok(L.notesCover({}, 5) === false, 'no journal at all: not covered');
+}
 
 section('adoption guards — divergence is only adopted when it means intent');
 {

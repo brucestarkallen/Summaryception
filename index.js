@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.94.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.95.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -2689,7 +2689,13 @@ function ledgerHistoryFor(notes, name) {
 // ledger before notes existed gets a base note capturing the page as it stood then;
 // rewinds ABOVE that are exact folds, rewinds below still need the old machinery.
 function notesCover(store, targetTurn) {
-    if (!store || !Array.isArray(store.ledgerNotes) || store.ledgerNotes.length === 0) return false;
+    // Emptiness is an ANSWER, not an absence. A journal that exists and is
+    // authoritative from turn `from` says "nothing survives" when it holds no notes
+    // — and that is exactly the state a deletion leaves when the deleted turn was
+    // the only thing in it. Treating that as "no journal" skipped the refold at the
+    // one moment it was most needed, so the page kept a character whose only source
+    // had just been deleted. Absence is `ledgerNotesFrom` never being set.
+    if (!store || !Array.isArray(store.ledgerNotes)) return false;
     const from = (typeof store.ledgerNotesFrom === 'number') ? store.ledgerNotesFrom : null;
     if (from === null) return false;
     return targetTurn >= from;
@@ -2891,8 +2897,12 @@ function _swapStagedLedgerIn(st) {
     // journal (legacy chat, stranded pointer, retired era) the fold is empty-or-partial,
     // so the "diff" is the ENTIRE pre-rebuild page — adopting it would journal the very
     // timeline the rebuild just discarded, and any later rewind could resurrect it.
+    // (Coverage is necessary but not sufficient here: an EMPTY journal is covered
+    // and folds to {}, so the diff would be the whole pre-rebuild page. This pass
+    // needs actual history to isolate against, so it says so rather than leaning on
+    // notesCover to imply it.)
     let extNotes = [];
-    if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {
+    if (Array.isArray(st.ledgerNotes) && st.ledgerNotes.length > 0 && notesCover(st, upTo)) {
         const _pre = st.ledgerNotes.length;
         try { adoptExternalLedgerEdits(st); } catch (e) { log('swap: external-edit adoption failed (non-fatal):', e); }
         extNotes = st.ledgerNotes.slice(_pre).map(n => Object.assign({}, n, { t: Math.min((typeof n.t === 'number' && isFinite(n.t)) ? n.t : upTo, upTo) }));
@@ -3003,6 +3013,19 @@ function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
         const store = getChatStore();
         if (!store.ledger || typeof store.ledger !== 'object') store.ledger = {};
         ledger = store.ledger;
+        // The journal is established against the page as it stands BEFORE this pass
+        // writes to it. Establishing it AFTER — which is what happened when
+        // appendLedgerNotes called ensureLedgerNotes at the end of this function —
+        // snapshotted the page THIS PASS had just written as a `base: true` note,
+        // i.e. as history that predates the journal. Base notes are deliberately
+        // exempt from turn-based dropping (they are carried-over snapshots, not a
+        // record of their turn), so the very first scribe pass of every chat welded
+        // its characters into the journal permanently at turn 0: deleting the turn
+        // that created them dropped the per-turn note, the immortal base survived,
+        // and they never left the ledger. A rewind or a branch could not remove them
+        // either. On a genuinely pre-notes chat this still bases the real legacy page,
+        // which is what the migration is for.
+        ensureLedgerNotes(store);
         // Durable early adoption: a copilot edit made since the last pass is
         // journaled BEFORE new deltas land on top of it.
         try { adoptExternalLedgerEdits(store); } catch (e) { log('adoptExternalLedgerEdits failed (non-fatal):', e); }
@@ -9246,7 +9269,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the character ledger's page and its notes journal now share ONE key space. The page decided a character's key (short/long form, case, typo repair) and then journaled the SCRIBE'S name instead, so folding re-ran the fuzzy resolver against a half-built page whose cast shrinks with every tombstone and every rewind cap — the same note could land on different keys depending on where the fold stopped. Two page keys could collapse onto one folded key, and then the external-edit reconciler could never close its diff: it wrote the note under the page key, the fold aliased it away, and the next fold adopted the same difference again, forever, every note stamped the same turn. That is why deleting one character filled its neighbours' history with identical rows — and why a tombstone, fuzzy-resolved too, could delete a different character than the one you clicked. Every writer now records the key the page assigned, folding is exact and order-independent, deletions are stamped at the journal's horizon so no later note can quietly undelete them, and existing journals are migrated into their page's key space once, on open. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — deleting the turn that created a character now removes them. Two defects sat on that one path. The ledger journal was established AFTER the first scribe pass had already written the page, so it snapshotted that pass's own output as a carried-over BASE note — history that predates the journal — and base notes are deliberately exempt from turn-based dropping. Every chat therefore welded its first pass's cast into the journal permanently at turn 0: deleting the turn that created them dropped the per-turn note, the immortal base survived, and no deletion, rewind, or branch could ever remove them. The journal is now established against the page as it stands BEFORE the pass writes to it, so a fresh chat starts empty and every character enters the record at the turn they actually came from. Second, an established journal holding zero notes was read as NO journal, so the refold was skipped at the exact moment it mattered — when the deleted turn was the only thing in it. Emptiness is an answer, not an absence; absence is an unset floor. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

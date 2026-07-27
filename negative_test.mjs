@@ -75,6 +75,21 @@ const MUTATIONS = [
         '    if (!store || (store.ledgerNotesCanon | 0) >= _NOTES_CANON_V) return 0;',
         '    if (!store) return 0;',
         'a migration that already ran does NOT re-resolve against a page that has since changed'],
+
+    ['journal established AFTER the page is written (first pass welds in a base note)', 'index.js',
+        '        ensureLedgerNotes(store);\n        // Durable early adoption',
+        '        // Durable early adoption',
+        'the first pass journals ONE note, not a note plus an immortal base (got 2)'],
+
+    ['an empty journal is read as "no journal"', 'index.js',
+        '    if (!store || !Array.isArray(store.ledgerNotes)) return false;',
+        '    if (!store || !Array.isArray(store.ledgerNotes) || store.ledgerNotes.length === 0) return false;',
+        'an established journal that holds nothing still covers the horizon \u2014 it says "nothing survives"'],
+
+    ['rebuild swap diffs against an empty journal', 'index.js',
+        'if (Array.isArray(st.ledgerNotes) && st.ledgerNotes.length > 0 && notesCover(st, upTo)) {',
+        'if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {',
+        'rebuild swap: external page edits are adopted before the final fold'],
 ];
 
 function scratchCopy() {
