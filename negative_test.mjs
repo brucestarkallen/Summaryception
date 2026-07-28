@@ -90,6 +90,26 @@ const MUTATIONS = [
         'if (Array.isArray(st.ledgerNotes) && st.ledgerNotes.length > 0 && notesCover(st, upTo)) {',
         'if (Array.isArray(st.ledgerNotes) && notesCover(st, upTo)) {',
         'rebuild swap: external page edits are adopted before the final fold'],
+
+    ['the protagonist is modelled like an NPC (write side)', 'index.js',
+        "        const _recOnly = _mcRecOnly && isMcLedgerKey(key);",
+        "        const _recOnly = false;",
+        'the protagonist gets no Nature \u2014 his temperament is the player\u2019s to write'],
+
+    ['the protagonist keeps his Arc on the write side', 'index.js',
+        "        if (typeof d.arc === 'string' && !_recOnly)   { const v = stripLeadingLabel(d.arc);",
+        "        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);",
+        'and no Arc \u2014 his inner trajectory is not the record\u2019s to plot'],
+
+    ['the spec still reaches the storyteller (read side)', 'index.js',
+        "    if (!recordOnly && typeof entry.core === 'string' && entry.core.trim())   parts.push('Nature: ' + norm(entry.core));",
+        "    if (typeof entry.core === 'string' && entry.core.trim())   parts.push('Nature: ' + norm(entry.core));",
+        'Nature and Arc are withheld and the line says whose character it is'],
+
+    ['everyone else is quarantined too (the matcher over-matches)', 'index.js',
+        "    if (a === b) return true;",
+        "    if (a === b || true) return true;",
+        'a character the STORY controls keeps all four fields'],
 ];
 
 function scratchCopy() {

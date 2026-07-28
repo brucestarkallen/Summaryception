@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.95.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.96.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -135,6 +135,7 @@ const defaultSettings = Object.freeze({
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
     ledgerLiveUpdate: true,        // update the ledger over the recent (not-yet-summarized) window every turn, not only when a batch is summarized — keeps "Now"/arcs/threads tracking the current scene instead of lagging ~verbatimTurns behind
     ledgerLiveEveryTurns: 1,       // run the live pass every N assistant turns (1 = every turn = freshest)
+    ledgerMcRecordOnly: true,      // the player's character is RECORDED (where they are, what is open around them), never MODELLED (nature, inner trajectory) — a psychological spec for a character the player controls is a script for them
     ledgerInjectRoster: true,      // also inject a compact one-line-per-character roster of EVERYONE off-screen, so long-absent characters are never forgotten and return consistently
     ledgerRosterMax: 12,           // cap on how many off-screen characters the roster lists at once (most-recently-updated first)
     ledgerRosterRotate: true,      // when the off-screen cast exceeds the cap: keep the most-recent anchored and ROTATE the rest through the remaining slots one step per turn, so a small cap still refreshes everyone over time
@@ -214,6 +215,7 @@ DISCIPLINE — this is a continuity record, not new fiction:
 - Respect what each character can plausibly know. Do not credit them with knowledge of events they did not witness or were not told; their state and choices follow from their own perspective, not the reader's.
 - Do NOT restate what the CURRENT LEDGER or PRIOR CONTEXT already holds. Add or evolve only.
 - Use each character's exact name as already established. Do not rename or merge distinct characters, and do not invent a name for an unnamed figure — skip anyone unnamed.
+- THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL. For the one character the player controls (the protagonist the player's own turns speak and act as), output ONLY the state and threads fields - where they are, what is visibly true of them, and what is open around them. NEVER output core or arc for them: their nature, their motives and their inner trajectory are the player's to write, and a spec for them is a script for a character you do not control. Their state is an OBSERVATION (what a witness in the room would see), not a reading of their feelings. Everyone else keeps all four fields, including their arc TOWARD the player's character, which is where the relationship actually lives.
 - Terse, concrete director's notes. No markdown, no preamble, no meta-commentary.
 
 OUTPUT — a single JSON array and NOTHING else (no code fence, no prose before or after). Each element:
@@ -527,7 +529,7 @@ function getSettings() {
 // (snippets, ledger, notepad) is never touched.
 const PRIOR_PROMPT_DEFAULTS = {
     summarizerUserPrompt: ["<player_name>{{player_name}}</player_name>\n<prior_context>{{context_str}}</prior_context>\n<passage>{{story_txt}}</passage>\n\nWrite ONE line recording only what is NEW in <passage> relative to <prior_context>.\n\nHARD EXCLUSIONS \u2014 do not record:\n- Anything already stated in <prior_context>, even indirectly. If a fact, location, relationship, spec, stat, or character trait appears in <prior_context>, it is ESTABLISHED. Never restate it.\n- CRITICAL: If <prior_context> already references an event, arrival, match, deployment, or location that <passage> now depicts in full scene form, treat the scene itself as established. Record ONLY the specific new details the prior reference did not contain.\n- Atmosphere, weather, particulate haze, lighting, crowd noise, body language without narrative consequence.\n- Repeated reactions (\"X froze,\" \"Y watched\") unless they trigger a new action.\n- Ongoing states (repeated locations, reactor levels, recurring postures) \u2014 state these ONCE, then never again.\n\nRECORD (in priority order):\n1. {{player_name}}'s decisions, declarations, and actions.\n2. Other named characters' actions that change state, advance plot, or reveal information. In social or group scenes, each named character who approaches, addresses, or acts toward {{player_name}} or the focal character is a SEPARATE record \u2014 never collapse multiple participants into \"others\" or a single summary. Capture who did what, individually.\n3. New facts: identities, numbers, titles, troop counts, match results, tactical details, scale shifts (crowd size, social attraction, popularity, odds, distances). When multiple characters contribute personal knowledge about a previously unmentioned character or entity, treat the combined profile as high-priority canon \u2014 preserve the character's identity, key achievements, and each contributor's unique connection to them.\n4. Plans and strategy: the problem, the proposed solution, who proposed it. Include stated intentions, conditional promises, and \"if-then\" commitments.\n5. Character self-declarations and diagnostic reads: when a named character explicitly states their own motivation, principle, boundary, self-assessment, method, capability, or knowledge source in dialogue \u2014 OR delivers a strategic assessment of another character's transformation, capability, or position \u2014 record the substance (paraphrased, not quoted).\n6. Information asymmetries: when the text explicitly flags that one character knows or witnessed something another character doesn't know they know, record who saw/knows what.\n7. Temporal markers: if the passage states a specific day, date, month, season, or time-of-day transition (morning/afternoon/evening/night, Day 4, Tuesday, Mar 15, late March, etc.), you MUST prefix the ENTIRE line with the earliest such marker in compact form (e.g., \"[Sept 1, 08:24] Jovan did X;...\"). A temporal marker is a PREFIX ONLY \u2014 it is never by itself a reason to generate content. Omit if no temporal marker appears.\n8. Corrections & Retcons: If <passage> reveals that a fact, motive, or state in <prior_context> was a lie, a misunderstanding, or has logically changed, record this update explicitly. Format as: [Correction] [Subject]'s prior [state/action] was actually [new truth] because [reason].\n9. System & Stat Deltas: Extract any changed stats, tags, or UI variables (e.g., P:, R:, S:). You MUST compress ALL stat updates into a SINGLE phrase at the very END of the line, formatted as: STATS: Name(P:X/R:Y/S:Z), Name(P:X/R:Y/S:Z). Do not use multiple phrases for stats.\n10. Out-of-character canon: <passage> may include author asides, parentheticals, or OOC notes (often in parentheses, marked as background/context/note, or verification blocks like \"Family Logic Confirmed\") that state canonical facts \u2014 character backstory, family structure, separations/divorces, custody or legal situations, hidden truths, world rules, relationships, or motives. Record their substance as priority-3 facts, even when framed as an instruction to \"analyze,\" \"confirm,\" or \"check.\" OOC framing or words like \"Confirmed\" do NOT make a fact established \u2014 only actual presence in <prior_context> does. Distinguish canonical facts (RECORD them) from pure processing directives such as \"keep it short,\" \"stay in character,\" or \"analyze before the header\" (IGNORE those).\n\nACTOR RULES:\n- Every action needs an EXPLICIT actor named in the text. Presence \u2260 actorship.\n- If no actor is named, write passive voice. Never guess.\n- ABSOLUTE PRONOUN BAN: Use character names everywhere. You must replace ALL pronouns (he, him, his, she, her, hers, they, them, their, it) with the specific character's name.\n- If the passage uses second-person (\"you\", \"your\") to refer to the player, replace with {{player_name}}.\n- Past events referenced in <passage> belong to whoever the text says performed them.\n\nFORMAT:\n- One line. Short phrases separated by semicolons.\n- HARD LIMIT: 15 phrases. For dense scenes with 4+ named participants, 18 phrases maximum. The bundled STATS phrase counts as ONE phrase. If you exceed the limit, cut lowest-priority items first (priority order above) \u2014 never cut to fit by dropping high-priority canon or by collapsing distinct named participants together.\n- If <passage> has nothing new beyond <prior_context>, output exactly: (no new state)\n\nBEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if available; (2) no phrase duplicates anything in <prior_context>; (3) NO PRONOUNS remain \u2014 all replaced with names; (4) phrase count within limit; (5) every action has an explicit actor or is passive voice; (6) every named character who acted toward {{player_name}} or the focal character is recorded individually, not merged; (7) any canonical facts stated in OOC asides or parentheticals are captured \u2014 not skipped as \"already confirmed\" \u2014 while pure processing directives are ignored; (8) TIMELINE LOGIC \u2014 new facts do not create unexplained paradoxes with <prior_context>; if a paradox exists, resolve it with a [Correction] tag; (9) ALL stats are bundled into ONE phrase at the end. If any check fails, revise."],
-    ledgerSystemPrompt: ["You are the character-continuity mind for an ongoing work of collaborative fiction \u2014 part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON \u2014 consistent in voice, values, and behavior \u2014 while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.\n\nYou receive the CURRENT LEDGER (what is already known about each character), the PRIOR CONTEXT (established story), and a NEW PASSAGE (what just happened). For every character who appears or is materially involved in the NEW PASSAGE, output an updated entry. Do NOT output characters who are absent from the passage.\n\nEach entry tracks four fields. A character PRESENT in the passage must never be left describing an EARLIER scene: if the story has moved and their state field still reads like a previous moment, that is an ERROR - refresh it to where they are and what they want NOW, even when the change is small. Standing in a room that has changed IS a change of state. Update ONLY what the passage changes; OMIT any field that is unchanged.\n\n- core \u2014 the character's STABLE nature: temperament, values, and above all HOW THEY EXPRESS THEMSELVES. Capture what a writer needs to keep them in character: their default emotional register; how they behave under stress, embarrassment, or threat; their tells and defense mechanisms; how they speak (formal or plain, blunt or indirect, verbal habits) and specifically how they ADDRESS {{player_name}} and others (by name, nickname, title, coldly, teasingly); and the lines they would NOT cross. This is the anchor that keeps them recognizable across the whole story. Write it once when a character is established, then change it only when the passage reveals a genuinely NEW stable trait \u2014 never for a passing mood. When you do touch core, restate the FULL stable picture (everything already established plus the new trait) so nothing is lost. Favor concrete, actable specifics: \"when flustered, goes clipped and sarcastic and changes the subject; never raises her voice\" beats \"proud but shy.\"\n- state \u2014 the character's CURRENT, volatile condition right after this passage: their mood, what is on their mind, what they want in this moment, how they are carrying themselves. This is overwritten each time they act, but it is NOT a blank slate \u2014 emotions have momentum. Carry forward the mood the ledger already records and evolve it realistically: a shock lingers and eases only with time or reassurance; a slight festers until addressed; warmth or anger set earlier still colors how they act now. If a character re-enters after being off-page, their last recorded state is where they resume unless the passage changes it. Record what would still be true a few beats later, not just the instant snapshot.\n- arc \u2014 the SLOW trajectory of this character's key relationships, above all with {{player_name}}: the DIRECTION things are moving (warming, fraying, trust building or breaking, respect or resentment growing) AND the formative moments that got them there \u2014 what {{player_name}} did that they will not forget (a kindness, a betrayal, a moment of being truly seen or let down). One to three sentences. This is relational memory: it is WHY they treat {{player_name}} the way they do. Update only when the passage actually moves it; evolve the existing arc rather than restarting it.\n- threads \u2014 the character's CURRENTLY OPEN loose ends: concrete, unresolved things that will shape how they behave next (a promise pending, a lie unconfessed, an unaddressed slight, a confession half-made, a question left hanging, a debt owed either way). Output the CURRENT open list: KEEP threads still unresolved, DROP any this passage resolved, ADD any it opened. A thread stays open until the STORY resolves it \u2014 never merely because time passed. Omit the field entirely if nothing changed; use an empty array [] ONLY to signal that all previously-open threads are now resolved.\n\nDISCIPLINE \u2014 this is a continuity record, not new fiction:\n- Record ONLY what the passage (with the prior context) EVIDENCES. Never invent traits, motives, feelings, or backstory the text does not support. Inventing is the worst failure \u2014 it corrupts the character.\n- Separate observation from inference. State what a character DID as fact; when you read their inner state from behavior, mark it as read (\"seems\", \"reads as\", \"appears to\"), not as certainty.\n- Respect what each character can plausibly know. Do not credit them with knowledge of events they did not witness or were not told; their state and choices follow from their own perspective, not the reader's.\n- Do NOT restate what the CURRENT LEDGER or PRIOR CONTEXT already holds. Add or evolve only.\n- Use each character's exact name as already established. Do not rename or merge distinct characters, and do not invent a name for an unnamed figure \u2014 skip anyone unnamed.\n- Terse, concrete director's notes. No markdown, no preamble, no meta-commentary.\n\nOUTPUT \u2014 a single JSON array and NOTHING else (no code fence, no prose before or after). Each element:\n{\"name\":\"<exact name>\",\"core\":\"<...>\",\"state\":\"<...>\",\"arc\":\"<...>\",\"threads\":[\"<...>\",\"<...>\"]}\nInclude only the fields you are updating for that character. If no character in the passage needs any update, output exactly: []\\n\\nONE extra field, on ONE element only: if a character in this passage IS the player's own character \u2014 the protagonist the player controls, whose actions the player decides \u2014 add \"is_player_character\":true to that character's element. Judge it from the passage: the player's character is the one the player's own turns speak and act as. If the passage contains no such character, or you are not sure, omit the field entirely from every element. Never put it on a character the story controls."],
+    ledgerSystemPrompt: ["You are the character-continuity mind for an ongoing work of collaborative fiction \u2014 part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON \u2014 consistent in voice, values, and behavior \u2014 while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.\n\nYou receive the CURRENT LEDGER (what is already known about each character), the PRIOR CONTEXT (established story), and a NEW PASSAGE (what just happened). For every character who appears or is materially involved in the NEW PASSAGE, output an updated entry. Do NOT output characters who are absent from the passage.\n\nEach entry tracks four fields. A character PRESENT in the passage must never be left describing an EARLIER scene: if the story has moved and their state field still reads like a previous moment, that is an ERROR - refresh it to where they are and what they want NOW, even when the change is small. Standing in a room that has changed IS a change of state. Update ONLY what the passage changes; OMIT any field that is unchanged.\n\n- core \u2014 the character's STABLE nature: temperament, values, and above all HOW THEY EXPRESS THEMSELVES. Capture what a writer needs to keep them in character: their default emotional register; how they behave under stress, embarrassment, or threat; their tells and defense mechanisms; how they speak (formal or plain, blunt or indirect, verbal habits) and specifically how they ADDRESS {{player_name}} and others (by name, nickname, title, coldly, teasingly); and the lines they would NOT cross. This is the anchor that keeps them recognizable across the whole story. Write it once when a character is established, then change it only when the passage reveals a genuinely NEW stable trait \u2014 never for a passing mood. When you do touch core, restate the FULL stable picture (everything already established plus the new trait) so nothing is lost. Favor concrete, actable specifics: \"when flustered, goes clipped and sarcastic and changes the subject; never raises her voice\" beats \"proud but shy.\"\n- state \u2014 the character's CURRENT, volatile condition right after this passage: their mood, what is on their mind, what they want in this moment, how they are carrying themselves. This is overwritten each time they act, but it is NOT a blank slate \u2014 emotions have momentum. Carry forward the mood the ledger already records and evolve it realistically: a shock lingers and eases only with time or reassurance; a slight festers until addressed; warmth or anger set earlier still colors how they act now. If a character re-enters after being off-page, their last recorded state is where they resume unless the passage changes it. Record what would still be true a few beats later, not just the instant snapshot.\n- arc \u2014 the SLOW trajectory of this character's key relationships, above all with {{player_name}}: the DIRECTION things are moving (warming, fraying, trust building or breaking, respect or resentment growing) AND the formative moments that got them there \u2014 what {{player_name}} did that they will not forget (a kindness, a betrayal, a moment of being truly seen or let down). One to three sentences. This is relational memory: it is WHY they treat {{player_name}} the way they do. Update only when the passage actually moves it; evolve the existing arc rather than restarting it.\n- threads \u2014 the character's CURRENTLY OPEN loose ends: concrete, unresolved things that will shape how they behave next (a promise pending, a lie unconfessed, an unaddressed slight, a confession half-made, a question left hanging, a debt owed either way). Output the CURRENT open list: KEEP threads still unresolved, DROP any this passage resolved, ADD any it opened. A thread stays open until the STORY resolves it \u2014 never merely because time passed. Omit the field entirely if nothing changed; use an empty array [] ONLY to signal that all previously-open threads are now resolved.\n\nDISCIPLINE \u2014 this is a continuity record, not new fiction:\n- Record ONLY what the passage (with the prior context) EVIDENCES. Never invent traits, motives, feelings, or backstory the text does not support. Inventing is the worst failure \u2014 it corrupts the character.\n- Separate observation from inference. State what a character DID as fact; when you read their inner state from behavior, mark it as read (\"seems\", \"reads as\", \"appears to\"), not as certainty.\n- Respect what each character can plausibly know. Do not credit them with knowledge of events they did not witness or were not told; their state and choices follow from their own perspective, not the reader's.\n- Do NOT restate what the CURRENT LEDGER or PRIOR CONTEXT already holds. Add or evolve only.\n- Use each character's exact name as already established. Do not rename or merge distinct characters, and do not invent a name for an unnamed figure \u2014 skip anyone unnamed.\n- THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL. For the one character the player controls (the protagonist the player's own turns speak and act as), output ONLY the state and threads fields - where they are, what is visibly true of them, and what is open around them. NEVER output core or arc for them: their nature, their motives and their inner trajectory are the player's to write, and a spec for them is a script for a character you do not control. Their state is an OBSERVATION (what a witness in the room would see), not a reading of their feelings. Everyone else keeps all four fields, including their arc TOWARD the player's character, which is where the relationship actually lives.\n- Terse, concrete director's notes. No markdown, no preamble, no meta-commentary.\n\nOUTPUT \u2014 a single JSON array and NOTHING else (no code fence, no prose before or after). Each element:\n{\"name\":\"<exact name>\",\"core\":\"<...>\",\"state\":\"<...>\",\"arc\":\"<...>\",\"threads\":[\"<...>\",\"<...>\"]}\nInclude only the fields you are updating for that character. If no character in the passage needs any update, output exactly: []\\n\\nONE extra field, on ONE element only: if a character in this passage IS the player's own character \u2014 the protagonist the player controls, whose actions the player decides \u2014 add \"is_player_character\":true to that character's element. Judge it from the passage: the player's character is the one the player's own turns speak and act as. If the passage contains no such character, or you are not sure, omit the field entirely from every element. Never put it on a character the story controls."],
     ledgerUserPrompt: ["<player_name>{{player_name}}</player_name>\n\n<current_ledger>\n{{ledger}}\n</current_ledger>\n\n<prior_context>\n{{context_str}}\n</prior_context>\n\n<new_passage>\n{{story_txt}}\n</new_passage>\n\nUpdate the character ledger for EVERY character who appears or is materially involved in <new_passage>. Use the four-field model (core / state / arc / threads) and OMIT every field that is unchanged.\n\n- Evolve existing entries; do not restate them. Carry each character's recorded mood forward and move it realistically \u2014 emotions have momentum and do not reset between scenes.\n- Change core only for a genuinely new STABLE trait, never for a passing mood; when you touch it, keep everything already established.\n- Keep unresolved threads open; drop only what the passage actually resolves.\n- Ground every word in the passage and prior context \u2014 never invent, and never credit a character with knowledge they could not have.\n\nOutput ONLY the JSON array (or [] if nothing changed)."],
 };
 function migratePrompts() {
@@ -1649,6 +1651,22 @@ function subst(tpl, token, value) {
 // the persona handle looks like just another name in the text, and the record
 // grows an entry for it and writes relationship notes between the player and the
 // character the player IS. Returns null when there is no split to explain.
+// Is this ledger key the player's own character? One matcher, reusing the same
+// resolver the ledger keys everything else with — a second, looser name test here
+// would eventually disagree with the page and quarantine the wrong person.
+function isMcLedgerKey(key) {
+    if (!key) return false;
+    const mc = resolveMcName();   // already internally guarded; returns '' when unknown
+    if (!mc) return false;
+    const a = String(key).trim().toLowerCase();
+    const b = String(mc).trim().toLowerCase();
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const probe = {};
+    probe[key] = 1;
+    return resolveLedgerKey(probe, mc) === key;
+}
+
 function _personaSplit() {
     try {
         const mc = resolveMcName();
@@ -3041,6 +3059,7 @@ function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
         } catch (e) { log('persona heal failed (non-fatal):', e); }
     }
     let changed = 0;
+    const _mcRecOnly = getSettings().ledgerMcRecordOnly !== false;
     // What actually LANDED, under the key the page filed it as. This — not the raw
     // scribe reply — is what gets journaled, so the journal and the page can never
     // describe the same character under two different keys.
@@ -3108,10 +3127,21 @@ function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
         const key = resolveLedgerKey(ledger, rawName);
         const entry = ledger[key] || {};
         const applied = { name: key };
+        // The player's character is a RECORD, not a MODEL. `core` is a behavioural
+        // spec (tells, defence mechanisms, the lines they would not cross) and `arc`
+        // is an inner trajectory — for a character the STORY controls those are what
+        // keep them themselves, but for the character the PLAYER controls they are a
+        // script handed to the storyteller for someone whose choices are not its to
+        // make. `state` (where they are, what is visibly true of them) and `threads`
+        // (what is open around them) are observations, and those stay: the world has
+        // to remember them to react correctly. Guarded here rather than only in the
+        // prompt because every writer — scribe, auditor, backfill, rebuild — passes
+        // through this function, and a prompt is a request while this is a rule.
+        const _recOnly = _mcRecOnly && isMcLedgerKey(key);
         let touched = false;
-        if (typeof d.core === 'string')  { const v = stripLeadingLabel(d.core);  if (v) { const dup = _dupOf('core', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' core arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.core = v; applied.core = v; _seenBatch.core.set(v, key); touched = true; } } }
+        if (typeof d.core === 'string' && !_recOnly)  { const v = stripLeadingLabel(d.core);  if (v) { const dup = _dupOf('core', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' core arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.core = v; applied.core = v; _seenBatch.core.set(v, key); touched = true; } } }
         if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; applied.state = v; touched = true; } }
-        if (typeof d.arc === 'string')   { const v = stripLeadingLabel(d.arc);   if (v) { const dup = _dupOf('arc', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' arc arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.arc = v; applied.arc = v; _seenBatch.arc.set(v, key); touched = true; } } }
+        if (typeof d.arc === 'string' && !_recOnly)   { const v = stripLeadingLabel(d.arc);   if (v) { const dup = _dupOf('arc', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' arc arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.arc = v; applied.arc = v; _seenBatch.arc.set(v, key); touched = true; } } }
         if (Array.isArray(d.threads)) {
             const tv = d.threads
                 .filter(t => typeof t === 'string' && t.trim())
@@ -5257,21 +5287,25 @@ function wordPresentInText(haystackLower, needle) {
 
 // One compact, prose-like line per character. Priority order Nature → Now →
 // Open → Arc means a length cap truncates the least-critical field (Arc) first.
-function formatLedgerEntry(name, entry, capChars) {
+function formatLedgerEntry(name, entry, capChars, recordOnly) {
     if (!entry || typeof entry !== 'object') return '';
     const norm = (v) => String(v).trim().replace(/\s+/g, ' ');
     const parts = [];
-    if (typeof entry.core === 'string' && entry.core.trim())   parts.push('Nature: ' + norm(entry.core));
+    // recordOnly: the player's character. Nature and Arc are withheld from the
+    // storyteller even when the ledger still holds them (chats written before this
+    // rule keep their data — it is the player's record — it simply stops being
+    // injected as direction).
+    if (!recordOnly && typeof entry.core === 'string' && entry.core.trim())   parts.push('Nature: ' + norm(entry.core));
     if (typeof entry.state === 'string' && entry.state.trim()) parts.push('Now: ' + norm(entry.state));
     if (Array.isArray(entry.threads)) {
         const th = entry.threads.filter(t => typeof t === 'string' && t.trim()).map(norm);
         if (th.length) parts.push('Open: ' + th.join('; '));
     }
-    if (typeof entry.arc === 'string' && entry.arc.trim())     parts.push('Arc: ' + norm(entry.arc));
+    if (!recordOnly && typeof entry.arc === 'string' && entry.arc.trim())     parts.push('Arc: ' + norm(entry.arc));
     if (parts.length === 0) return '';
     // Strip any trailing period so the ". " separator gives exactly one, never "..".
     const cleaned = parts.map(p => p.replace(/[.\s]+$/, ''));
-    let line = norm(name) + ' — ' + cleaned.join('. ') + '.';
+    let line = norm(name) + (recordOnly ? " (player's character — record only)" : '') + ' — ' + cleaned.join('. ') + '.';
     const cap = capChars || 600;
     if (line.length > cap) line = line.slice(0, Math.max(1, cap - 1)).replace(/\s+\S*$/, '').trimEnd() + '…';
     return line;
@@ -5589,9 +5623,11 @@ function buildCharacterBlock() {
 
     const cast = computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick, recentMsgs);
     const capChars = Math.max(80, s.ledgerMaxCharsPerChar ?? 600);
+    // Every storyteller-facing surface asks the same question of the same name.
+    const _recOnly = (name) => (s.ledgerMcRecordOnly !== false) && isMcLedgerKey(name);
     const shown = cast.shown;
     const blocks = shown
-        .map(({ name, entry }) => formatLedgerEntry(name, entry, capChars))
+        .map(({ name, entry }) => formatLedgerEntry(name, entry, capChars, _recOnly(name)))
         .filter(Boolean);
 
     // Roster: one compact line per character NOT currently on screen (name + the
@@ -5614,7 +5650,7 @@ function buildCharacterBlock() {
             return t;
         };
         const citems = cast.compact.map(({ name, entry }) => {
-            const core = _clipC(entry && entry.core, 90);
+            const core = _recOnly(name) ? '' : _clipC(entry && entry.core, 90);
             const state = _clipC(entry && entry.state, 90);
             let s2 = name;
             if (core) s2 += ' \u2014 ' + core;
@@ -5631,7 +5667,7 @@ function buildCharacterBlock() {
     let recalledBlock = '';
     if (cast.recalled && cast.recalled.length) {
         const rcap = Math.max(80, s.ledgerMentionChars ?? 500);
-        const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap)).filter(Boolean);
+        const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap, _recOnly(name))).filter(Boolean);
         if (rb.length) recalledBlock = 'JUST MENTIONED, NOT IN THE SCENE \u2014 the story referenced these people; know them fully so the reference lands true, but they are OFF-SCREEN and do not appear unless the story brings them in:\n' + rb.join('\n');
     }
 
@@ -5649,7 +5685,7 @@ function buildCharacterBlock() {
         };
         const items = picked.map((name) => {
             const entry = entryByName.get(name);
-            const core = _clip(entry && entry.core, 100);
+            const core = _recOnly(name) ? '' : _clip(entry && entry.core, 100);
             // The roster used to ship a NAME and a personality fragment and nothing
             // else — so the storyteller knew Silas existed but had no idea he was in
             // the east yard taking bets. Off-screen people became furniture, and the
@@ -6405,6 +6441,7 @@ function updateUI() {
         $('#sc_ledger_live').prop('checked', s.ledgerLiveUpdate !== false);
         $('#sc_ledger_live_every').val(s.ledgerLiveEveryTurns ?? 1);
         $('#sc_ledger_live_every_val').text(s.ledgerLiveEveryTurns ?? 1);
+        $('#sc_ledger_mc_record').prop('checked', s.ledgerMcRecordOnly !== false);
         $('#sc_ledger_roster').prop('checked', s.ledgerInjectRoster !== false);
         $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? 12);
         $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? 12);
@@ -7999,6 +8036,11 @@ function bindUIEvents() {
         getSettings().ledgerLiveUpdate = $(this).prop('checked');
         saveSettings();
     });
+    $(document).on('change', '#sc_ledger_mc_record', function () {
+        getSettings().ledgerMcRecordOnly = $(this).prop('checked');
+        saveSettings();
+        updateInjection(true);
+    });
     $(document).on('change', '#sc_ledger_roster', function () {
         getSettings().ledgerInjectRoster = $(this).prop('checked');
         saveSettings();
@@ -9269,7 +9311,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — deleting the turn that created a character now removes them. Two defects sat on that one path. The ledger journal was established AFTER the first scribe pass had already written the page, so it snapshotted that pass's own output as a carried-over BASE note — history that predates the journal — and base notes are deliberately exempt from turn-based dropping. Every chat therefore welded its first pass's cast into the journal permanently at turn 0: deleting the turn that created them dropped the per-turn note, the immortal base survived, and no deletion, rewind, or branch could ever remove them. The journal is now established against the page as it stands BEFORE the pass writes to it, so a fresh chat starts empty and every character enters the record at the turn they actually came from. Second, an established journal holding zero notes was read as NO journal, so the refold was skipped at the exact moment it mattered — when the deleted turn was the only thing in it. Emptiness is an answer, not an absence; absence is an unset floor. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the player's character is now a RECORD, not a MODEL. The ledger was writing the protagonist a full psychological dossier like any NPC: nature, tells, defence mechanisms, the lines he would not cross, an inner trajectory — and injecting it every turn. For a character the STORY controls that is exactly what keeps them themselves. For the character the PLAYER controls it is a behaviour spec handed to the storyteller for choices that are not its to make, which is a stolen choice by another route. Nature and Arc are no longer written for the protagonist and no longer injected even where a chat already holds them; state (where he is, what is visibly true of him) and threads (what is open around him) stay, because the world has to remember those to react correctly. Everyone else keeps all four fields, including their arc TOWARD him — that is where the relationship actually lives, and it belongs to them. Guarded in code at the single merge every writer passes through, not only asked for in the prompt. Toggle: Character Ledger > Your character: record, not model. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

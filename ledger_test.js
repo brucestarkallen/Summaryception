@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -65,7 +65,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -1886,6 +1886,77 @@ section('notesCover — absence is an unset floor, never an empty list');
     ok(L.notesCover({ ledgerNotes: [] }, 5) === false, 'established but with no authoritative floor: not covered');
     ok(L.notesCover({ ledgerNotes: [{ t: 9, name: 'A', at: 1 }], ledgerNotesFrom: 7 }, 5) === false, 'a target below the floor is not covered');
     ok(L.notesCover({}, 5) === false, 'no journal at all: not covered');
+}
+
+section('the player\u2019s character is a RECORD, not a MODEL');
+{
+    // A psychological spec for a character the PLAYER controls is a script handed to
+    // the storyteller for choices that are not its to make. The world still has to
+    // remember where he is and what is open around him, so state and threads stay.
+    const store = { ledger: {}, ledgerNotes: [], ledgerNotesFrom: 0, ledgerNotesCanon: 1, ledgerLiveIdx: 4, mcName: 'Jovan' };
+    L.__setStore(store);
+    L.__setSettings(Object.assign({}, defaultSettings));
+    L.mergeLedgerDeltas([
+        { name: 'Jovan', core: 'proud, hides grief behind bravado', state: 'bleeding from the left arm, in the east yard', arc: 'learning to trust', threads: ['has not told anyone about the mark'] },
+        { name: 'Rukia', core: 'clipped when flustered', state: 'watching him', arc: 'warming to Jovan since the roof', threads: ['owes Jovan for the roof'] },
+    ], undefined, 5);
+
+    const j = store.ledger['Jovan'];
+    ok(j && j.core === undefined, 'the protagonist gets no Nature \u2014 his temperament is the player\u2019s to write');
+    ok(j && j.arc === undefined, 'and no Arc \u2014 his inner trajectory is not the record\u2019s to plot');
+    eq(j.state, 'bleeding from the left arm, in the east yard', 'but his observable situation IS recorded \u2014 the world reacts to it');
+    eq(j.threads, ['has not told anyone about the mark'], 'and what is open around him stays open');
+
+    const r = store.ledger['Rukia'];
+    ok(r.core && r.arc, 'a character the STORY controls keeps all four fields');
+    eq(r.arc, 'warming to Jovan since the roof', 'including her arc TOWARD him \u2014 that is where the relationship actually lives, and it is hers');
+
+    // the journal records the same decision, so a fold cannot paint the spec back
+    const folded = L.foldLedgerNotes(store.ledgerNotes, Infinity);
+    ok(folded['Jovan'] && folded['Jovan'].core === undefined && folded['Jovan'].arc === undefined, 'the journal never carries what the page refused \u2014 no fold resurrects it');
+
+    // the auditor writes through the same function, so it cannot reintroduce them either
+    L.mergeLedgerDeltas([{ name: 'Jovan', core: 'audited nature', arc: 'audited arc', state: 'still in the yard' }], undefined, 6);
+    ok(store.ledger['Jovan'].core === undefined && store.ledger['Jovan'].arc === undefined, 'every writer passes through one guard \u2014 the auditor cannot reintroduce them');
+    eq(store.ledger['Jovan'].state, 'still in the yard', 'while legitimate observations still land');
+
+    // opt out: some players DO want their protagonist modelled
+    L.__setSettings(Object.assign({}, defaultSettings, { ledgerMcRecordOnly: false }));
+    L.mergeLedgerDeltas([{ name: 'Jovan', core: 'opted in' }], undefined, 7);
+    eq(store.ledger['Jovan'].core, 'opted in', 'the quarantine is a setting, not a law of the universe');
+    L.__setSettings(Object.assign({}, defaultSettings));
+}
+
+section('isMcLedgerKey \u2014 one matcher, the same resolver the ledger keys with');
+{
+    L.__setStore({ ledger: {}, mcName: 'Jovan Oda' });
+    ok(L.isMcLedgerKey('Jovan Oda') === true, 'exact');
+    ok(L.isMcLedgerKey('jovan oda') === true, 'case');
+    ok(L.isMcLedgerKey('Jovan') === true, 'the short form the ledger may have filed him under');
+    ok(L.isMcLedgerKey('Rukia') === false, 'someone else');
+    ok(L.isMcLedgerKey('') === false, 'empty');
+    L.__setStore({ ledger: {} });
+    ok(L.isMcLedgerKey('Jovan') === false, 'with no protagonist resolved, nobody is quarantined');
+}
+
+section('injection \u2014 the storyteller never receives the protagonist\u2019s spec');
+{
+    const e = { core: 'proud, hides grief', state: 'in the east yard', arc: 'learning to trust', threads: ['the mark'] };
+    eq(L.formatLedgerEntry('Jovan', e, 600, true), "Jovan (player's character \u2014 record only) \u2014 Now: in the east yard. Open: the mark.", 'Nature and Arc are withheld and the line says whose character it is');
+    eq(L.formatLedgerEntry('Jovan', e, 600, false), 'Jovan \u2014 Nature: proud, hides grief. Now: in the east yard. Open: the mark. Arc: learning to trust.', 'the same entry unquarantined is unchanged \u2014 nothing else about formatting moved');
+    eq(L.formatLedgerEntry('Jovan', { core: 'proud' }, 600, true), '', 'an entry that is ONLY a spec injects nothing at all');
+    ok(L.formatLedgerEntry('Rukia', e, 600).includes('Nature:'), 'omitting the flag leaves every other character exactly as before');
+}
+
+section('the scribe is told, not just overruled');
+{
+    const rule = /THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL/g;
+    ok((SRC_FULL.match(rule) || []).length === 2, 'both copies of the ledger prompt carry the rule (default preset and defaultSettings)');
+    const raw = SRC_FULL.match(/ledgerSystemPrompt: \["([\s\S]*?)"\],/);
+    ok(!!raw, 'the defaultSettings prompt is locatable');
+    const live = JSON.parse('"' + raw[1] + '"');
+    ok(live.includes("THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL"), 'and it survives into the RUNTIME string, correctly escaped');
+    ok(live.includes('including their arc TOWARD the'), 'the rule keeps everyone else\u2019s arc toward the protagonist explicitly in scope');
 }
 
 section('adoption guards — divergence is only adopted when it means intent');
