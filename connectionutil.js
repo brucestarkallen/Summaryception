@@ -7,9 +7,10 @@
  *   - ollama:   Ollama instance (via ST CORS proxy to avoid browser CORS issues)
  *   - openai:   OpenAI-compatible endpoint (via ST CORS proxy, streaming supported)
  *
- * CORS Note: Ollama and OpenAI modes route through ST's /cors/ proxy endpoint
- * to avoid browser CORS restrictions. Requires enableCorsProxy: true in config.yaml
- * OR the target server must have permissive CORS headers.
+ * CORS Note: Ollama and OpenAI modes route through ST's /proxy/ endpoint
+ * (proxiedUrl below) to avoid browser CORS restrictions. Requires
+ * enableCorsProxy: true in config.yaml OR the target server must have
+ * permissive CORS headers.
  *
  * AGPL-3.0
  */
@@ -50,7 +51,7 @@ function proxiedUrl(url, useProxy = true) {
 
 /**
  * Get standard request headers including ST's CSRF token if available.
- * Required when routing through ST's /cors/ proxy.
+ * Required when routing through ST's /proxy/ endpoint.
  * @returns {object}
  */
 function getProxyHeaders() {
@@ -73,16 +74,18 @@ function getProxyHeaders() {
  * @returns {Promise<string>} - The generated response text
  * @throws {ConnectionError|Error} - If the request fails
  */
-export async function sendSummarizerRequest(settings, systemPrompt, userPrompt) {
+export async function sendSummarizerRequest(settings, systemPrompt, userPrompt, { signal } = {}) {
     const source = settings.connectionSource || 'default';
+    // null = mode default (0.3 Ollama / 0.8 OpenAI-compatible); a number overrides
+    const tempOverride = (typeof settings.summarizerTemperature === 'number') ? settings.summarizerTemperature : null;
 
     switch (source) {
         case 'profile':
             return await sendViaProfile(settings.connectionProfileId, systemPrompt, userPrompt, settings.debugMode);
         case 'ollama':
-            return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt);
+            return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt, tempOverride, signal);
         case 'openai':
-            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens);
+            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens, tempOverride, signal);
         case 'default':
         default:
             return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength);
@@ -276,7 +279,8 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt, debug) {
  * Send a request to a local Ollama instance using /api/chat.
  * Routes through ST's CORS proxy to avoid browser CORS restrictions.
  */
-async function sendViaOllama(url, model, systemPrompt, userPrompt) {
+async function sendViaOllama(url, model, systemPrompt, userPrompt, temperatureOverride = null, signal = null) {
+    const _temperature = (typeof temperatureOverride === 'number') ? temperatureOverride : 0.3;
     if (!url) {
         throw new ConnectionError(
             'Ollama URL is not configured. Please set it in Summaryception settings.',
@@ -309,9 +313,10 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                 ],
                 stream: false,
                 options: {
-                    temperature: 0.3,
+                    temperature: _temperature,
                 },
             }),
+            ...(signal ? { signal } : {}),
         });
     } catch (proxyError) {
         console.warn(`${MODULE_NAME} CORS proxy failed, trying direct:`, proxyError.message);
@@ -326,8 +331,9 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt) {
                         { role: 'user', content: userPrompt },
                     ],
                     stream: false,
-                    options: { temperature: 0.3 },
+                    options: { temperature: _temperature },
                 }),
+                ...(signal ? { signal } : {}),
             });
         } catch (directError) {
             throw new ConnectionError(
@@ -418,7 +424,7 @@ export async function fetchOllamaModels(url) {
  * Routes through ST's CORS proxy for local endpoints.
  * Cloud endpoints skip the proxy since they have CORS headers.
  */
-async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens) {
+async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens, temperatureOverride = null, signal = null) {
     if (!url) {
         throw new ConnectionError(
             'OpenAI Compatible URL is not configured. Please set it in Summaryception settings.',
@@ -463,7 +469,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
         ],
-        temperature: 0.8,
+        temperature: (typeof temperatureOverride === 'number') ? temperatureOverride : 0.8,
         stream: true,
     };
 
@@ -481,6 +487,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
                 method: 'POST',
                 headers: { ...getProxyHeaders(), ...headers },
                                    body: body,
+                ...(signal ? { signal } : {}),
             });
         } catch (proxyError) {
             console.warn(`${MODULE_NAME} CORS proxy failed for OpenAI endpoint, trying direct:`, proxyError.message);
@@ -489,6 +496,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
                     method: 'POST',
                     headers: headers,
                     body: body,
+                    ...(signal ? { signal } : {}),
                 });
             } catch (directError) {
                 throw new ConnectionError(
@@ -505,6 +513,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
                 method: 'POST',
                 headers: headers,
                 body: body,
+                ...(signal ? { signal } : {}),
             });
         } catch (fetchError) {
             throw new ConnectionError(

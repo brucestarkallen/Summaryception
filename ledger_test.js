@@ -1359,6 +1359,16 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     ok(SRC_FULL.includes('body class\n    // `sc-ghost-visual-off`') || SRC_FULL.includes('sc-ghost-visual-off` (style.css) is what neutralizes'), 'H3: visuals are neutralized via the sc-ghost-visual-off class, not by skipping exclusion');
     ok(SRC_FULL.includes('function _syncGhostVisualClass()'), 'H3: the visual-off body class is synced from settings');
 
+    // v5.98.0 LOW sweep guards
+    ok(!/function repairGhostingForRange\(|function debugVisibleTurns\(|function getVisibleAssistantTurns\(/.test(SRC_FULL), 'L1: dead functions are gone');
+    ok(SRC_FULL.includes('extensionSettings[MODULE_NAME][key] = structuredClone(defaultSettings[key]);'), 'L4: settings migration deep-clones defaults (shallow freeze aliases otherwise)');
+    ok(/for \(const pattern of s\.stripPatterns\) \{\s*\n\s*if \(!pattern\) continue;/.test(SRC_FULL), "L5: an empty strip pattern can't infinite-loop cleanSummarizerOutput");
+    ok(SRC_FULL.includes('_recallSlot={pos:') && /const slot=_recallSlot\|\|/.test(SRC_FULL), 'L8: recall clears the slot it ACTUALLY wrote to, not the current settings');
+    ok(!SRC_FULL.includes('Summaryception-Personal-Bruce'), 'L9: no hardcoded personal fallback path');
+    const CONN = fs.readFileSync(__dirname + '/connectionutil.js', 'utf8');
+    ok(!/temperature: 0\.[38],/.test(CONN.replace(/_temperature: (0\.3|0\.8)/, '')), 'L2: hardcoded per-mode temperatures replaced by the override-aware path');
+    ok((CONN.match(/\.\.\.\(signal \? \{ signal \} : \{\}\)/g) || []).length >= 4, 'L3: the abort signal reaches every fetch');
+
     // v5.98.0 MEDIUM wave
     ok(/store\.summarizedUpTo = recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'M1: snippet delete uses recomputeSummarizedUpTo — no more Math.max(...[]) = -Infinity → JSON null');
     ok(/A deleted Layer-0 snippet leaves its turns hidden AND unsummarized/.test(SRC_FULL), 'M1: deleting an L0 snippet returns its turns to verbatim');

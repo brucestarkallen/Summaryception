@@ -351,6 +351,7 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
     openaiKey: '',
     openaiModel: '',
     openaiMaxTokens: 0,                   // 0 = no limit (provider default)
+    summarizerTemperature: null,          // null = mode default (0.3 Ollama / 0.8 OpenAI-compatible / preset for default & profile); number overrides
 });
 
 // ─── Prompt Presets ──────────────────────────────────────────────────
@@ -471,41 +472,6 @@ function trace(...args) {
     }
 }
 
-function debugVisibleTurns(chat, store) {
-    trace('=== DEBUG VISIBLE TURNS ===');
-    trace('  store.summarizedUpTo:', store.summarizedUpTo);
-    trace('  Total chat messages:', chat.length);
-
-    let visibleCount = 0;
-    let ghostedCount = 0;
-    let hiddenCount = 0;
-    let visibleIndices = [];
-
-    for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes?.trim()?.length > 0) {
-            visibleCount++;
-            visibleIndices.push(i);
-        }
-        if (m.extra?.sc_ghosted) ghostedCount++;
-        if (m.is_hidden || m.is_system) hiddenCount++;
-    }
-
-    trace('  Visible non-ghosted turns:', visibleCount);
-    trace('  Ghosted turns:', ghostedCount);
-    trace('  Hidden/System turns:', hiddenCount);
-    trace('  First 10 visible indices:', visibleIndices.slice(0, 10));
-    trace('  Last 10 visible indices:', visibleIndices.slice(-10));
-
-    // Check for messages that should have been ghosted but aren't
-    const unghosteredSummarized = visibleIndices.filter(idx => idx <= store.summarizedUpTo);
-    if (unghosteredSummarized.length > 0) {
-        trace('  ⚠️ WARNING: Found ' + unghosteredSummarized.length + ' visible messages that are BEFORE summarizedUpTo!');
-        trace('  First 5 unghostered summarized indices:', unghosteredSummarized.slice(0, 5));
-    }
-    trace('=== END DEBUG ===');
-}
-
 function getSettings() {
     const { extensionSettings } = SillyTavern.getContext();
     if (!extensionSettings[MODULE_NAME]) {
@@ -513,7 +479,11 @@ function getSettings() {
     }
     for (const key of Object.keys(defaultSettings)) {
         if (!Object.hasOwn(extensionSettings[MODULE_NAME], key)) {
-            extensionSettings[MODULE_NAME][key] = defaultSettings[key];
+            // structuredClone: Object.freeze is SHALLOW — assigning defaultSettings[key]
+            // directly aliases the DEFAULT arrays/objects into the user's settings, and
+            // one future in-place mutation (a push into stripPatterns, say) would corrupt
+            // the defaults for every subsequent fresh install in the session.
+            extensionSettings[MODULE_NAME][key] = structuredClone(defaultSettings[key]);
         }
     }
     return extensionSettings[MODULE_NAME];
@@ -969,68 +939,6 @@ async function unhideIndicesInRanges(indices) {
     return ranges.length;
 }
 
-async function repairGhostingForRange(startIdx, endIdx) {
-    trace('>>> ENTERING repairGhostingForRange');
-    trace(' startIdx:', startIdx, 'endIdx:', endIdx);
-
-    const { chat } = SillyTavern.getContext();
-    const store = getChatStore();
-    const s = getSettings();
-    let repaired = 0;
-    let skipped = 0;
-
-    for (let i = startIdx; i <= endIdx; i++) {
-        const m = chat[i];
-        if (!m) continue;
-
-        if (m.extra?.sc_ghosted) {
-            skipped++;
-            continue;
-        }
-
-        if (m.is_hidden && !m.extra?.sc_ghosted) {
-            trace(' Skipping message ' + i + ' - user-hidden');
-            skipped++;
-            continue;
-        }
-
-        if (m.is_system || !m.mes?.trim()) {
-            skipped++;
-            continue;
-        }
-
-        if (m.is_user) {
-            skipped++;
-            continue;
-        }
-
-        trace(' Ghosting message ' + i);
-        m.extra = m.extra || {};
-        m.extra.sc_ghosted = true;
-
-        if (!store.ghostedIndices.includes(i)) {
-            store.ghostedIndices.push(i);
-        }
-
-        // Only visually hide if ghosting is enabled
-        if (!s.disableGhosting) {
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
-                repaired++;
-            } catch (e) {
-                console.error(LOG_PREFIX, 'Failed to ghost message ' + i + ':', e);
-            }
-        } else {
-            repaired++;
-        }
-    }
-
-    trace(' Repaired:', repaired, 'Skipped:', skipped);
-    await saveChatStore();
-    trace('<<< EXITING repairGhostingForRange');
-    return repaired;
-}
-
 async function ghostMessage(messageIndex) {
     const { chat } = SillyTavern.getContext();
     const msg = chat[messageIndex];
@@ -1395,18 +1303,6 @@ function getAssistantTurns(chat) {
     return turns;
 }
 
-function getVisibleAssistantTurns(chat) {
-    const turns = [];
-    for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (!m) continue;
-        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && m.mes && m.mes.trim().length > 0) {
-            turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
-        }
-    }
-    return turns;
-}
-
 /**
  * Build passage text from a range of chat messages.
  * Skips messages that are hidden (by user or system) UNLESS they were
@@ -1635,8 +1531,11 @@ function cleanSummarizerOutput(raw) {
 
     const s = getSettings();
 
-    // Remove configurable strip patterns
+    // Remove configurable strip patterns. Falsy patterns MUST be skipped:
+    // ''.includes() is always true, so an empty pattern here loops forever
+    // and freezes SillyTavern outright (reachable via a hand-edited settings.json).
     for (const pattern of s.stripPatterns) {
+        if (!pattern) continue;
         while (text.includes(pattern)) {
             text = text.replace(pattern, '');
         }
@@ -1849,7 +1748,10 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
                 // and the 120s timer must not outlive a fast success (zombie timer
                 // firing a rejection into the void every single call).
                 let _toTimer = null;
-                const _reqP = sendSummarizerRequest(s, sysPrompt, prompt);
+                // The signal reaches the actual fetch now (modes that use one):
+                // an abort CANCELS the HTTP request instead of merely orphaning
+                // it — no more zombie calls burning provider tokens to completion.
+                const _reqP = sendSummarizerRequest(s, sysPrompt, prompt, { signal });
                 _reqP.catch(() => {});   // handled via the race; this guards the late-loss case
                 const _toP = new Promise((_, reject) => {
                     _toTimer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
@@ -5262,7 +5164,7 @@ async function showCatchupDialog(overflowCount, estimatedCalls) {
         <i class="fa-solid fa-forward-step"></i>
         <div class="sc-btn-text">
         <span class="sc-btn-label">Skip Backlog</span>
-        <span class="sc-btn-desc">Ignore old turns, only summarize new ones going forward</span>
+        <span class="sc-btn-desc">Never summarize the old turns — they STAY in the AI's context in full, every turn (uses more tokens); only new turns are summarized going forward. You'll be asked again next session.</span>
         </div>
         </button>
         <button id="sc_catchup_partial" class="menu_button">
@@ -6618,9 +6520,9 @@ function registerSlashCommands() {
                 }
                 updateInjection();
                 updateUI();
-                return 'Summaryception memory cleared and messages unghosted.';
+                return 'Summaryception summaries, ledger, and ghosting cleared (pins, notepad, and continuity flags kept).';
             },
-            helpString: 'Clear all Summaryception memory and unghost messages for this chat',
+            helpString: 'Clear summaries, character ledger, and ghosting for this chat (keeps pins, notepad, and continuity flags)',
         }));
 
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -8037,11 +7939,19 @@ function _mergeRanges(ranges, chatLen){
     return out;
 }
 
+// Injection-time coordinates: clearing must blank the slot the recall was
+// ACTUALLY written to. Using the CURRENT settings here meant that changing
+// recallPosition/recallDepth between inject and clear left the old text
+// stranded in ST's prompt store at the previous coordinates.
+let _recallSlot = null;
+
 function clearRecall(){
     try{ const {setExtensionPrompt}=SillyTavern.getContext(); const s=getSettings();
-        setExtensionPrompt(MODULE_NAME+'_recall','',s.recallPosition??1,s.recallDepth??6,false,s.recallRole??0);
+        const slot=_recallSlot||{pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??0};
+        setExtensionPrompt(MODULE_NAME+'_recall','',slot.pos,slot.depth,false,slot.role);
     }catch(e){}
     _recallRemaining=0;
+    _recallSlot=null;
 }
 
 async function runRecall(query, opts = {}){
@@ -8085,7 +7995,8 @@ async function runRecall(query, opts = {}){
     }
     _lastRecallText=block;
     const {setExtensionPrompt}=SillyTavern.getContext();
-    setExtensionPrompt(MODULE_NAME+'_recall',block,s.recallPosition??1,s.recallDepth??6,false,s.recallRole??0);
+    _recallSlot={pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??0};
+    setExtensionPrompt(MODULE_NAME+'_recall',block,_recallSlot.pos,_recallSlot.depth,false,_recallSlot.role);
     _recallRemaining=Math.max(1,s.recallPersist??1);
     if(opts.silent){ log('Auto-recall injected: '+merged.length+' range(s), '+used+' chars'); } else toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
 }
@@ -9397,6 +9308,18 @@ function initConnectionUI() {
         });
     }
 
+    // ── Summarizer Temperature (applies to Ollama + OpenAI-compatible modes) ──
+    const summTemp = document.getElementById('summaryception_summarizer_temperature');
+    if (summTemp) {
+        summTemp.value = (typeof s().summarizerTemperature === 'number') ? s().summarizerTemperature : '';
+        summTemp.addEventListener('input', () => {
+            const raw = summTemp.value.trim();
+            const v = parseFloat(raw);
+            s().summarizerTemperature = (raw === '' || isNaN(v)) ? null : Math.min(2, Math.max(0, v));
+            save();
+        });
+    }
+
     // ── OpenAI Max Tokens ──
     const openaiMaxTokens = document.getElementById('summaryception_openai_max_tokens');
     if (openaiMaxTokens) {
@@ -9655,7 +9578,10 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             // panel loads no matter what you named the repo/folder. This removes the
             // fixed-name requirement entirely. If URL detection ever fails, fall back
             // to the current known folder name.
-            let extPath = 'third-party/Summaryception-Personal-Bruce-';
+            // Generic fallback: the folder name from the manifest is the only sane
+            // default — a hardcoded personal folder name silently broke installs
+            // whose directory differs whenever import.meta.url detection failed.
+            let extPath = 'third-party/Summaryception';
             try {
                 const m = import.meta.url.match(/extensions\/(third-party\/[^/]+)\//);
                 if (m && m[1]) extPath = decodeURIComponent(m[1]);

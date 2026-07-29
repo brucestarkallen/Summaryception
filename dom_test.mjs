@@ -4,8 +4,12 @@
 // harness slices the SHIPPED handler blocks verbatim out of index.js and runs
 // them under jsdom, so "green" means the exact production code opened, edited,
 // mirrored, saved, and closed a real overlay. Run: node dom_test.mjs
-// Deps are dev-only (npm install --no-save jsdom jquery); the gate SKIPS with
-// exit 0 if they are absent so CI-less devices aren't blocked.
+// Deps are dev-only (npm install --no-save --no-bin-links jsdom jquery).
+// A missing-deps run must NOT report green: the gate FAILS (exit 1) unless
+// DOM_TEST_ALLOW_SKIP=1 is set explicitly. (The old "SKIP with exit 0" made a
+// never-run gate indistinguishable from a passed one — on filesystems without
+// symlink support the install itself silently failed and the gate stayed
+// "green" forever. Use --no-bin-links there.)
 
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -20,8 +24,14 @@ try {
     jqueryFactory = require('jquery/factory').jQueryFactory;   // the windowless entry — plain 'jquery' throws without a global window
 } catch (e) {
     const missing = /Cannot find (package|module)/.test(String(e && e.message));
-    console.log('dom_test: ' + (missing ? 'jsdom/jquery not installed — SKIP (npm install --no-save jsdom jquery to enable)' : 'DEP LOAD FAILED — ' + (e && e.message)));
-    process.exit(missing ? 0 : 1);
+    if (missing && process.env.DOM_TEST_ALLOW_SKIP === '1') {
+        console.log('dom_test: jsdom/jquery not installed — SKIP (explicitly allowed via DOM_TEST_ALLOW_SKIP=1)');
+        process.exit(0);
+    }
+    console.error('dom_test: ' + (missing
+        ? 'FAIL — jsdom/jquery not installed. Enable this gate with: npm install --no-save --no-bin-links jsdom jquery (or set DOM_TEST_ALLOW_SKIP=1 to skip explicitly)'
+        : 'DEP LOAD FAILED — ' + (e && e.message)));
+    process.exit(1);
 }
 
 let pass = 0, fail = 0; const fails = [];

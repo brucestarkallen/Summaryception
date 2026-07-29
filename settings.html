@@ -346,6 +346,14 @@
                                        min="0" step="100" placeholder="0 = no limit (provider default)" />
                             </div>
                             <div class="summaryception-setting-row">
+                                <label for="summaryception_summarizer_temperature">
+                                    <span>Summarizer Temperature</span>
+                                </label>
+                                <input id="summaryception_summarizer_temperature" type="number" class="text_pole"
+                                       min="0" max="2" step="0.05" placeholder="blank = mode default (0.3 Ollama / 0.8 OpenAI)" />
+                                <small class="sc-hint">Lower = more faithful summaries. Applies to Ollama and OpenAI-compatible modes; Default/Profile modes use your preset's temperature.</small>
+                            </div>
+                            <div class="summaryception-setting-row">
                                 <div id="summaryception_openai_test"
                                      class="menu_button menu_button_icon"
                                      title="Test the OpenAI-compatible connection">
