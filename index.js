@@ -2719,6 +2719,28 @@ function notesCover(store, targetTurn) {
     return targetTurn >= from;
 }
 
+// THE one way to wipe the ledger. Page and journal are TWO structures that must
+// die together: clearing only the page left the journal authoritative from its
+// base turn, and the next fold — one routine message deletion was enough —
+// re-materialized the entire "cleared" ledger via notesCover → foldLedgerNotes.
+// Every clear path (#sc_ledger_clear, /sc-clear, #sc_clear_all, and any future
+// one) MUST go through here so no subset can drift again. The era bump retires
+// every checkpoint and in-flight job from the old ledger; the pointer reset
+// makes the next live pass re-derive forward from scratch instead of folding
+// history the user just rejected.
+function wipeLedgerData(store) {
+    if (!store) return;
+    store.ledger = {};
+    store.ledgerNotes = [];
+    delete store.ledgerNotesFrom;   // journal ABSENT — notesCover must say false
+    store.ledgerLiveIdx = -1;
+    store.ledgerEra = (store.ledgerEra | 0) + 1;
+    store._ckptLast = -1;
+    store.ledgerRebuild = null;
+    store.ledgerStaging = null;
+    store.ledgerStagingNotes = null;
+}
+
 // Migration: adopt the existing page as a base note at the current pointer, so no
 // history is lost and folding stays correct from here on. A fresh chat bases at 0
 // and is therefore exactly foldable forever.
@@ -4031,7 +4053,10 @@ async function backfillLedgerFromHistory(opts) {
 
     const store = getChatStore();
     if (!store.ledger || typeof store.ledger !== 'object') store.ledger = {};
-    if (auto) { store.ledger = {}; store.ledgerLiveIdx = -1; }   // clean slate FIRST — so a branch with no earlier turns (e.g. back to turn 0) still ends up cleared
+    // clean slate FIRST — so a branch with no earlier turns (e.g. back to turn 0)
+    // still ends up cleared. Page AND journal: an abandoned rebuild must not leave
+    // the old journal foldable over the empty page (see wipeLedgerData).
+    if (auto) wipeLedgerData(store);
 
     const { chat } = SillyTavern.getContext();
     const turns = getAssistantTurns(chat);
@@ -6428,7 +6453,7 @@ function registerSlashCommands() {
                 store.layers.length = 0;
                 store.summarizedUpTo = -1;
                 store.ghostedIndices = [];
-                store.ledger = {};
+                wipeLedgerData(store);   // page + journal + pointer + era — a page-only wipe resurrects at the next deletion-fold
 
                 const { chatMetadata } = SillyTavern.getContext();
                 chatMetadata[MODULE_NAME] = store;
@@ -8245,17 +8270,10 @@ function bindUIEvents() {
     $(document).on('click', '#sc_ledger_clear', async function () {
         if (!confirm('Clear the entire character ledger for THIS chat?\n\nThis removes all recorded character nature, current state, arc, and open threads. It rebuilds automatically as the story continues.')) return;
         const store = getChatStore();
-        store.ledger = {};
-        // New era: all existing snapshots become invisible to this chat — a later
-        // auto-rewind must never restore the ledger the user just rejected. (They are
-        // not deleted: sibling branches share the checkpoint keyspace and keep the
-        // era they branched at.) In-flight jobs and staged rebuilds are from the old
-        // era too — invalidate them.
-        store.ledgerEra = (store.ledgerEra | 0) + 1;
-        store._ckptLast = -1;
-        store.ledgerRebuild = null;
-        store.ledgerStaging = null;
-        store.ledgerStagingNotes = null;
+        // Page AND journal must die together — a page-only clear was silently
+        // undone by the next message deletion, which refolded the surviving
+        // journal back into the page (notesCover → foldLedgerNotes).
+        wipeLedgerData(store);
         _ledgerQueue = [];
         _ledgerGen++;
         await saveChatStore();
@@ -8555,8 +8573,11 @@ function bindUIEvents() {
         store.layers.length = 0;
         store.summarizedUpTo = -1;
         store.ghostedIndices = [];
-        store.ledger = {};
-        store.ledgerLiveIdx = -1;
+        // Page + journal + pointer + era, atomically: the pre-fix version cleared
+        // only the page (and pointer), so once the live pointer climbed back to
+        // the journal's base turn, one deletion folded the PRE-CLEAR journal back
+        // into the page — the "cleared" cast returned from the dead.
+        wipeLedgerData(store);
         if (Array.isArray(store.ledgerPins)) store.ledgerPins = [];
         if (Array.isArray(store.pins)) store.pins = [];
         store.continuityFlags = [];

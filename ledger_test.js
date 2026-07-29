@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -70,7 +70,7 @@ return {
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
-  _journalNow, _canonNotesAgainst, _canonicalizeLedgerNotes,
+  _journalNow, _canonNotesAgainst, _canonicalizeLedgerNotes, wipeLedgerData,
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
@@ -835,7 +835,7 @@ section('ledger eras + rebuild stamping (source contracts)');
 ok(SRC_FULL.includes("era: (store.ledgerEra | 0)"), 'save: snapshots stamped with the chat store era');
 ok(SRC_FULL.includes("((v.era | 0) !== (store.ledgerEra | 0))) continue;"), 'list: snapshots from other eras invisible to this chat');
 ok(SRC_FULL.includes("store.ledgerEra = (store.ledgerEra | 0) + 1;"), 'clear: bumps the era (old snapshots retired, branches keep theirs)');
-ok(SRC_FULL.includes("store.ledgerStaging = null;\n        store.ledgerStagingNotes = null;\n        _ledgerQueue = [];\n        _ledgerGen++;") , 'clear: invalidates in-flight jobs and staged rebuilds — staging journal included');
+ok(SRC_FULL.includes("wipeLedgerData(store);\n        _ledgerQueue = [];\n        _ledgerGen++;") , 'clear: invalidates in-flight jobs and staged rebuilds — staging journal included (via wipeLedgerData)');
 ok(SRC_FULL.includes("mergeLedgerDeltas(deltas, undefined, b.endIdx)"), 'backfill: merges stamped with chunk end turn');
 ok(SRC_FULL.includes("sn.turnRange[1] === 'number') ? sn.turnRange[1] : undefined"), 'snippet path: merges stamped with scene end turn');
 ok(SRC_FULL.includes('head snapshot: the very next edit/deletion restores instantly'), 'backfill completion: explicit head checkpoint');
@@ -1273,6 +1273,51 @@ section('single deletion — notes reindexed, page refolded, no replay');
 }
 ok(SRC_FULL.includes("} else if (!_bulkTrim && newLen > 0) {"), 'a single deletion is handled, not skipped');
 ok(!SRC_FULL.includes('deletion (delta === 1) skips this and stays INSTANT'), 'the obsolete "skip the rewind" rationale is gone');
+
+// ─── clearing the ledger must survive the next deletion ───
+// v5.98.0 regression: every clear path wiped only the PAGE. The journal stayed
+// authoritative from its base turn, so the very next single-message deletion
+// ran reindexAfterDeletion → notesCover → foldLedgerNotes and re-materialized
+// the entire "cleared" cast. wipeLedgerData kills page + journal + pointer
+// together (and retires the era so old checkpoints can't restore either).
+section('wipeLedgerData — a clear that no deletion can undo');
+{
+    const store = {
+        ledgerLiveIdx: 40, summarizedUpTo: 30, layers: [], ledgerNotesFrom: 0, ledgerEra: 2,
+        ledger: { 'Claire Argent': { core: 'guarded', state: 'the arch', updatedAt: 5 } },
+        ledgerNotes: [
+            { t: 3, name: 'Claire Argent', at: 1, core: 'guarded' },
+            { t: 20, name: 'Claire Argent', at: 2, state: 'the arch' },
+        ],
+        ledgerStaging: { x: 1 }, ledgerStagingNotes: [{ t: 1, name: 'Z' }], ledgerRebuild: { y: 2 }, _ckptLast: 12,
+    };
+    L.__setStore(store);
+    L.wipeLedgerData(store);
+    ok(Object.keys(store.ledger).length === 0, 'the page is empty');
+    ok(Array.isArray(store.ledgerNotes) && store.ledgerNotes.length === 0, 'the journal is empty too — nothing left to fold back');
+    ok(store.ledgerNotesFrom === undefined, 'the journal base is ABSENT, so notesCover answers "no journal"');
+    ok(store.ledgerLiveIdx === -1, 'the live pointer restarts from scratch');
+    ok(store.ledgerEra === 3, 'the era advanced — old checkpoints are retired');
+    ok(store.ledgerStaging === null && store.ledgerStagingNotes === null && store.ledgerRebuild === null && store._ckptLast === -1, 'staging/rebuild/checkpoint state of the old ledger is gone');
+    // The kill shot: the live pass advances the pointer past the journal's old
+    // base (exactly what a few new turns do), and THEN a message is deleted.
+    // With the journal dead, the refold has nothing to draw on.
+    store.ledgerLiveIdx = 25;
+    L.reindexAfterDeletion(store, 10);
+    ok(Object.keys(store.ledger).length === 0, 'KILL SHOT: a deletion after the clear does NOT resurrect the ledger');
+    ok(!L.notesCover(store, store.ledgerLiveIdx), 'notesCover cannot vouch for a journal that no longer exists');
+}
+{
+    // The three clear paths must all go through the one primitive — a hand-rolled
+    // subset is exactly how the bug shipped. Structural guard, not behavior.
+    const clearBtn = /#sc_ledger_clear[\s\S]{0,900}?wipeLedgerData\(store\)/.test(SRC_FULL);
+    const slashClear = /name: 'sc-clear'[\s\S]{0,900}?wipeLedgerData\(store\)/.test(SRC_FULL);
+    const clearAll = /#sc_clear_all[\s\S]{0,1200}?wipeLedgerData\(store\)/.test(SRC_FULL);
+    ok(clearBtn, '#sc_ledger_clear routes through wipeLedgerData');
+    ok(slashClear, '/sc-clear routes through wipeLedgerData');
+    ok(clearAll, '#sc_clear_all routes through wipeLedgerData');
+    ok(!/store\.ledger = \{\};\s*\n\s*store\.ledgerLiveIdx = -1;/.test(SRC_FULL), 'no hand-rolled page+pointer wipe survives outside the primitive');
+}
 
 // ─── the freshness indicator must agree with the reader ───
 section('freshness indicator — no phantom backlog');

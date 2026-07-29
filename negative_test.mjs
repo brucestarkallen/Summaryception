@@ -26,6 +26,11 @@ const MUTATIONS = [
         "        const key = resolveLedgerKey(out, n.name.trim());\n        if (n.gone === true) { delete out[key]; continue; }",
         'foldLedgerNotes does not run the fuzzy resolver'],
 
+    ['clear wipes only the page (journal folds the dead back)', 'index.js',
+        "    store.ledger = {};\n    store.ledgerNotes = [];\n    delete store.ledgerNotesFrom;   // journal ABSENT — notesCover must say false",
+        "    store.ledger = {};",
+        'KILL SHOT: a deletion after the clear does NOT resurrect the ledger'],
+
     ['live journal written from the raw scribe reply', 'index.js',
         'appendLedgerNotes(_applied, atTurn)',
         'appendLedgerNotes(deltas, atTurn)',
