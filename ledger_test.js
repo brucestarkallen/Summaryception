@@ -1351,6 +1351,26 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     // journal to rewind it with, so only the drop discipline protects the branch.
     ok(/for \(let li = 1; li < store\.layers\.length; li\+\+\) \{[\s\S]{0,500}?narrating the abandoned timeline/.test(SRC_FULL), 'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)');
     ok(/i > store\.summarizedUpTo \|\| !_isCovered\(i\)/.test(SRC_FULL), 'the orphan un-ghost rescues turns left uncovered by dropped deep snippets');
+
+    // v5.98.0 MEDIUM wave
+    ok(/store\.summarizedUpTo = recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'M1: snippet delete uses recomputeSummarizedUpTo — no more Math.max(...[]) = -Infinity → JSON null');
+    ok(/A deleted Layer-0 snippet leaves its turns hidden AND unsummarized/.test(SRC_FULL), 'M1: deleting an L0 snippet returns its turns to verbatim');
+    ok(SRC_FULL.includes('const toMerge = layer.slice(0, s.snippetsPerPromotion);'), 'M2: promotion merges from a COPY — sources stay in the layer for the whole flight');
+    ok(!SRC_FULL.includes('const toMerge = layer.splice(0, s.snippetsPerPromotion);'), 'M2: no splice-out before the LLM call survives');
+    ok((SRC_FULL.match(/summarizedUpTo = Math\.max\(store\.summarizedUpTo, endIdx\);/g) || []).length >= 2, 'M3: both batch paths fail forward past empty passages');
+    ok(SRC_FULL.includes("throw new ConnectionError('Empty response from summarizer', { retryable: true });"), 'M5: cleaned-to-empty model output is retryable, as the log always claimed');
+}
+{
+    // M4 behavioral: a content-less audit stamp must not falsify updatedAt.
+    const notes = [
+        { t: 3, name: 'Irene', at: 100, core: 'flint' },
+        { t: 9, name: 'Irene', at: 999, a: 9 },   // pure audit stamp — written later, carries no content
+    ];
+    const page = L.foldLedgerNotes(notes, Infinity);
+    ok(page['Irene'].updatedAt === 100, 'M4: a content-less audit stamp does NOT bump updatedAt (roster recency stays honest)');
+    ok(page['Irene']._a === 9 && page['Irene']._t === 9, 'M4: the stamp itself still rides the fold (audit freshness + turn stamp intact)');
+    const page2 = L.foldLedgerNotes([...notes, { t: 11, name: 'Irene', at: 1000, state: 'at the rail' }], Infinity);
+    ok(page2['Irene'].updatedAt === 1000, 'M4: a CONTENT note still advances updatedAt');
 }
 
 // ─── the freshness indicator must agree with the reader ───

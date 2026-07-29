@@ -14,7 +14,7 @@ import {
     fetchOllamaModels,
     testOpenAIConnection,
     populateProfileDropdown,
-    getConnectionDisplayName,
+    ConnectionError,
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
@@ -1867,8 +1867,12 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
                 trimmed = cleanSummarizerOutput(trimmed);
 
                 if (!trimmed) {
+                    // The model returned only reasoning/thinking blocks (cleaned to
+                    // nothing) — a transient model quirk, EXACTLY the retryable
+                    // case the log line always claimed. A plain Error matched no
+                    // pattern in isRetryableError, so the batch failed on the spot.
                     log('Empty response from LLM, treating as retryable');
-                    throw new Error('Empty response from summarizer');
+                    throw new ConnectionError('Empty response from summarizer', { retryable: true });
                 }
 
                 log('Result:', trimmed);
@@ -2774,7 +2778,14 @@ function foldLedgerNotes(notes, maxTurn) {
         if (Array.isArray(n.threads)) e.threads = n.threads.slice();
         if (typeof n.a === 'number') e._a = n.a;          // audit stamp rides the notes too
         e._t = n.t;
-        e.updatedAt = n.at || e.updatedAt || 0;
+        // A note that carries no CONTENT (a pure audit stamp: {t, name, a, at})
+        // must not falsify updatedAt. Stamps are written on a schedule, and
+        // updatedAt drives roster recency and cast selection — letting a stamp
+        // bump it made audited characters systematically outrank genuinely
+        // active ones after every fold (i.e. after every single deletion).
+        const _hasContent = typeof n.core === 'string' || typeof n.state === 'string'
+            || typeof n.arc === 'string' || Array.isArray(n.threads) || n.base === true;
+        if (_hasContent) e.updatedAt = n.at || e.updatedAt || 0;
         out[key] = e;
     }
     return out;
@@ -4888,8 +4899,17 @@ async function summarizeOneBatch(visibleTurns) {
         const storyTxt = buildPassageFromRange(chat, passageStart, endIdx);
         trace('  storyTxt length:', storyTxt?.length ?? 'UNDEFINED');
         if (!storyTxt.trim()) {
-            trace('<<< EXITING summarizeOneBatch - EMPTY PASSAGE');
-            return false;
+            // Nothing summarizable in this range (all user-hidden, system, or pure
+            // machine-meta after stripping). Returning false WITHOUT moving the
+            // pointer stalled every future trigger on the same hopeless batch —
+            // and catch-up counted it as an API failure. Fail forward: the pointer
+            // walks past the dead range; nothing ghosted, nothing lost (there was
+            // nothing to lose).
+            log(`Empty passage [${passageStart}, ${endIdx}] (all hidden/system/meta) — advancing the pointer past it.`);
+            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+            try { await saveChatStore(); } catch (_) {}
+            trace('<<< EXITING summarizeOneBatch - EMPTY PASSAGE, FAILED FORWARD');
+            return true;
         }
 
         const contextStr = buildFullContext(0);
@@ -5014,9 +5034,12 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         trace('  buildPassageFromRange returned, length:', storyTxt?.length ?? 'UNDEFINED');
 
         if (!storyTxt.trim()) {
-            trace('  <<< EXITING - storyTxt is empty after trim');
-            trace('  This suggests all messages in range [' + passageStart + ', ' + endIdx + '] are hidden or empty');
-            return false;
+            trace('  <<< storyTxt is empty after trim — all messages in range [' + passageStart + ', ' + endIdx + '] are hidden/system/meta');
+            // Same fail-forward as summarizeOneBatch: without it, a dead range
+            // stalled catch-up forever and was misreported as an API outage.
+            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
+            try { await saveChatStore(); } catch (_) {}
+            return true;
         }
 
         trace('  About to call buildFullContext...');
@@ -5343,7 +5366,12 @@ async function maybePromoteLayer(layerIndex) {
         return;
     }
 
-    const toMerge = layer.splice(0, s.snippetsPerPromotion);
+    // COPY, don't cut: the sources stay in the layer for the whole flight. A
+    // GENERATION_STARTED landing mid-promotion (or mid shrink-retry) used to
+    // assemble the injection block from a layer with these snippets spliced
+    // OUT — one generation saw memory with a hole. They are spliced only
+    // after the merged snippet is accepted.
+    const toMerge = layer.slice(0, s.snippetsPerPromotion);
     const storyTxt = toMerge.map(sn => sn.text).join('\n\n');   // paragraph breaks — the meta-summarizer must see where one scene summary ends and the next begins
     const contextStr = buildFullContext(layerIndex + 1);
 
@@ -5354,10 +5382,7 @@ async function maybePromoteLayer(layerIndex) {
     );
 
     let metaSummary = await callSummarizer(storyTxt, contextStr);
-    if (!metaSummary) {
-        layer.unshift(...toMerge);
-        return;
-    }
+    if (!metaSummary) return;
 
     // SHRINK GUARD. Everything below this point destroys `toMerge` permanently.
     let shrink = { thin: false, ratio: 1 };
@@ -5416,6 +5441,13 @@ async function maybePromoteLayer(layerIndex) {
             Math.min(...childRanges.map(r => r[0])),
             Math.max(...childRanges.map(r => r[1])),
         ];
+    }
+    // Accepted: NOW the sources leave the layer (identity-safe — a concurrent
+    // reader reordered nothing while we were in flight, and if the array
+    // somehow changed we remove exactly the objects we merged, by reference).
+    for (const sn of toMerge) {
+        const at = layer.indexOf(sn);
+        if (at !== -1) layer.splice(at, 1);
     }
     destLayer.push(merged);
 
@@ -7213,21 +7245,33 @@ function updateSnippetBrowser() {
         const snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
         const layer = store.layers[layerIdx];
         if (layer) {
+            const removedSn = layer[snippetIdx];
             layer.splice(snippetIdx, 1);
 
-            if (store.layers[0] && store.layers[0].length > 0) {
-                const maxEnd = Math.max(...store.layers[0]
-                    .filter(sn => sn.turnRange)
-                    .map(sn => sn.turnRange[1]));
-                store.summarizedUpTo = maxEnd;
-            } else {
-                store.summarizedUpTo = -1;
+            // Math.max(...[]) is -Infinity when no ranged snippet survives (saved to
+            // JSON as null, which then broke every `< 0` guard downstream) — the
+            // helper exists precisely for this and answers -1 on empty.
+            store.summarizedUpTo = recomputeSummarizedUpTo();
+
+            // A deleted Layer-0 snippet leaves its turns hidden AND unsummarized —
+            // a silent context hole. Return them to verbatim so the pipeline can
+            // re-summarize them (or the user simply reads them again).
+            let freed = 0;
+            if (layerIdx === 0 && removedSn && removedSn.turnRange) {
+                const { chat } = SillyTavern.getContext();
+                const _freedIdx = [];
+                for (let i = removedSn.turnRange[0]; i <= removedSn.turnRange[1] && i < (chat ? chat.length : 0); i++) {
+                    const m = chat[i];
+                    if (m?.extra?.sc_ghosted) { delete m.extra.sc_ghosted; _freedIdx.push(i); freed++; }
+                }
+                if (_freedIdx.length) await unhideIndicesInRanges(_freedIdx);
+                store.ghostedIndices = (store.ghostedIndices || []).filter(idx => !_freedIdx.includes(idx));
             }
 
             await saveChatStore();
             updateInjection();
             updateUI();
-            toastr.info(`Snippet removed from Layer ${layerIdx}`, 'Summaryception');
+            toastr.info(`Snippet removed from Layer ${layerIdx}${freed ? ` — ${freed} turn(s) returned to verbatim` : ''}`, 'Summaryception');
         }
     });
 
@@ -9540,7 +9584,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
         // Tab close mid-call must not strand a muted preset (legacy ST only —
         // the hold is null on modern ST, making this a no-op there).
-        if (typeof window !== 'undefined') window.addEventListener('beforeunload', _unmutePromptToggles);
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('beforeunload', _unmutePromptToggles);
         registerSlashCommands();
 
         try {

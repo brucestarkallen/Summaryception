@@ -76,6 +76,9 @@ export async function fetchOllamaModels() { return []; }
 export async function testOpenAIConnection() { return true; }
 export async function populateProfileDropdown() {}
 export function getConnectionDisplayName() { return 'stub'; }
+export class ConnectionError extends Error {
+    constructor(message, { retryable = false, status = null } = {}) { super(message); this.name = 'ConnectionError'; this.retryable = retryable; this.status = status; }
+}
 `;
 
 // ── Mocked SillyTavern ───────────────────────────────────────────────

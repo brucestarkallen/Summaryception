@@ -170,6 +170,16 @@ const MUTATIONS = [
         '    for (let li = 1; li < store.layers.length; li++) {',
         '    for (let li = 1; li < 1; li++) {',
         'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)'],
+
+    ['promotion cuts the sources before the call (mid-flight memory hole)', 'index.js',
+        '    const toMerge = layer.slice(0, s.snippetsPerPromotion);',
+        '    const toMerge = layer.splice(0, s.snippetsPerPromotion);',
+        'M2: no splice-out before the LLM call survives'],
+
+    ['audit stamps falsify recency again', 'index.js',
+        '        if (_hasContent) e.updatedAt = n.at || e.updatedAt || 0;',
+        '        e.updatedAt = n.at || e.updatedAt || 0;',
+        'M4: a content-less audit stamp does NOT bump updatedAt'],
 ];
 
 function scratchCopy() {
