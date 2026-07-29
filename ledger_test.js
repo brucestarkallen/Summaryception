@@ -1346,6 +1346,11 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     ok(/function onGenerationStarted\(\) \{\s*\n\s*\/\/ Belt-and-suspenders[\s\S]{0,300}?_unmutePromptToggles\(\);/.test(SRC_FULL), 'GENERATION_STARTED synchronously restores a muted preset');
     ok(SRC_FULL.includes("window.addEventListener('beforeunload', _unmutePromptToggles)"), 'a tab close cannot strand a muted preset');
     ok(/if \(isDefaultMode\) _unmutePromptToggles\(\);/.test(SRC_FULL), 'callSummarizer releases the hold in finally');
+
+    // H5: branch repair must reach DEEP layers — a merged meta-summary has no
+    // journal to rewind it with, so only the drop discipline protects the branch.
+    ok(/for \(let li = 1; li < store\.layers\.length; li\+\+\) \{[\s\S]{0,500}?narrating the abandoned timeline/.test(SRC_FULL), 'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)');
+    ok(/i > store\.summarizedUpTo \|\| !_isCovered\(i\)/.test(SRC_FULL), 'the orphan un-ghost rescues turns left uncovered by dropped deep snippets');
 }
 
 // ─── the freshness indicator must agree with the reader ───

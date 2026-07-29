@@ -1266,6 +1266,24 @@ async function repairIfBranched() {
         if (removed > 0) log(`Removed ${removed} Layer 0 snippet(s) covering the verbatim window / beyond the branch.`);
     }
 
+    // ── 2b. DEEP layers get the same discipline. A promoted seed or merged
+    //       meta-summary whose range reaches the branch point narrates the
+    //       abandoned timeline — and unlike the ledger there is no journal to
+    //       rewind it with, so the dead future was injected on every turn
+    //       FOREVER. Drop it. Its surviving early turns are not lost: the
+    //       orphan un-ghost below restores any turn no surviving snippet
+    //       covers, and the normal pipeline re-summarizes them going forward.
+    //       Range-less deep snippets predate range propagation — dropping blind
+    //       could erase the only record of early turns, so they stay. ──
+    for (let li = 1; li < store.layers.length; li++) {
+        const lyr = store.layers[li];
+        if (!Array.isArray(lyr)) continue;
+        const before = lyr.length;
+        store.layers[li] = lyr.filter(sn => !sn.turnRange || sn.turnRange[1] < verbatimStartIdx);
+        const removed = before - store.layers[li].length;
+        if (removed > 0) log(`Removed ${removed} Layer ${li} snippet(s) narrating the abandoned timeline.`);
+    }
+
     // ── 3. Recompute summarizedUpTo from the snippets that survived. ──
     const survivors = (store.layers[0] || []).filter(sn => sn.turnRange);
     store.summarizedUpTo = survivors.length > 0
@@ -1282,20 +1300,30 @@ async function repairIfBranched() {
     // ENTIRE branch from turn 0 over an already-correct page ("N turns not read
     // yet" grinding through history after every branch).
 
-    // ── 4. Un-ghost everything past the (new) summarized boundary, so no turn is
-    //       ever both hidden AND unsummarized. This restores the verbatim window
-    //       and rescues any turns orphaned by a straddling snippet. ──
+    // ── 4. Un-ghost everything past the (new) summarized boundary OR left
+    //       uncovered by the drops above — no turn is ever both hidden AND
+    //       unsummarized. This restores the verbatim window, rescues turns
+    //       orphaned by a straddling snippet, and rescues early turns whose
+    //       ONLY coverage was a dropped deep-layer snippet (their L0 sources
+    //       were promoted away long ago; without this rescue they would stay
+    //       hidden with nothing narrating them, forever). ──
+    const _coveredRanges = [];
+    for (const lyr of store.layers) {
+        if (!Array.isArray(lyr)) continue;
+        for (const sn of lyr) { if (sn && sn.turnRange) _coveredRanges.push(sn.turnRange); }
+    }
+    const _isCovered = (i) => _coveredRanges.some(([a, b]) => i >= a && i <= b);
     const _orphaned = [];
-    for (let i = store.summarizedUpTo + 1; i < chatLength; i++) {
+    for (let i = 0; i < chatLength; i++) {
         const m = chat[i];
-        if (m?.extra?.sc_ghosted) { delete m.extra.sc_ghosted; _orphaned.push(i); }
+        if (m?.extra?.sc_ghosted && (i > store.summarizedUpTo || !_isCovered(i))) { delete m.extra.sc_ghosted; _orphaned.push(i); }
     }
     await unhideIndicesInRanges(_orphaned);   // O(runs) chat saves, not one per message
     const unghosted = _orphaned.length;
 
-    // ── 5. Trim the ghost tracking to only valid, still-summarized indices. ──
+    // ── 5. Trim the ghost tracking to only valid, still-covered indices. ──
     store.ghostedIndices = (store.ghostedIndices || [])
-        .filter(idx => idx < chatLength && idx <= store.summarizedUpTo);
+        .filter(idx => idx < chatLength && _isCovered(idx));
     // Drop continuity flags that referenced turns past the branch (their snippets are gone);
     // if the same issue still exists it'll be re-flagged when the branch re-summarizes.
     store.continuityFlags = (store.continuityFlags || []).filter(f =>
@@ -1314,13 +1342,13 @@ async function repairIfBranched() {
     const _rewound = await tryAutoRewindLedger(chatLength - 1, 'branch');
     if (_rewound) {
         toastr.info(
-            `Branch repaired [${_trigger}] — summary rewound to turn ${store.summarizedUpTo}, ${unghosted} recent turn(s) back to verbatim. Snippets and audit notes past the branch were dropped; the character ledger is being brought back in line automatically.`,
+            `Branch repaired [${_trigger}] — summary rewound to turn ${store.summarizedUpTo}, ${unghosted} turn(s) back to verbatim. Snippets past the branch were dropped at EVERY layer (meta-summaries narrating the abandoned timeline included); the character ledger is being brought back in line automatically.`,
             'Summaryception — Branch Repair',
             { timeOut: 7000 }
         );
     } else {
         toastr.info(
-            `Branch repaired [${_trigger}] — rewound the summary to turn ${store.summarizedUpTo} and restored ${unghosted} recent turn(s) to verbatim. Snippets and their audit notes past the branch were dropped. The character ledger keeps what characters had already become; for a clean rewind use Clear Ledger + Build ledger from history (or enable auto-rewind).`,
+            `Branch repaired [${_trigger}] — rewound the summary to turn ${store.summarizedUpTo} and restored ${unghosted} turn(s) to verbatim. Snippets past the branch were dropped at EVERY layer, and turns left with no summary at all were returned to verbatim so they re-summarize. The character ledger keeps what characters had already become; for a clean rewind use Clear Ledger + Build ledger from history (or enable auto-rewind).`,
             'Summaryception — Branch Repair',
             { timeOut: 9000 }
         );

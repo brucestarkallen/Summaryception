@@ -594,6 +594,55 @@ try {
         delete ctx.promptManager;
         delete ctx.generateRaw;
     }
+
+    console.log('== 18. BRANCH: DEEP layers drop the abandoned timeline, orphaned turns are rescued ==');
+    {
+        // H5 regression: repairIfBranched used to filter Layer 0 only. A merged
+        // meta-summary covering turns past the branch kept narrating the dead
+        // timeline forever — and dropping it naively would strand its surviving
+        // early turns (their L0 sources were promoted away): hidden AND
+        // unsummarized. The fix drops deep snippets that reach the branch and
+        // un-ghosts every turn no surviving snippet covers.
+        Object.assign(ctx.extensionSettings.summaryception, {
+            connectionSource: 'profile', profileId: 'stub', verbatimTurns: 1, turnsPerSummary: 3, ledgerEnabled: false,
+        });
+        ctx.chatId = 'deepbranch.jsonl';
+        ctx.chat = [
+            mkMsg('Player', 'I arrive at the keep.', true),              // 0 ghosted
+            mkMsg('Narrator', 'Rain on the old stones.'),                // 1 ghosted
+            mkMsg('Player', 'I knock twice.', true),                     // 2 ghosted
+            mkMsg('Narrator', 'The gate opens on its own.'),             // 3 ghosted
+            mkMsg('Player', 'I step through.', true),                    // 4 ghosted
+            mkMsg('Narrator', 'A hall of guttering candles.'),           // 5 visible (verbatim)
+        ];
+        for (const i of [0, 1, 2, 3, 4]) ctx.chat[i].extra.sc_ghosted = true;
+        ctx.chatMetadata = { summaryception: {
+            summarizedUpTo: 8,   // overruns the 6-message branch → repair triggers
+            ghostedIndices: [0, 1, 2, 3, 4],
+            layers: [
+                // L0: turns 0-2 were covered ONLY by the L1 merged snippet below
+                // (their sources were promoted away); turns 3-4 survive in L0.
+                [{ text: 'L0: the gate opens, the player steps through', turnRange: [3, 4], timestamp: 1 }],
+                [
+                    { text: 'L1 clean: arrival in the rain', turnRange: [0, 1], timestamp: 2 },
+                    { text: 'L1 merged: the knock AND THE DEAD TIMELINE where the keep burns down', turnRange: [2, 9], timestamp: 3 },
+                    { text: 'L1 seed wholly in the dead timeline', turnRange: [7, 8], timestamp: 4 },
+                ],
+            ],
+        } };
+        await fire('CHAT_CHANGED');
+        await sleep(1500);
+        const st = store();
+        const l1 = (st.layers && st.layers[1]) || [];
+        ok(l1.length === 1 && /arrival in the rain/.test(l1[0].text), 'the clean deep snippet survives; the dead-timeline merged snippet AND seed are dropped');
+        ok(!/DEAD TIMELINE|dead timeline/.test(JSON.stringify(st.layers)), 'no dead-timeline narration survives anywhere in the layers');
+        ok(ctx.chat[2].extra.sc_ghosted !== true, 'the turn orphaned by the dropped meta-summary is UN-GHOSTED (rescued, not left hidden-and-unsummarized)');
+        ok(ctx.chat[0].extra.sc_ghosted === true && ctx.chat[1].extra.sc_ghosted === true && ctx.chat[3].extra.sc_ghosted === true && ctx.chat[4].extra.sc_ghosted === true, 'turns still covered by a surviving snippet stay ghosted');
+        ok(st.summarizedUpTo === 4, 'summarizedUpTo recomputed from the surviving L0 coverage');
+        ok((st.ghostedIndices || []).every(i => i !== 2) && (st.ghostedIndices || []).length === 4, 'ghost tracking trimmed to still-covered indices');
+        await sleep(600);
+        ok(!/DEAD TIMELINE|dead timeline|keep burns/.test(injected), 'the injected memory block carries no dead-timeline content');
+    }
 } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* temp */ }
 }

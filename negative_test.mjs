@@ -165,6 +165,11 @@ const MUTATIONS = [
         '    if (isDefaultMode && _defaultModeNeedsToggleMute()) _mutePromptToggles();',
         '    if (isDefaultMode) _mutePromptToggles();',
         'the toggle mute is gated on LEGACY generateRaw — modern ST is never muted'],
+
+    ['branch repair skips deep layers (dead timeline narrated forever)', 'index.js',
+        '    for (let li = 1; li < store.layers.length; li++) {',
+        '    for (let li = 1; li < 1; li++) {',
+        'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)'],
 ];
 
 function scratchCopy() {
