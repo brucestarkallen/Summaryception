@@ -1319,6 +1319,26 @@ section('wipeLedgerData — a clear that no deletion can undo');
     ok(!/store\.ledger = \{\};\s*\n\s*store\.ledgerLiveIdx = -1;/.test(SRC_FULL), 'no hand-rolled page+pointer wipe survives outside the primitive');
 }
 
+// ─── v5.98.0: one cancel token, loop-owned mutex, epoch-guarded foreground ───
+section('concurrency discipline — cancel token, loop-owned mutex, epoch guards');
+{
+    ok(SRC_FULL.includes('while (!cancelled && !_summarizeCancelRequested)'), 'catch-up loop honors the shared cancel token');
+    ok(/async function runCatchup[\s\S]{0,2200}?const startEpoch = _chatEpoch;/.test(SRC_FULL), 'runCatchup captures the chat epoch before driving');
+    ok(/while \(!cancelled && !_summarizeCancelRequested\) \{[\s\S]{0,1100}?if \(_chatEpoch !== startEpoch\)/.test(SRC_FULL), 'runCatchup checks the epoch EVERY iteration — a chat switch can never be summarized/ghosted');
+    const abortBody = (SRC_FULL.match(/function abortSummarization\(\) \{[\s\S]*?\n\}/) || [''])[0];
+    ok(abortBody.length > 0 && !/isSummarizing =/.test(abortBody), 'abortSummarization never releases a mutex it does not own');
+    ok(abortBody.includes('_summarizeCancelRequested = true;'), 'abort raises the shared cancel token');
+    ok(/function onChatChanged\(\) \{[\s\S]{0,500}?abortSummarization\(\);/.test(SRC_FULL), 'chat change aborts in-flight work for the old chat');
+    ok((SRC_FULL.match(/_acquireSummarize\(\);/g) || []).length >= 8, 'every driver goes through the single acquire helper');
+    const noHelpers = SRC_FULL
+        .replace('let isSummarizing = false;', '')
+        .replace(/function _acquireSummarize\(\) \{[\s\S]*?\n\}/, '')
+        .replace(/function _releaseSummarize\(\) \{[^\n]*\n?/, '');
+    ok(!/isSummarizing = (true|false);/.test(noHelpers), 'no direct isSummarizing assignment survives outside the helpers (loop-owned release)');
+    ok((SRC_FULL.match(/a chat switch mid-call must not write into a detached store/g) || []).length >= 2, 'snippet and detail redos are epoch-guarded');
+    ok((SRC_FULL.match(/Chat changed — export aborted\./g) || []).length >= 2, 'both export passes are epoch-guarded');
+}
+
 // ─── the freshness indicator must agree with the reader ───
 section('freshness indicator — no phantom backlog');
 {
@@ -2358,7 +2378,7 @@ section('export tail — the transplant covers the verbatim window, the session 
     ok(!/store\.layers\[0\]\.push|store\.summarizedUpTo\s*=|ghostMessagesUpTo|saveChatStore/.test(h), 'export: NO store mutation — no push, no cursor advance, no ghosting, no save (a 9-turn verbatim window is still 9 after)');
     ok(/Object\.assign\(\{\}, store,\s*\{ layers:/.test(h), 'export: fresh snippets ride a COPIED view, never the store');
     ok(h.includes('export aborted so you never get a file missing its newest chapter'), 'export: a failed batch aborts loudly — no half-true file that LOOKS complete');
-    ok(h.includes('isSummarizing || _llmChannelBusy()') && h.includes('isSummarizing = true;') && h.includes('finally { isSummarizing = false;'), 'export: takes and releases the summarizer channel like every other pass');
+    ok(h.includes('isSummarizing || _llmChannelBusy()') && h.includes('_acquireSummarize();') && h.includes('finally { _releaseSummarize();'), 'export: takes and releases the summarizer channel like every other pass');
 
     // v5.83.0: the ledger gets the same guarantee — ephemerally, into a clone
     ok(h.includes('_exportTailBatches(chat, lp,'), 'export: ledger catch-up batches from the LIVE POINTER (the stale-wave root: pointer legally behind the chat)');

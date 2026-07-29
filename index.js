@@ -1614,14 +1614,41 @@ let currentAbortController = null;
 // Abort button ends up cancelling the wrong call — or nothing.
 const _activeAborters = new Set();
 
+// Cancellation is ONE channel, separate from the mutex. The old design conflated
+// them: abortSummarization() cleared isSummarizing while the driver loop (catch-up,
+// redo, export) was still iterating — the loop kept running ("Stop" didn't stop),
+// and with the mutex falsely open a background pass could start a SECOND
+// callSummarizer whose prompt-toggle snapshot/restore interleaved with the first,
+// permanently scrambling the user's preset. Now: abort raises the flag and aborts
+// the in-flight HTTP call; every driver checks the flag per iteration; the mutex
+// is released ONLY by the driver that acquired it, in its own finally.
+let _summarizeCancelRequested = false;
+
+function _acquireSummarize() {
+    if (isSummarizing) return false;
+    isSummarizing = true;
+    _summarizeCancelRequested = false;
+    return true;
+}
+function _releaseSummarize() { isSummarizing = false; }
+
+// Same discipline for the two UI gates below — assigning them across an await in
+// the same function is what eslint's require-atomic-updates (correctly) flags.
+function _openCatchupDialog() { if (_catchupDialogOpen) return false; _catchupDialogOpen = true; return true; }
+function _closeCatchupDialog() { _catchupDialogOpen = false; }
+function _dismissCatchup() { catchupDismissed = true; }
+function _resetCatchupDismissal() { catchupDismissed = false; }
+
 function abortSummarization() {
+    _summarizeCancelRequested = true;
     if (_activeAborters.size > 0) {
         for (const c of _activeAborters) { try { c.abort(); } catch (_) {} }
         _activeAborters.clear();
         log('Abort signal sent to all in-flight calls.');
     }
     currentAbortController = null;
-    isSummarizing = false;
+    // isSummarizing intentionally NOT touched: the running driver's own finally
+    // releases it once it has observed the cancel flag and cleaned up.
 }
 
 // ─── Core: LLM Summarization with Retry ──────────────────────────────
@@ -4087,7 +4114,7 @@ async function backfillLedgerFromHistory(opts) {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    isSummarizing = true;
+    _acquireSummarize();
     try {
         for (const b of batches) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4126,7 +4153,7 @@ async function backfillLedgerFromHistory(opts) {
             else toastr.success(`Ledger built — ${nChars} character(s) across ${done} passes${failed ? `, ${failed} failed` : ''}.`, 'Summaryception', { timeOut: 5000 });
         }
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
         try { updateUI(); } catch (_) {}
     }
 }
@@ -4144,7 +4171,7 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
     const sn = layer[snippetIdx];
     const { chat } = SillyTavern.getContext();
     const startEpoch = _chatEpoch;
-    isSummarizing = true;
+    _acquireSummarize();
     try {
         const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
         if (!storyTxt.trim()) { toastr.error('Source turns are empty.', 'Summaryception'); return; }
@@ -4159,7 +4186,7 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
         if (changed > 0) toastr.success(`Ledger updated from this scene (${changed} character${changed === 1 ? '' : 's'}).`, 'Summaryception', { timeOut: 3000 });
         else toastr.info('No character updates from this scene.', 'Summaryception', { timeOut: 3000 });
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
     }
 }
 
@@ -4189,7 +4216,7 @@ async function backfillAuditsForLayer0() {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    isSummarizing = true;
+    _acquireSummarize();
     try {
         for (const sn of targets) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4229,7 +4256,7 @@ async function backfillAuditsForLayer0() {
             else toastr.success(`Audit backfill done — ${added} detail note(s) added across ${done} snippet(s)${failed ? `, ${failed} failed` : ''}.`, 'Summaryception', { timeOut: 5000 });
         }
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
         try { updateSnippetBrowser(); } catch (_) {}
     }
 }
@@ -4352,7 +4379,7 @@ async function backfillContinuityForLayer0() {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    isSummarizing = true;
+    _acquireSummarize();
     try {
         for (const sn of targets) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4390,7 +4417,7 @@ async function backfillContinuityForLayer0() {
             else toastr.success(`Continuity re-check done — ${flagged} new issue${flagged === 1 ? '' : 's'} flagged, ${cleared} fixed issue${cleared === 1 ? '' : 's'} cleared, across ${done} snippet(s)${failed ? `, ${failed} failed` : ''}.`, 'Summaryception', { timeOut: 6000 });
         }
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
     }
 }
 
@@ -4511,7 +4538,7 @@ async function applyAllContinuityFixes() {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    isSummarizing = true;
+    _acquireSummarize();
     try {
         for (const flag of open) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4519,7 +4546,7 @@ async function applyAllContinuityFixes() {
             done++;
             $(toast).find('.toast-message').text(`Applying continuity fixes: ${done} / ${open.length} | ${applied} applied\nClick ✕ to stop`);
         }
-    } finally { isSummarizing = false; }
+    } finally { _releaseSummarize(); }
     toastr.clear(toast);
     if (_chatEpoch === startEpoch) {
         updateInjection(true);
@@ -4704,14 +4731,13 @@ async function maybeSummarizeTurns() {
     const backlogThreshold = s.turnsPerSummary * 2;
 
     if (overflow > backlogThreshold && !catchupDismissed) {
-        if (_catchupDialogOpen) return;   // a dialog is already on screen — don't stack another
+        if (!_openCatchupDialog()) return;   // a dialog is already on screen — don't stack another
         log(`Large backlog detected: ${overflow} turns over limit`);
 
         const batchesNeeded = Math.ceil(overflow / s.turnsPerSummary);
-        _catchupDialogOpen = true;
         let choice;
         try { choice = await showCatchupDialog(overflow, batchesNeeded); }
-        finally { _catchupDialogOpen = false; }
+        finally { _closeCatchupDialog(); }
 
         if (choice === 'skip') {
             const cutoff = visibleTurns[visibleTurns.length - s.verbatimTurns - 1];
@@ -4719,7 +4745,7 @@ async function maybeSummarizeTurns() {
                 store.summarizedUpTo = cutoff.index;
                 log(`Skipped backlog. summarizedUpTo set to ${store.summarizedUpTo}`);
             }
-            catchupDismissed = true;
+            _dismissCatchup();
             await saveChatStore();
             return;
         } else if (choice === 'catchup') {
@@ -4779,7 +4805,7 @@ async function summarizeOneBatch(visibleTurns) {
         return false;
     }
 
-    isSummarizing = true;
+    _acquireSummarize();
 
     try {
         const startIdx = batch[0].index;
@@ -4854,7 +4880,7 @@ async function summarizeOneBatch(visibleTurns) {
         return true;
 
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
     }
 }
 
@@ -5022,13 +5048,23 @@ async function runCatchup(visibleTurns, overflow) {
         }
     );
 
-    isSummarizing = true;
+    _acquireSummarize();
+    // The loop re-reads the LIVE context chat every iteration. Without an epoch
+    // guard, switching chats mid-run turned the catch-up on the NEW chat —
+    // summarizing and ghosting turns the user never consented to process there.
+    const startEpoch = _chatEpoch;
 
     try {
         let consecutiveFailures = 0;
 
-        while (!cancelled) {
+        while (!cancelled && !_summarizeCancelRequested) {
             trace(`  Loop iteration - completed: ${completed}, failed: ${failed}`);
+
+            if (_chatEpoch !== startEpoch) {
+                trace('  chat changed mid-catch-up — abandoning WITHOUT touching the new chat');
+                toastr.warning(`Catch-up stopped — you switched chats. The original chat kept its progress (${completed}/${totalBatches} batches); nothing was summarized in this chat.`, 'Summaryception', { timeOut: 6000 });
+                break;
+            }
 
             const { chat } = SillyTavern.getContext();
             const allAssistantTurns = getAssistantTurns(chat);
@@ -5073,12 +5109,14 @@ async function runCatchup(visibleTurns, overflow) {
 
         toastr.clear(progressToast);
 
-        if (cancelled) {
+        if (cancelled || _summarizeCancelRequested) {
             toastr.warning(
                 `Catch-up paused at ${completed}/${totalBatches}. Progress saved — will continue on next message.`,
                 'Summaryception',
                 { timeOut: 5000 }
             );
+        } else if (_chatEpoch !== startEpoch) {
+            // epoch-change toast already shown inside the loop — nothing more to say
         } else if (failed === 0) {
             toastr.success(
                 `Catch-up complete! ${completed} batches processed.`,
@@ -5093,12 +5131,15 @@ async function runCatchup(visibleTurns, overflow) {
             );
         }
 
-        try { await saveChatStore(); } catch (_) {}   // single end-of-run flush (per-batch bulk writes are skipped when /hide already persisted them)
-        updateInjection(true);
-        updateUI();
+        if (_chatEpoch === startEpoch) {
+            try { await saveChatStore(); } catch (_) {}   // single end-of-run flush (per-batch bulk writes are skipped when /hide already persisted them)
+            updateInjection(true);
+            updateUI();
+        }
+        // epoch changed: do NOT save/inject — chatMetadata now belongs to the new chat
 
     } finally {
-        isSummarizing = false;
+        _releaseSummarize();
     }
 }
 
@@ -6299,7 +6340,12 @@ function onMessageReceived(messageIndex) {
 function onChatChanged() {
     try { if (typeof window !== 'undefined' && typeof window._closeNotepadFs === 'function') window._closeNotepadFs(); } catch (_) {}
     log('Chat changed.');
-    catchupDismissed = false;
+    _resetCatchupDismissal();
+    // Abort in-flight calls for the OLD chat: every driver is epoch-guarded and
+    // would discard the result anyway — aborting saves the tokens and unwinds
+    // loops (catch-up, redos, exports) at their next checkpoint instead of
+    // minutes later. The next acquire resets the cancel flag.
+    abortSummarization();
     _clearLiveRetry();
     _clearAuditRetry();
     _clearSummarizeRetry();
@@ -7043,7 +7089,8 @@ function updateSnippetBrowser() {
 
         if (!confirm(`Regenerate summary for turns ${rangeStart}–${rangeEnd}?`)) return;
 
-        isSummarizing = true;
+        _acquireSummarize();
+        const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store
         const btn = $(this);
         btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
 
@@ -7073,6 +7120,8 @@ function updateSnippetBrowser() {
 
             const newSummary = await callSummarizer(storyTxt, contextStr);
 
+            if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — regenerated summary discarded, original snippet kept.', 'Summaryception', { timeOut: 4000 }); return; }
+
             if (!newSummary) {
                 toastr.error('Regeneration failed — original snippet kept.', 'Summaryception');
                 return;
@@ -7089,7 +7138,7 @@ function updateSnippetBrowser() {
             toastr.success(`Snippet regenerated for turns ${rangeStart}–${rangeEnd}`, 'Summaryception', { timeOut: 3000 });
 
         } finally {
-            isSummarizing = false;
+            _releaseSummarize();
             btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-rotate-right');
         }
     });
@@ -7165,7 +7214,8 @@ function updateSnippetBrowser() {
         const sn = layer[snippetIdx];
         const [rangeStart, rangeEnd] = sn.turnRange;
         const { chat } = SillyTavern.getContext();
-        isSummarizing = true;
+        _acquireSummarize();
+        const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store
         const btn = $(this);
         btn.prop('disabled', true).removeClass('fa-wand-magic-sparkles').addClass('fa-spinner fa-spin');
         try {
@@ -7183,6 +7233,7 @@ function updateSnippetBrowser() {
             const contextStr = contextParts.length > 0 ? contextParts.join(' ') : '(none yet)';
             toastr.info(`Auditing turns ${rangeStart}–${rangeEnd} for detail…`, 'Summaryception', { timeOut: 3000, progressBar: true });
             const detail = await callAuditor(storyTxt, sn.text, contextStr);
+            if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — audit result discarded.', 'Summaryception', { timeOut: 4000 }); return; }
             if (detail) {
                 sn.detail = detail;
                 toastr.success('Detail generated', 'Summaryception', { timeOut: 2500 });
@@ -7193,7 +7244,7 @@ function updateSnippetBrowser() {
             await saveChatStore();
             updateInjection();
         } finally {
-            isSummarizing = false;
+            _releaseSummarize();
             btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-wand-magic-sparkles');
             updateSnippetBrowser();
         }
@@ -8610,7 +8661,7 @@ function bindUIEvents() {
         }
         $(this).prop('disabled', true).text(' Working…');
         try {
-            catchupDismissed = false;
+            _resetCatchupDismissal();
 
             const _healed = await healOrphanGhosts();   // rescue snippets-cleared-but-still-hidden turns first
             if (_healed > 0) toastr.info(`Restored ${_healed} orphaned turn(s) to verbatim before summarizing.`, 'Summaryception', { timeOut: 3000 });
@@ -8641,7 +8692,7 @@ function bindUIEvents() {
             return;
         }
         abortSummarization();
-        toastr.warning('Summarization stopped. Progress has been saved.', 'Summaryception', { timeOut: 4000 });
+        toastr.warning('Stopping — the in-flight call is aborted and the batch loop halts at its next checkpoint. Progress has been saved.', 'Summaryception', { timeOut: 4000 });
         $(this).prop('disabled', true);
         setTimeout(() => $(this).prop('disabled', false), 2000);
         updateUI();
@@ -8686,10 +8737,12 @@ function bindUIEvents() {
         if (tailBatches.length) {
             if (isSummarizing || _llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
             $btn.prop('disabled', true);
-            isSummarizing = true;
+            _acquireSummarize();
+            const startEpoch = _chatEpoch;   // a chat switch mid-export must not summarize the new chat into the file
             toastr.info('Summarizing the last ' + tailBatches.length + ' batch' + (tailBatches.length === 1 ? '' : 'es') + ' of recent turns for the export (your session stays exactly as it is)…', 'Summaryception', { timeOut: 5000, progressBar: true });
             try {
                 for (const b of tailBatches) {
+                    if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — export aborted.', 'Summaryception', { timeOut: 4000 }); return; }
                     const storyTxt = buildPassageFromRange(chat, b.passageStart, b.endIdx);
                     if (!storyTxt.trim()) continue;
                     const summary = await callSummarizer(storyTxt, buildFullContext(0));
@@ -8700,7 +8753,7 @@ function bindUIEvents() {
                     }
                     tail.push({ text: summary, turnRange: [b.passageStart, b.endIdx] });
                 }
-            } finally { isSummarizing = false; $btn.prop('disabled', false); }
+            } finally { _releaseSummarize(); $btn.prop('disabled', false); }
         }
         // The ledger gets the SAME guarantee the snippets got in v5.80.0. An
         // external audit found a broad stale-STATE wave: every dossier lagged the
@@ -8719,12 +8772,14 @@ function bindUIEvents() {
             if (lBatches.length) {
                 if (isSummarizing || _llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
                 $btn.prop('disabled', true);
-                isSummarizing = true;
+                _acquireSummarize();
+                const startEpoch = _chatEpoch;   // a chat switch mid-export must not read the new chat into the file
                 toastr.info('Bringing the character ledger current for the export (' + lBatches.length + ' batch' + (lBatches.length === 1 ? '' : 'es') + ' — your session stays exactly as it is)…', 'Summaryception', { timeOut: 5000, progressBar: true });
                 try {
                     const clone = structuredClone(store.ledger || {});
                     const s2 = getSettings();
                     for (const b of lBatches) {
+                        if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — export aborted.', 'Summaryception', { timeOut: 4000 }); return; }
                         const storyTxt = buildPassageFromRange(chat, b.passageStart, b.endIdx);
                         if (!storyTxt.trim()) continue;
                         const ledgerStr = serializeLedgerForScribe(clone, s2.ledgerContextMaxChars);
@@ -8736,7 +8791,7 @@ function bindUIEvents() {
                         if (Array.isArray(deltas) && deltas.length) mergeLedgerDeltas(deltas, clone, b.endIdx);
                     }
                     ledgerView = clone;
-                } finally { isSummarizing = false; $btn.prop('disabled', false); }
+                } finally { _releaseSummarize(); $btn.prop('disabled', false); }
             }
         }
         const view = (tail.length || ledgerView)

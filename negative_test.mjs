@@ -145,6 +145,21 @@ const MUTATIONS = [
         '    if (tKey !== key && Object.prototype.hasOwnProperty.call(page, tKey)) {',
         '    if (false) {',
         'renaming ONTO another character is refused \u2014 that would merge two people'],
+
+    ['catch-up loop deaf to the cancel token ("Stop" does not stop)', 'index.js',
+        '        while (!cancelled && !_summarizeCancelRequested) {',
+        '        while (!cancelled) {',
+        'catch-up loop honors the shared cancel token'],
+
+    ['abort clears a mutex it does not own (the toggle-interleave door)', 'index.js',
+        '    _summarizeCancelRequested = true;\n    if (_activeAborters.size > 0) {',
+        '    _summarizeCancelRequested = true;\n    isSummarizing = false;\n    if (_activeAborters.size > 0) {',
+        'abortSummarization never releases a mutex it does not own'],
+
+    ['catch-up drives without an epoch guard (summarizes the chat you switched TO)', 'index.js',
+        '            if (_chatEpoch !== startEpoch) {\n                trace(\'  chat changed mid-catch-up — abandoning WITHOUT touching the new chat\');',
+        '            if (false) {\n                trace(\'  chat changed mid-catch-up — abandoning WITHOUT touching the new chat\');',
+        'runCatchup checks the epoch EVERY iteration'],
 ];
 
 function scratchCopy() {
