@@ -19,7 +19,7 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
 - **The player's character is a RECORD, not a MODEL (v5.96.0).** The ledger tracks the protagonist's `state` (where they are, what is visibly true of them) and `threads` (what is open around them) — never `core` or `arc`. Nature, tells, defence mechanisms and inner trajectory are what keep a character the STORY controls themselves; for the character the PLAYER controls the same fields are a behaviour spec handed to the storyteller for choices that are not its to make. Enforced in `mergeLedgerDeltas` (the single merge every writer — scribe, auditor, backfill, rebuild — passes through) and again in `formatLedgerEntry`, so chats that already hold the fields stop injecting them without losing the player's own data. `isMcLedgerKey()` is the one matcher, reusing `resolveLedgerKey`. Everyone else keeps all four fields including their `arc` TOWARD the protagonist — that is where the relationship lives and it belongs to them. Setting: `ledgerMcRecordOnly` (default on).
 - **The ledger is injected as compact prose, not JSON.** The scribe *outputs* JSON only so it parses reliably; that JSON is parsed into stored fields and discarded. What reaches the storyteller is one readable line per on‑screen character.
 - **Everything is defensive:** background passes are `try/catch` + `quiet`, guarded against chat switches (epoch token), never throw upward, and the hot injection path is exception‑wrapped. Editing/deleting chat messages is handled (indices are resynced).
-- **Single file does the work:** `index.js` (~7k lines). `settings.html` is the panel, `style.css` the styling, `manifest.json` the metadata. `connectionutil.js` is upstream — don't edit.
+- **Single file does the work:** `index.js` (~9.5k lines). `settings.html` is the panel, `style.css` the styling, `manifest.json` the metadata. `connectionutil.js` started as the upstream helper but is now maintained in-repo (temperature override, abort-signal threading) — edit it with the same care as `index.js`.
 - **⚠️ THE GATE — run all of these before every push. Never use `node --check index.js`.**
   SillyTavern loads `index.js` as an **ES module**; `node --check` on a `.js` file parses it as **CommonJS** and silently accepts what ESM rejects (a duplicate top-level `let`, most importantly). That false pass shipped a redeclared identifier in v5.58.0 and the extension **failed to load at all through v5.60.0 while every check reported green**.
 
@@ -32,6 +32,8 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
                          #    index.js end to end — event -> scribe -> ledger -> injection -> checkpoint
                          #    -> auditor -> chat switch. "Passes the unit tests" is not "works".
   node dom_test.mjs      # 4. REAL DOM: jsdom + real jQuery execute the SHIPPED UI wiring verbatim
+                           #    (needs: npm install --no-save --no-bin-links jsdom jquery;
+                           #     absent deps now FAIL the gate unless DOM_TEST_ALLOW_SKIP=1)
                          #    (open/type/save/close). Catches the class the stubs cannot: markup,
                          #    delegation, inline-style self-containment. Skips cleanly (exit 0) if
                          #    jsdom/jquery are absent: npm install --no-save jsdom jquery
@@ -146,7 +148,8 @@ Alexia Valois — Nature: Analytical, proud, guarded; calls Jovan "Ardent" until
 - **A statement about *now* is stamped with `_journalNow(store)`**, never with `ledgerLiveIdx` alone — a note at a higher turn (a summarization pass running ahead of the live pass, an adopted external edit) sorts *after* an under-stamped tombstone and quietly undeletes the character.
 - **UI cards are flat siblings** — no nesting. "Reset to Default" buttons are generic (`data-key` + `data-target`).
 - **The settings panel loads its own folder path from `import.meta.url`**, so the repo/folder can be renamed freely; the hardcoded fallback path is only a safety net.
-- **`connectionutil.js` is upstream** — do not edit.
+- **`connectionutil.js` is maintained in-repo since v5.98.0** (was: "upstream — do not edit"). It carries the summarizer-temperature override and abort-signal threading; keep its retry/ConnectionError contract intact.
+- **v5.98.0 — the full‑audit hardening release.** (1) Every ledger‑clear path goes through `wipeLedgerData()` — a page‑only wipe used to be silently undone by the next message deletion refolding the surviving journal. (2) One cancel token + loop‑owned mutex: "Stop" actually stops, and no background pass can interleave a second `callSummarizer`. (3) `runCatchup` and every foreground op (redos, exports) are epoch‑guarded — switching chats mid‑run touches nothing in the new chat. (4) "Disable hiding" now means *visuals off*: exclusion from the prompt is always real (`is_system`, the native mechanism both completion modes honor — verified against ST release `public/script.js`); no prompt event can reliably identify our messages, so the old `sc_ghosted`‑flag promise was undeliverable and is gone. (5) The preset‑toggle mute is legacy‑only: modern `generateRaw` never assembles the preset (verified), so muting was pure downside — a main Generate landing in the window was gutted. (6) Branch repair reaches deep layers: meta‑summaries narrating the abandoned timeline are dropped and orphaned turns rescued. (7) Promotion merges from a copy; empty passages fail forward; audit stamps no longer falsify `updatedAt`; cleaned‑to‑empty output retries as documented; abort reaches the fetch; per‑mode summarizer temperature setting — 24 total fixes, each with a regression test or mutation guard.
 - The file‑header comment version is intentionally stale; the real version lives in `manifest.json` **and** the `SC_VERSION` constant (top of `index.js`, printed at `APP_READY`) — keep those two in sync on every release.
 
 ### Files
@@ -156,7 +159,7 @@ Alexia Valois — Nature: Analytical, proud, guarded; calls Jovan "Ardent" until
 | `settings.html` | The settings panel markup |
 | `style.css` | Panel styling (flat cards) |
 | `manifest.json` | Extension metadata (`display_name`, `version`, entry points) |
-| `connectionutil.js` | Upstream connection helper — do not edit |
+| `connectionutil.js` | Connection helper (maintained in-repo since v5.98.0) |
 
 ---
 

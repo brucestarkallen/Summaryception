@@ -1369,6 +1369,11 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     ok(!/temperature: 0\.[38],/.test(CONN.replace(/_temperature: (0\.3|0\.8)/, '')), 'L2: hardcoded per-mode temperatures replaced by the override-aware path');
     ok((CONN.match(/\.\.\.\(signal \? \{ signal \} : \{\}\)/g) || []).length >= 4, 'L3: the abort signal reaches every fetch');
 
+    // C8: the two version strings must never drift apart again
+    const manifestVer = JSON.parse(fs.readFileSync(__dirname + '/manifest.json', 'utf8')).version;
+    const scVer = (SRC_FULL.match(/const SC_VERSION = '([^']+)'/) || [])[1];
+    ok(scVer === manifestVer, `version sync: SC_VERSION (${scVer}) === manifest.json (${manifestVer})`);
+
     // v5.98.0 MEDIUM wave
     ok(/store\.summarizedUpTo = recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'M1: snippet delete uses recomputeSummarizedUpTo — no more Math.max(...[]) = -Infinity → JSON null');
     ok(/A deleted Layer-0 snippet leaves its turns hidden AND unsummarized/.test(SRC_FULL), 'M1: deleting an L0 snippet returns its turns to verbatim');
