@@ -646,6 +646,34 @@ try {
         await sleep(600);
         ok(!/DEAD TIMELINE|dead timeline|keep burns/.test(injected), 'the injected memory block carries no dead-timeline content');
     }
+
+    console.log('== 19. GHOSTING: "hiding visuals off" still EXCLUDES from the model (real /hide) ==');
+    {
+        // H3 regression: disableGhosting used to skip /hide entirely and the UI
+        // claimed the sc_ghosted flag excluded messages from the prompt. Nothing
+        // in ST honors that flag — the exclusion mechanism native to both
+        // completion modes is is_system (what /hide sets). Now the mode always
+        // hides; only the visuals differ.
+        Object.assign(ctx.extensionSettings.summaryception, {
+            connectionSource: 'profile', profileId: 'stub', verbatimTurns: 0, turnsPerSummary: 1,
+            ledgerEnabled: false, disableGhosting: true,
+        });
+        const slashCalls = [];
+        const origSlash = ctx.executeSlashCommandsWithOptions;
+        ctx.executeSlashCommandsWithOptions = async (cmd, opts) => { slashCalls.push(cmd); return {}; };
+        ctx.chatMetadata = { summaryception: { summarizedUpTo: -1, layers: [[]] } };
+        ctx.chatId = 'ghostmode.jsonl';
+        ctx.chat = [mkMsg('Player', 'I knock.', true), mkMsg('Narrator', 'Silence answers.')];
+        await fire('CHAT_CHANGED');
+        await sleep(700);
+        ctx.chat.push(mkMsg('Player', 'I knock again.', true), mkMsg('Narrator', 'A floorboard creaks.'));
+        await fire('MESSAGE_RECEIVED', ctx.chat.length - 1);
+        await sleep(1800);
+        ok(slashCalls.some(c => /^\/hide /.test(c)), 'with hiding visuals OFF, ghosting still issues /hide — the message is genuinely excluded from the prompt');
+        ok(ctx.chat.some(m => m.extra && m.extra.sc_ghosted === true), 'the summarized turn is marked sc_ghosted as before');
+        ctx.executeSlashCommandsWithOptions = origSlash;
+        ctx.extensionSettings.summaryception.disableGhosting = false;
+    }
 } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* temp */ }
 }

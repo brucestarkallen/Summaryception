@@ -751,3 +751,20 @@ details.sc-collapse>:last-child{margin-bottom:14px}
     border-radius: 8px;
     padding: 10px;
 }
+
+/* ═══ "Disable Hiding Visuals" mode (sc-ghost-visual-off) ═══
+   Ghosted (summarized) messages are ALWAYS excluded from the AI's context via
+   SillyTavern's native hidden-message mechanism (is_system=true — the same one
+   /hide uses, honored by both completion modes). This class only neutralizes
+   the VISUAL markers ST attaches to hidden messages, so they keep reading like
+   normal turns. Verified against ST release public/style.css: hidden messages
+   get a dimmed/grayscaled avatar and a ghost (eye-slash) indicator; the message
+   body itself stays fully opaque — so these two rules are the whole job. */
+body.sc-ghost-visual-off .mes[is_system="true"] .avatar {
+    opacity: 1 !important;
+    filter: none !important;
+}
+
+body.sc-ghost-visual-off .mes[is_system="true"] .mes_ghost {
+    display: none !important;
+}

@@ -312,7 +312,7 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
     savedCustomPrompts: {},        // { name: promptText } — named custom prompt slots
     lastCustomPrompt: '',          // Auto-saved when switching away from custom
     pauseSummarization: false,  // true = stop processing, keep injecting
-    disableGhosting: false,  // true = mark as summarized but don't hide messages
+    disableGhosting: false,  // true = still excluded from the AI (native is_system), but hiding VISUALS are neutralized via CSS
 
     stripPatterns: [
         '<|channel>thought',
@@ -1046,17 +1046,17 @@ async function ghostMessage(messageIndex) {
         store.ghostedIndices.push(messageIndex);
     }
 
-    // Only visually hide if ghosting is enabled
+    // Exclusion is ALWAYS real (is_system via /hide — see ghostMessagesUpTo);
+    // disableGhosting only changes the VISUALS (via the sc-ghost-visual-off
+    // body class), never whether the model still receives the message.
     const s = getSettings();
-    if (!s.disableGhosting) {
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${messageIndex}`, { showOutput: false });
-        } catch (e) {
-            log(`Failed to hide message ${messageIndex}:`, e);
-        }
+    try {
+        await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${messageIndex}`, { showOutput: false });
+    } catch (e) {
+        log(`Failed to hide message ${messageIndex}:`, e);
     }
 
-    log(`Ghosted message at index ${messageIndex}${s.disableGhosting ? ' (hiding disabled)' : ''}`);
+    log(`Ghosted message at index ${messageIndex}${s.disableGhosting ? ' (visuals neutralized)' : ''}`);
 }
 
 // Un-ghost any message WE ghosted (sc_ghosted) that is no longer covered by the summary
@@ -1153,10 +1153,18 @@ async function ghostMessagesUpTo(endIndex) {
     }
 
     if (toHide.length === 0) return;
-    if (s.disableGhosting) {
-        log(`Ghosted ${toHide.length} message(s) up to ${upto} — metadata only (hiding disabled).`);
-        return;
-    }
+    // "Hiding disabled" must NOT mean "still sent to the model" — and it cannot
+    // mean "excluded by the sc_ghosted flag", because NOTHING in SillyTavern
+    // honors a custom extra flag (verified against release public/script.js:
+    // GENERATE_AFTER_COMBINE_PROMPTS hands a FLATTENED STRING for text
+    // completion, CHAT_COMPLETION_PROMPT_READY an index-less message array —
+    // no prompt event can reliably identify OUR messages). The one exclusion
+    // mechanism native to BOTH completion modes is the one /hide uses:
+    // is_system=true (text completion filters it at usableMessages, chat
+    // completion at coreChat). So disableGhosting still hides — the body class
+    // `sc-ghost-visual-off` (style.css) is what neutralizes the VISUAL markers
+    // (avatar dim + ghost eye) so the messages keep reading like normal turns.
+    if (s.disableGhosting) log(`Ghosting ${toHide.length} message(s) up to ${upto} — excluded from AI context, visuals neutralized.`);
 
     // Collapse the indices into contiguous [start,end] ranges.
     const ranges = _contiguousRanges(toHide);
@@ -6661,11 +6669,22 @@ function registerSlashCommands() {
 
 // ─── Settings UI ─────────────────────────────────────────────────────
 
+// The "disable hiding" setting is VISUAL only (exclusion stays real — see
+// ghostMessagesUpTo). One body class drives the CSS that neutralizes ST's
+// hidden-message markers, so it must track the setting on every UI refresh.
+function _syncGhostVisualClass() {
+    try {
+        const on = !!getSettings().disableGhosting;
+        if (typeof document !== 'undefined' && document.body?.classList) document.body.classList.toggle('sc-ghost-visual-off', on);
+    } catch (_) {}
+}
+
 function updateUI() {
     try {
         const s = getSettings();
         const store = getChatStore();
 
+        _syncGhostVisualClass();
         $('#sc_enabled').prop('checked', s.enabled);
         $('#sc_pause_summarization').prop('checked', s.pauseSummarization);
         $('#sc_disable_ghosting').prop('checked', s.disableGhosting);
@@ -6782,7 +6801,7 @@ function updateUI() {
 
         let statsHtml = '';
         if (s.disableGhosting) {
-            statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (metadata only — not visually hidden)</div>`;
+            statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (excluded from the AI — hiding visuals off)</div>`;
         } else {
             statsHtml += `<div class="sc-layer-stat">👻 <strong>${ghostedCount}</strong> messages ghosted (hidden from LLM, visible to you)</div>`;
         }
@@ -8114,12 +8133,13 @@ function bindUIEvents() {
     $(document).on('change', '#sc_disable_ghosting', function () {
         getSettings().disableGhosting = $(this).prop('checked');
         saveSettings();
+        _syncGhostVisualClass();
 
         if ($(this).prop('checked')) {
             toastr.info(
-                'Message hiding disabled. Summarized messages will remain visible but still be excluded from LLM context via the sc_ghosted flag.',
+                'Hidden-message visuals disabled. Summarized messages are STILL excluded from the AI\'s context (SillyTavern\'s native hidden-message mechanism) — they just keep reading like normal turns, without the dimmed avatar or ghost marker.',
                 'Summaryception',
-                { timeOut: 5000 }
+                { timeOut: 6000 }
             );
         }
     });

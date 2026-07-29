@@ -1352,6 +1352,13 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     ok(/for \(let li = 1; li < store\.layers\.length; li\+\+\) \{[\s\S]{0,500}?narrating the abandoned timeline/.test(SRC_FULL), 'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)');
     ok(/i > store\.summarizedUpTo \|\| !_isCovered\(i\)/.test(SRC_FULL), 'the orphan un-ghost rescues turns left uncovered by dropped deep snippets');
 
+    // H3: "hiding visuals off" must never mean "still sent to the model" — no ST
+    // prompt event can identify our messages, so exclusion is ALWAYS the native
+    // is_system mechanism; the setting only toggles CSS.
+    ok(!SRC_FULL.includes('metadata only (hiding disabled)'), 'H3: ghostMessagesUpTo never skips the hide (the old metadata-only lie)');
+    ok(SRC_FULL.includes('body class\n    // `sc-ghost-visual-off`') || SRC_FULL.includes('sc-ghost-visual-off` (style.css) is what neutralizes'), 'H3: visuals are neutralized via the sc-ghost-visual-off class, not by skipping exclusion');
+    ok(SRC_FULL.includes('function _syncGhostVisualClass()'), 'H3: the visual-off body class is synced from settings');
+
     // v5.98.0 MEDIUM wave
     ok(/store\.summarizedUpTo = recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'M1: snippet delete uses recomputeSummarizedUpTo — no more Math.max(...[]) = -Infinity → JSON null');
     ok(/A deleted Layer-0 snippet leaves its turns hidden AND unsummarized/.test(SRC_FULL), 'M1: deleting an L0 snippet returns its turns to verbatim');

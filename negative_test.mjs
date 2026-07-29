@@ -180,6 +180,11 @@ const MUTATIONS = [
         '        if (_hasContent) e.updatedAt = n.at || e.updatedAt || 0;',
         '        e.updatedAt = n.at || e.updatedAt || 0;',
         'M4: a content-less audit stamp does NOT bump updatedAt'],
+
+    ['"hiding off" skips the hide again (summarized turns STILL sent to the model)', 'index.js',
+        '    if (s.disableGhosting) log(`Ghosting ${toHide.length} message(s) up to ${upto} — excluded from AI context, visuals neutralized.`);',
+        '    if (s.disableGhosting) { log(`Ghosted ${toHide.length} message(s) up to ${upto} — metadata only (hiding disabled).`); return; }',
+        'H3: ghostMessagesUpTo never skips the hide (the old metadata-only lie)'],
 ];
 
 function scratchCopy() {
