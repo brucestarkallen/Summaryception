@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
@@ -65,7 +65,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, _renameEvidence, _renameLedgerKeySpace, renameLedgerCharacter, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
@@ -1957,6 +1957,126 @@ section('the scribe is told, not just overruled');
     const live = JSON.parse('"' + raw[1] + '"');
     ok(live.includes("THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL"), 'and it survives into the RUNTIME string, correctly escaped');
     ok(live.includes('including their arc TOWARD the'), 'the rule keeps everyone else\u2019s arc toward the protagonist explicitly in scope');
+}
+
+section('copilot renames a character — the key space follows, history intact');
+{
+    // The copilot renames by page surgery (delete old key, add new key — the only
+    // way to rename an object key). Through v5.96.0 that read as delete+create.
+    const mk = () => {
+        const st = { ledgerNotesCanon: 1, ledgerNotesFrom: 0, ledgerLiveIdx: 9, ledger: {}, ledgerPins: ['Rukia'], ledgerNotes: [
+            { t: 2, name: 'Rukia', at: 1, core: 'clipped when flustered', state: 'on the roof' },
+            { t: 5, name: 'Rukia', at: 2, state: 'in the shop', arc: 'warming since the roof' },
+            { t: 9, name: 'Rukia', at: 3, state: 'watching Jovan' },
+        ] };
+        st.ledger = L.foldLedgerNotes(st.ledgerNotes, Infinity);
+        return st;
+    };
+
+    // 1) pure rename, short → long
+    let st = mk();
+    L.__setStore(st); L.__setSettings(Object.assign({}, defaultSettings));
+    const e = st.ledger['Rukia']; delete st.ledger['Rukia']; st.ledger['Rukia Kuchiki'] = e;
+    const counts = [];
+    for (let i = 0; i < 4; i++) counts.push(L.adoptExternalLedgerEdits(st));
+    ok(counts.every(c => c === 0), 'a rename adopts ZERO notes — it is a re-key, not an edit [' + counts.join(',') + ']');
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Rukia Kuchiki').length, 3, 'her full history survives under the NEW name');
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Rukia').length, 0, 'and nothing is orphaned under the old one');
+    ok(!st.ledgerNotes.some(n => n.gone), 'no tombstone — she was renamed, not deleted');
+    eq(Object.keys(L.foldLedgerNotes(st.ledgerNotes, 6)), ['Rukia Kuchiki'], 'a rewind past the rename shows the SAME person under her CURRENT name — the rename survives rewinds and branches');
+    eq(st.ledgerPins, ['Rukia Kuchiki'], 'a pinned character stays pinned through her own rename');
+
+    // 2) rename + simultaneous field edit in the same copilot stroke
+    st = mk();
+    L.__setStore(st);
+    const e2 = Object.assign({}, st.ledger['Rukia'], { state: 'corrected by the copilot' });
+    delete st.ledger['Rukia']; st.ledger['Rukia Kuchiki'] = e2;
+    const a2 = L.adoptExternalLedgerEdits(st);
+    eq(a2, 1, 'the rename is a re-key and the EDIT is one adopted note — cores match, so the pairing holds');
+    const f2 = L.foldLedgerNotes(st.ledgerNotes, Infinity);
+    eq(f2['Rukia Kuchiki'].state, 'corrected by the copilot', 'the edited field lands under the new key');
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Rukia Kuchiki').length, 4, 'three re-keyed rows plus the one edit');
+
+    // 3) cores present but DIFFERENT — a REPLACEMENT, deliberately not a rename
+    st = mk();
+    L.__setStore(st);
+    delete st.ledger['Rukia'];
+    st.ledger['Kaien'] = { core: 'an entirely different anchor', state: 'watching Jovan', _t: 9 };
+    L.adoptExternalLedgerEdits(st);
+    ok(st.ledgerNotes.some(n => n.gone && n.name === 'Rukia'), 'swapping the identity anchor AND the name is delete+create: the old character is tombstoned');
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Kaien').length, 1, 'and the new one starts fresh — rewriting who someone IS is not a rename');
+
+    // 4) ambiguity — two new keys both matching the vanished one — is left alone
+    st = mk();
+    L.__setStore(st);
+    const eA = st.ledger['Rukia']; delete st.ledger['Rukia'];
+    st.ledger['Rukia Kuchiki'] = Object.assign({}, eA);
+    st.ledger['Rukia Shiba'] = Object.assign({}, eA);
+    L.adoptExternalLedgerEdits(st);
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Rukia Kuchiki').length + L.ledgerHistoryFor(st.ledgerNotes, 'Rukia Shiba').length, 2, 'ambiguous pairing re-keys NOTHING — a guess that re-keys the wrong person is worse than an orphaned history');
+    ok(st.ledgerNotes.some(n => n.gone && n.name === 'Rukia'), 'the vanished key falls back to an honest tombstone');
+
+    // 5) the protagonist's record-only entry (no core by design) renames on state evidence
+    st = { ledgerNotesCanon: 1, ledgerNotesFrom: 0, ledgerLiveIdx: 5, mcName: 'Jovan', ledger: {}, ledgerNotes: [
+        { t: 3, name: 'Jovan', at: 1, state: 'bleeding in the east yard', threads: ['the mark'] },
+    ] };
+    st.ledger = L.foldLedgerNotes(st.ledgerNotes, Infinity);
+    L.__setStore(st);
+    const ej = st.ledger['Jovan']; delete st.ledger['Jovan']; st.ledger['Jovan Oda'] = ej;
+    L.adoptExternalLedgerEdits(st);
+    eq(L.ledgerHistoryFor(st.ledgerNotes, 'Jovan Oda').length, 1, 'a record-only entry (no core) pairs on verbatim state');
+    ok(L.isMcLedgerKey('Jovan Oda') === true, 'and the record-only quarantine follows him to the new key — the matcher resolves, it does not memorize');
+}
+
+section('_renameEvidence — identity, not similarity');
+{
+    ok(L._renameEvidence({ core: 'x' }, { core: 'x' }) === true, 'equal cores: same person');
+    ok(L._renameEvidence({ core: 'x' }, { core: 'y' }) === false, 'different cores: replacement');
+    ok(L._renameEvidence({ core: 'x' }, { state: 's' }) === false, 'core on one side only: not provably the same');
+    ok(L._renameEvidence({ state: 's' }, { state: 's' }) === true, 'no cores: verbatim state carries it');
+    ok(L._renameEvidence({ state: 's', arc: 'a' }, { state: 's', arc: 'b' }) === false, 'but any shared field that disagrees vetoes');
+    ok(L._renameEvidence({ threads: ['t'] }, { threads: ['t'] }) === false, 'threads alone are not identity');
+    ok(L._renameEvidence({}, {}) === false, 'no evidence, no pairing');
+}
+
+section('renameLedgerCharacter — the deliberate door for the copilot');
+{
+    const st = { ledger: { 'Rukia': { core: 'clipped', _t: 2 }, 'Renji': { core: 'loyal', _t: 2 } },
+        ledgerNotes: [{ t: 2, name: 'Rukia', at: 1, core: 'clipped' }, { t: 2, name: 'Renji', at: 2, core: 'loyal' }],
+        ledgerNotesFrom: 0, ledgerNotesCanon: 1, ledgerLiveIdx: 2, ledgerPins: [] };
+    L.__setStore(st);
+    const r1 = L.renameLedgerCharacter(st, 'Rukia', 'Rukia Kuchiki');
+    ok(r1.ok === true && r1.from === 'Rukia' && r1.to === 'Rukia Kuchiki', 'renames by resolved key');
+    ok('Rukia Kuchiki' in st.ledger && !('Rukia' in st.ledger), 'the page moves');
+    eq(st.ledgerNotes.filter(n => n.name === 'Rukia Kuchiki').length, 1, 'the journal follows');
+    const r2 = L.renameLedgerCharacter(st, 'Rukia Kuchiki', 'Renji');
+    ok(r2.ok === false && /merge two people/.test(r2.reason), 'renaming ONTO another character is refused — that would merge two people');
+    const r3 = L.renameLedgerCharacter(st, 'Nobody', 'Someone');
+    ok(r3.ok === false && /no character/.test(r3.reason), 'renaming a character who does not exist is refused, stated plainly');
+    const r4 = L.renameLedgerCharacter(st, 'rukia kuchiki', 'Rukia Kuchiki');
+    ok(r4.ok === true, 'a case correction of the SAME character is allowed — that is not a merge');
+    const st2 = { ledger: { 'Mara': { core: 'terse' } } };   // pre-notes chat
+    const r5 = L.renameLedgerCharacter(st2, 'Mara', 'Mara Vex');
+    ok(r5.ok === true && Array.isArray(st2.ledgerNotes), 'a pre-notes chat gets a journal first, so the rename has history to carry');
+    ok(SRC_FULL.includes('renameCharacter: (from, to) =>'), 'exposed to the copilot at window.summaryceptionContinuity.renameCharacter');
+    ok(SRC_FULL.includes('const r = renameLedgerCharacter(store, from, to);'), 'the API wrapper delegates to the tested function and only adds save/injection/render');
+}
+
+section('_renameLedgerKeySpace — every name-keyed structure moves together');
+{
+    const st = {
+        ledger: { 'A': { core: 'x' } },
+        ledgerStaging: { 'A': { core: 'x-staged' } },
+        ledgerNotes: [{ t: 1, name: 'A', at: 1, core: 'x' }, { t: 3, name: 'A', at: 2, gone: true }, { t: 4, name: 'B', at: 3, core: 'other' }],
+        ledgerStagingNotes: [{ t: 1, name: 'A', at: 1, core: 'x-staged' }],
+        ledgerPins: ['a', 'B'],
+    };
+    ok(L._renameLedgerKeySpace(st, 'A', 'A Prime') === true, 'reports work done');
+    ok('A Prime' in st.ledger && 'A Prime' in st.ledgerStaging, 'both pages move — a mid-rebuild rename cannot fork live from staging');
+    eq(st.ledgerNotes.map(n => n.name), ['A Prime', 'A Prime', 'B'], 'live journal re-keyed, INCLUDING old tombstones — the timeline is preserved, only the label changes');
+    eq(st.ledgerStagingNotes.map(n => n.name), ['A Prime'], 'staging journal re-keyed');
+    eq(st.ledgerPins, ['A Prime', 'B'], 'pins follow case-insensitively; other pins untouched');
+    ok(L._renameLedgerKeySpace(st, 'Nobody', 'X') === false, 'renaming nothing does nothing');
 }
 
 section('adoption guards — divergence is only adopted when it means intent');

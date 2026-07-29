@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.96.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.97.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -2838,6 +2838,83 @@ function _baseNotesFromPage(page, atTurn) {
 // BEFORE folding, so external work survives folds exactly like the scribe's own.
 // Deletion adoption is suppressed while a staged rebuild serves a deliberately
 // trimmed page (_ledgerDroppingPast is temporary hygiene, not a user deletion).
+// Identity evidence for pairing a vanished fold key with a new page key. core is
+// the anchor field, and the contamination guard already treats verbatim core
+// equality as same-person evidence — so core present ANYWHERE decides: equal is
+// the same person, different is a REPLACEMENT (deliberately left to
+// delete+create; rewriting the identity anchor and the name in one stroke is
+// indistinguishable from swapping the character out). With no core on either
+// side (the protagonist's record-only entry is exactly this shape), verbatim
+// state carries it, provided no shared field disagrees.
+function _renameEvidence(oldF, newP) {
+    if (!oldF || !newP) return false;
+    const f = (v) => (typeof v === 'string' && v.trim()) ? v : undefined;
+    const oc = f(oldF.core), nc = f(newP.core);
+    if (oc !== undefined || nc !== undefined) return oc === nc;
+    const os = f(oldF.state), ns = f(newP.state);
+    if (os === undefined || ns === undefined || os !== ns) return false;
+    const oa = f(oldF.arc), na = f(newP.arc);
+    if (oa !== undefined && na !== undefined && oa !== na) return false;
+    const ot = Array.isArray(oldF.threads) ? JSON.stringify(oldF.threads) : undefined;
+    const nt = Array.isArray(newP.threads) ? JSON.stringify(newP.threads) : undefined;
+    if (ot !== undefined && nt !== undefined && ot !== nt) return false;
+    return true;
+}
+
+// A rename is the page changing its mind about a character's canonical key, and
+// the journal FOLLOWS — historically — because page and journal share one key
+// space (v5.94.0). Every note this person ever generated is re-keyed, live and
+// staging, so their history survives under the new name and a rewind past the
+// rename shows the SAME person under their CURRENT name instead of resurrecting
+// the old one. Pins follow too, or a pinned character silently unpins herself by
+// getting a fuller name. Old tombstones re-key with everything else: the
+// timeline is preserved, only the label changes.
+function _renameLedgerKeySpace(store, from, to) {
+    if (!store || !from || !to || from === to) return false;
+    let did = false;
+    for (const pg of [store.ledger, store.ledgerStaging]) {
+        if (!pg || typeof pg !== 'object' || !Object.prototype.hasOwnProperty.call(pg, from)) continue;
+        if (!Object.prototype.hasOwnProperty.call(pg, to)) pg[to] = pg[from];
+        delete pg[from];
+        did = true;
+    }
+    for (const arr of [store.ledgerNotes, store.ledgerStagingNotes]) {
+        if (!Array.isArray(arr)) continue;
+        for (const n of arr) if (n && n.name === from) { n.name = to; did = true; }
+    }
+    if (Array.isArray(store.ledgerPins)) {
+        const fl = String(from).toLowerCase();
+        for (let i = 0; i < store.ledgerPins.length; i++) {
+            if (String(store.ledgerPins[i]).toLowerCase() === fl) { store.ledgerPins[i] = to; did = true; }
+        }
+    }
+    return did;
+}
+
+// The DELIBERATE door — exposed to the copilot as
+// window.summaryceptionContinuity.renameCharacter(from, to). Detection (below)
+// is the safety net for page surgery; this is the operation stated as itself.
+// Validation, then the shared rewrite. Side effects (save/injection/render)
+// belong to the API wrapper, so this stays testable.
+function renameLedgerCharacter(store, from, to) {
+    const f = String(from ?? '').trim(), t = String(to ?? '').trim();
+    if (!f || !t) return { ok: false, reason: 'both names are required' };
+    const page = (store && store.ledger && typeof store.ledger === 'object') ? store.ledger : {};
+    const key = Object.prototype.hasOwnProperty.call(page, f) ? f : resolveLedgerKey(page, f);
+    if (!Object.prototype.hasOwnProperty.call(page, key)) return { ok: false, reason: `no character '${f}' in the ledger` };
+    if (key === t) return { ok: true, from: key, to: t, noop: true };
+    // Renaming ONTO another character would silently merge two people. The one
+    // exception: `to` resolves to the character being renamed (a case or
+    // short/long-form correction of their own name).
+    const tKey = Object.prototype.hasOwnProperty.call(page, t) ? t : resolveLedgerKey(page, t);
+    if (tKey !== key && Object.prototype.hasOwnProperty.call(page, tKey)) {
+        return { ok: false, reason: `'${t}' resolves to existing character '${tKey}' — renaming onto another character would merge two people; delete or rename that one first` };
+    }
+    ensureLedgerNotes(store);   // a pre-notes chat gets a journal so the rename has history to carry
+    _renameLedgerKeySpace(store, key, t);
+    return { ok: true, from: key, to: t };
+}
+
 function adoptExternalLedgerEdits(store, tFloor) {
     if (!store || !store.ledger || typeof store.ledger !== 'object') return 0;
     if (!Array.isArray(store.ledgerNotes)) return 0;   // pre-notes chat: nothing to reconcile against
@@ -2846,6 +2923,40 @@ function adoptExternalLedgerEdits(store, tFloor) {
     const rebuildActive = !!(store.ledgerRebuild && store.ledgerRebuild.staging);
     const tNow = _journalNow(store, tFloor, !rebuildActive);
     let adopted = 0;
+    // RENAME DETECTION — the copilot renames by page surgery (delete the old key,
+    // add the new one, same person), because that is the only way to rename an
+    // object key. Through v5.96.0 that read as delete+create: the whole history
+    // orphaned under the old name, a tombstone plus a full re-adoption doubled the
+    // journal, and any rewind past the rename resurrected the OLD name — the
+    // rename silently undid itself. Pair each vanished fold key with a new page
+    // key carrying the same person's content and RE-KEY the journal instead.
+    // Ambiguity (one vanished key matching several new ones, or several vanished
+    // matching one new) is left entirely alone: a guess that re-keys the wrong
+    // person is worse than an orphaned history, so it falls back to delete+create.
+    if (Object.keys(page).length > 0) {
+        const gone = Object.keys(fold).filter(k => !Object.prototype.hasOwnProperty.call(page, k));
+        const born = Object.keys(page).filter(k => !Object.prototype.hasOwnProperty.call(fold, k));
+        if (gone.length && born.length) {
+            const pairs = [];
+            for (const g of gone) {
+                const m = born.filter(b => _renameEvidence(fold[g], page[b]));
+                if (m.length === 1) pairs.push([g, m[0]]);
+            }
+            const bornHits = {};
+            for (const [, b] of pairs) bornHits[b] = (bornHits[b] || 0) + 1;
+            for (const [g, b] of pairs) {
+                if (bornHits[b] !== 1) continue;
+                if (_renameLedgerKeySpace(store, g, b)) {
+                    // The fold is now stale for this pair; move it in place so the
+                    // field-diff pass below compares the new key against its own
+                    // history — a simultaneous field edit still lands as an edit.
+                    fold[b] = fold[g];
+                    delete fold[g];
+                    log(`Ledger rename adopted: '${g}' \u2192 '${b}' — history re-keyed, nothing orphaned.`);
+                }
+            }
+        }
+    }
     for (const [name, e] of Object.entries(page)) {
         if (!e || typeof e !== 'object') continue;
         // Exact. Page and journal share one key space, so a fuzzy lookup here could
@@ -9301,6 +9412,19 @@ async function fetchProfilesFallback(selectElement, currentValue) {
                 enable: (on) => { getSettings().continuityEnabled = (on !== false); saveSettings(); return getSettings().continuityEnabled; },
                 setAutoFix: (on) => { getSettings().continuityAutoFix = (on !== false); saveSettings(); return getSettings().continuityAutoFix; },
                 setNudge: (on) => { getSettings().continuityNudge = (on !== false); saveSettings(); return getSettings().continuityNudge; },
+                renameCharacter: (from, to) => {
+                    try {
+                        const store = getChatStore();
+                        const r = renameLedgerCharacter(store, from, to);
+                        if (r.ok && !r.noop) {
+                            saveChatStore();
+                            updateInjection(true);
+                            try { renderLedger(); } catch { /* panel may be closed */ }
+                            log(`Ledger rename (copilot API): '${r.from}' \u2192 '${r.to}'.`);
+                        }
+                        return r;
+                    } catch (e) { return { ok: false, reason: String((e && e.message) || e) }; }
+                },
             };
             log('Continuity copilot API ready at window.summaryceptionContinuity (list/resolve/dismiss/recheck).');
         } catch (_) {}
@@ -9311,7 +9435,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the player's character is now a RECORD, not a MODEL. The ledger was writing the protagonist a full psychological dossier like any NPC: nature, tells, defence mechanisms, the lines he would not cross, an inner trajectory — and injecting it every turn. For a character the STORY controls that is exactly what keeps them themselves. For the character the PLAYER controls it is a behaviour spec handed to the storyteller for choices that are not its to make, which is a stolen choice by another route. Nature and Arc are no longer written for the protagonist and no longer injected even where a chat already holds them; state (where he is, what is visibly true of him) and threads (what is open around him) stay, because the world has to remember those to react correctly. Everyone else keeps all four fields, including their arc TOWARD him — that is where the relationship actually lives, and it belongs to them. Guarded in code at the single merge every writer passes through, not only asked for in the prompt. Toggle: Character Ledger > Your character: record, not model. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — a copilot renaming a character no longer destroys her history. Renaming an object key is only possible as page surgery (delete the old key, add the new one), and through v5.96.0 the reconciler faithfully read that as a deletion plus a brand-new character: the whole history orphaned under the old name, a tombstone plus a full re-adoption doubling the journal, and — worst — any rewind or branch past the rename resurrected the OLD name, silently undoing the copilot's fix. The reconciler now pairs a vanished fold key with a new page key carrying the same person's content (verbatim core is identity; a record-only entry pairs on verbatim state) and RE-KEYS the journal instead: history intact under the new name, pins follow, staging follows, rewinds show the same person under her current name. Different cores are a REPLACEMENT and still delete+create on purpose; ambiguous pairings are left alone entirely, because re-keying the wrong person is worse than an orphaned history. Deliberate renames get a first-class door: window.summaryceptionContinuity.renameCharacter(from, to) — validated, merge-refusing, exact. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

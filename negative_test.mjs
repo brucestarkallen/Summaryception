@@ -110,6 +110,36 @@ const MUTATIONS = [
         "    if (a === b) return true;",
         "    if (a === b || true) return true;",
         'a character the STORY controls keeps all four fields'],
+
+    ['rename detection removed (copilot renames orphan history again)', 'index.js',
+        '    if (Object.keys(page).length > 0) {\n        const gone = Object.keys(fold).filter(k => !Object.prototype.hasOwnProperty.call(page, k));',
+        '    if (false) {\n        const gone = Object.keys(fold).filter(k => !Object.prototype.hasOwnProperty.call(page, k));',
+        'her full history survives under the NEW name'],
+
+    ['different cores treated as a rename (replacement re-keyed onto the new person)', 'index.js',
+        '    if (oc !== undefined || nc !== undefined) return oc === nc;',
+        '    if (oc !== undefined && nc !== undefined && oc === nc) return true;',
+        'swapping the identity anchor AND the name is delete+create: the old character is tombstoned'],
+
+    ['ambiguity guard removed (a guess re-keys the wrong person)', 'index.js',
+        '                if (m.length === 1) pairs.push([g, m[0]]);',
+        '                if (m.length >= 1) pairs.push([g, m[0]]);',
+        'ambiguous pairing re-keys NOTHING \u2014 a guess that re-keys the wrong person is worse than an orphaned history'],
+
+    ['rename skips the staging journal (a mid-rebuild rename forks the key space)', 'index.js',
+        '    for (const arr of [store.ledgerNotes, store.ledgerStagingNotes]) {',
+        '    for (const arr of [store.ledgerNotes]) {',
+        'staging journal re-keyed'],
+
+    ['rename drops the pins (a pinned character silently unpins)', 'index.js',
+        "    if (Array.isArray(store.ledgerPins)) {\n        const fl = String(from).toLowerCase();",
+        "    if (false) {\n        const fl = String(from).toLowerCase();",
+        'a pinned character stays pinned through her own rename'],
+
+    ['the deliberate door allows renaming onto another character (silent merge)', 'index.js',
+        '    if (tKey !== key && Object.prototype.hasOwnProperty.call(page, tKey)) {',
+        '    if (false) {',
+        'renaming ONTO another character is refused \u2014 that would merge two people'],
 ];
 
 function scratchCopy() {
