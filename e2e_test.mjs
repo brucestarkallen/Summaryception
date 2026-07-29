@@ -540,6 +540,60 @@ try {
     ok(oldNames.length > 0, 'precondition: the previous chat had a populated ledger');
     ok(!newLed.some((n) => oldNames.includes(n)), 'no character from the previous chat bleeds into the new one');
     ok(!/Claire Argent/.test(injected), "the previous chat's cast is no longer injected");
+
+    console.log('== 17. TOGGLE MUTE: modern generateRaw never muted; legacy muted-then-restored ==');
+    {
+        // Verified against ST release (public/script.js:3865-3919, 3941-3980):
+        // modern generateRaw never assembles the preset, so muting toggles is
+        // pure risk there; legacy positional generateRaw did, so it keeps the
+        // mute — plus a synchronous GENERATION_STARTED restore as a seatbelt.
+        ctx.chatMetadata = { summaryception: { summarizedUpTo: -1, layers: [[]] } };
+        ctx.chatId = 'toggles.jsonl';
+        ctx.chat = [mkMsg('Player', 'I arrive.', true), mkMsg('Narrator', 'A quiet room.')];
+        await fire('CHAT_CHANGED');
+        await sleep(700);
+
+        const entries = [
+            { identifier: 'main', enabled: true },
+            { identifier: 'charDescription', enabled: true },
+        ];
+        ctx.promptManager = {
+            getPromptCollection: () => ({ collection: [{ identifier: 'main' }, { identifier: 'charDescription' }] }),
+            getPromptOrderEntries: () => entries,
+        };
+        Object.assign(ctx.extensionSettings.summaryception, {
+            connectionSource: 'default', verbatimTurns: 0, turnsPerSummary: 1, ledgerEnabled: false,
+        });
+        const summaryCallsBefore = calls.filter(c => c.kind === 'summary').length;
+
+        // — modern ST: generateRaw({prompt}) — length 1 → no mute, ever —
+        ctx.generateRaw = async (opts) => 'ok';
+        ctx.chat.push(mkMsg('Player', 'I sit.', true), mkMsg('Narrator', 'The candle gutters.'));
+        await fire('MESSAGE_RECEIVED', ctx.chat.length - 1);
+        await sleep(650);   // 500ms trigger delay + mid-call (stub latency 250ms)
+        ok(calls.filter(c => c.kind === 'summary').length > summaryCallsBefore, 'precondition: a default-mode summarizer call is in flight');
+        ok(entries.every(e => e.enabled === true), 'MODERN ST: preset toggles are NEVER muted — a concurrent main Generate cannot be gutted');
+        await sleep(1400);
+        ok(entries.every(e => e.enabled === true), 'and there is nothing to restore afterwards');
+
+        // — legacy ST: generateRaw(prompt, systemPrompt) — length 2 → mute + restore —
+        ctx.generateRaw = async function (a, b) { return 'ok'; };
+        ctx.chat.push(mkMsg('Player', 'I wait.', true), mkMsg('Narrator', 'Somewhere, a door closes.'));
+        const legacySummaryBefore = calls.filter(c => c.kind === 'summary').length;
+        await fire('MESSAGE_RECEIVED', ctx.chat.length - 1);
+        // Wait until the legacy call is genuinely in flight (trigger delay is 500ms;
+        // a loaded event loop can stretch it — poll the stub's in-flight counter).
+        let inFlight = false;
+        for (let i = 0; i < 60 && !inFlight; i++) { await sleep(60); inFlight = (globalThis.__live || 0) > 0 && calls.filter(c => c.kind === 'summary').length > legacySummaryBefore; }
+        ok(inFlight, 'precondition: the legacy summarizer call is in flight');
+        ok(entries.every(e => e.enabled === false), 'LEGACY ST: toggles ARE muted while the quiet call assembles through the preset');
+        await fire('GENERATION_STARTED');   // a main generation starts mid-mute
+        ok(entries.every(e => e.enabled === true), 'GENERATION_STARTED restores the preset SYNCHRONOUSLY — the main generation is never gutted');
+        await sleep(1400);
+        ok(entries.every(e => e.enabled === true), 'and the finally-restore is idempotent afterwards');
+        delete ctx.promptManager;
+        delete ctx.generateRaw;
+    }
 } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* temp */ }
 }

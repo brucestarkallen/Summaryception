@@ -1554,6 +1554,39 @@ function restorePromptToggles(snapshot) {
     }
 }
 
+// ── The toggle mute is LEGACY-ONLY ──
+// Verified against SillyTavern release (public/script.js): modern generateRaw
+// (object param, PR #4277 July 2025) NEVER assembles the user's preset —
+// createRawPrompt wraps only the given prompt+systemPrompt (script.js:3865-3919)
+// and generateRawData builds the request from that alone (script.js:3941-3980).
+// Muting preset toggles on modern ST therefore buys the summarizer NOTHING, and
+// the mute window was pure risk: any main Generate landing inside it built its
+// prompt with every toggle disabled (no character card, no scenario, no system
+// prompt), and a tab close left the preset scrambled. Legacy positional
+// generateRaw DID route quiet generation through the full preset assembly, so
+// the mute is kept — but only there, serialized through a single hold.
+let _activeToggleHold = null;
+
+function _defaultModeNeedsToggleMute() {
+    try {
+        const { generateRaw } = SillyTavern.getContext();
+        return typeof generateRaw === 'function' && generateRaw.length > 1;
+    } catch (_) { return false; }
+}
+
+function _mutePromptToggles() {
+    if (_activeToggleHold) return;   // already held — serialized, never stacked
+    const snap = snapshotPromptToggles();
+    disableAllPromptToggles();
+    _activeToggleHold = snap.size > 0 ? snap : null;
+}
+
+function _unmutePromptToggles() {
+    const snap = _activeToggleHold;
+    _activeToggleHold = null;
+    if (snap) restorePromptToggles(snap);
+}
+
 // ─── Output Cleaning ─────────────────────────────────────────────────
 
 /**
@@ -1742,8 +1775,9 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
     log('Story txt length:', storyTxt.length, 'chars');
 
     const isDefaultMode = !s.connectionSource || s.connectionSource === 'default';
-    const snapshot = isDefaultMode ? snapshotPromptToggles() : null;
-    if (isDefaultMode) disableAllPromptToggles();
+    // Toggle mute ONLY on legacy ST (see _defaultModeNeedsToggleMute): modern
+    // generateRaw never reads preset toggles, so muting is pure downside there.
+    if (isDefaultMode && _defaultModeNeedsToggleMute()) _mutePromptToggles();
 
     const _controller = new AbortController();
     _activeAborters.add(_controller);
@@ -1884,9 +1918,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
     } finally {
         _activeAborters.delete(_controller);
         if (currentAbortController === _controller) currentAbortController = null;
-        if (isDefaultMode && snapshot) {
-            restorePromptToggles(snapshot);
-        }
+        if (isDefaultMode) _unmutePromptToggles();   // no-op when nothing was muted (modern ST)
     }
 }
 
@@ -6437,6 +6469,10 @@ function onChatChanged() {
 }
 
 function onGenerationStarted() {
+    // Belt-and-suspenders: a main generation must NEVER build its prompt while
+    // our (legacy-only) toggle mute is active. Restoring here is synchronous and
+    // idempotent — on modern ST nothing was muted and this is a no-op.
+    _unmutePromptToggles();
     // Keep the length tracker fresh — a user message is already in the chat by now,
     // and MESSAGE_RECEIVED only fires for AI messages, so this closes that gap
     // before any subsequent deletion is measured.
@@ -9474,6 +9510,9 @@ async function fetchProfilesFallback(selectElement, currentValue) {
         if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
         else eventSource.on(event_types.MESSAGE_RECEIVED, onGenerationEnded);
+        // Tab close mid-call must not strand a muted preset (legacy ST only —
+        // the hold is null on modern ST, making this a no-op there).
+        if (typeof window !== 'undefined') window.addEventListener('beforeunload', _unmutePromptToggles);
         registerSlashCommands();
 
         try {

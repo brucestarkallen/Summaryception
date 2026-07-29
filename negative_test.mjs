@@ -160,6 +160,11 @@ const MUTATIONS = [
         '            if (_chatEpoch !== startEpoch) {\n                trace(\'  chat changed mid-catch-up — abandoning WITHOUT touching the new chat\');',
         '            if (false) {\n                trace(\'  chat changed mid-catch-up — abandoning WITHOUT touching the new chat\');',
         'runCatchup checks the epoch EVERY iteration'],
+
+    ['toggle mute unconditional again (modern main Generate gutted)', 'index.js',
+        '    if (isDefaultMode && _defaultModeNeedsToggleMute()) _mutePromptToggles();',
+        '    if (isDefaultMode) _mutePromptToggles();',
+        'the toggle mute is gated on LEGACY generateRaw — modern ST is never muted'],
 ];
 
 function scratchCopy() {

@@ -1337,6 +1337,15 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     ok(!/isSummarizing = (true|false);/.test(noHelpers), 'no direct isSummarizing assignment survives outside the helpers (loop-owned release)');
     ok((SRC_FULL.match(/a chat switch mid-call must not write into a detached store/g) || []).length >= 2, 'snippet and detail redos are epoch-guarded');
     ok((SRC_FULL.match(/Chat changed — export aborted\./g) || []).length >= 2, 'both export passes are epoch-guarded');
+
+    // The preset-toggle mute is legacy-only (verified against ST release:
+    // modern generateRaw never assembles the preset). Muting unconditionally
+    // was pure downside — it gutted any main Generate landing in the window.
+    ok(SRC_FULL.includes('if (isDefaultMode && _defaultModeNeedsToggleMute()) _mutePromptToggles();'), 'the toggle mute is gated on LEGACY generateRaw — modern ST is never muted');
+    ok(/generateRaw\.length > 1/.test(SRC_FULL), 'legacy detection uses the generateRaw signature');
+    ok(/function onGenerationStarted\(\) \{\s*\n\s*\/\/ Belt-and-suspenders[\s\S]{0,300}?_unmutePromptToggles\(\);/.test(SRC_FULL), 'GENERATION_STARTED synchronously restores a muted preset');
+    ok(SRC_FULL.includes("window.addEventListener('beforeunload', _unmutePromptToggles)"), 'a tab close cannot strand a muted preset');
+    ok(/if \(isDefaultMode\) _unmutePromptToggles\(\);/.test(SRC_FULL), 'callSummarizer releases the hold in finally');
 }
 
 // ─── the freshness indicator must agree with the reader ───
