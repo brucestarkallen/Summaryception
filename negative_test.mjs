@@ -25,6 +25,37 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.105.0: checkpoint labels validated against their turn ──
+    ['checkpoint labels are trusted blindly again (restores one turn high)', 'index.js',
+        "                        const _true = _relocateCheckpoint(_chatNow, v.atTurn, v.tsig);\n                        if (_true < 0) continue;",
+        "                        const _true = v.atTurn;\n                        if (_true < 0) continue;",
+        'listLedgerCheckpoints corrects the label for every consumer'],
+
+    ['the fingerprint is no longer saved (nothing to check against)', 'index.js',
+        "era: (store.ledgerEra | 0), tsig: _tsig });",
+        "era: (store.ledgerEra | 0) });",
+        'saveLedgerCheckpoint stamps the turn fingerprint'],
+
+    ['a snapshot whose turn is gone is restored anyway', 'index.js',
+        "                        if (_true < 0) continue;   // its turn is gone",
+        "                        if (false) continue;   // its turn is gone",
+        'and drops a snapshot whose turn no longer exists'],
+
+    ['the drift search guesses when two turns match', 'index.js',
+        "            if (hit !== -1) return -1;              // two turns match — ambiguous, refuse",
+        "            if (hit !== -1) return hit;",
+        'two candidates below a missed label is ambiguous — refused rather than guessed'],
+
+    ['the drift search is unbounded', 'index.js',
+        "    const floor = Math.max(0, atTurn - _CKPT_DRIFT_WINDOW);",
+        "    const floor = 0;",
+        'a label beyond the window is refused rather than scanned forever'],
+
+    ['the fingerprint ignores the speaker', 'index.js',
+        "    const raw = String(m.name == null ? '' : m.name) + '|' + String(m.is_user ? 'u' : 'a') + '|' + String(m.mes == null ? '' : m.mes).slice(0, 160);",
+        "    const raw = String(m.mes == null ? '' : m.mes).slice(0, 160);",
+        'the same words from a different speaker fingerprint differently'],
+
     // ── v5.104.0: fossil checkpoint cursor (found by chaos_test.js) ──
     ['the fossil cursor blocks checkpointing again', 'index.js',
         "    if (last > idx) last = -999;   // fossil from a rewind — re-arm rather than block forever",

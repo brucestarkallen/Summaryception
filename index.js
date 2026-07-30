@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.104.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.105.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -3697,6 +3697,49 @@ function _pruneCheckpoints(sig, keep, sparseEvery) {
     } catch (_) {}
 }
 
+// Pure: a short fingerprint of the message AT a turn. A checkpoint's label is an
+// INDEX, and indices are not stable: deleting message D shifts every message above
+// it down by one, so a snapshot labelled turn 40 taken before the deletion actually
+// describes the state at turn 39 afterwards. Nothing re-keyed those labels — the
+// keys live in localStorage and _chatSig hashes only the first message and the first
+// assistant message, so a mid-chat deletion changes neither the key nor the label.
+// A restore then set ledgerLiveIdx one turn high and the replay skipped that turn's
+// content. Storing what the turn CONTAINED makes the label checkable.
+function _turnSig(chat, idx) {
+    if (!Array.isArray(chat) || typeof idx !== 'number' || idx < 0 || idx >= chat.length) return null;
+    const m = chat[idx];
+    if (!m) return null;
+    const raw = String(m.name == null ? '' : m.name) + '|' + String(m.is_user ? 'u' : 'a') + '|' + String(m.mes == null ? '' : m.mes).slice(0, 160);
+    let h = 5381;
+    for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) & 0xFFFFFFFF;
+    return (h >>> 0).toString(36) + '_' + raw.length;
+}
+
+// How far back a label may have drifted before we stop looking. Drift is only ever
+// DOWNWARD — a deletion moves a message to a lower index and nothing moves it up —
+// so the search is one-directional, and CKPT_KEEP dense snapshots plus sparse
+// anchors mean a real label is never far from its turn.
+const _CKPT_DRIFT_WINDOW = 96;
+
+// Pure: the turn a checkpoint ACTUALLY describes on the chat as it stands now.
+// Returns the corrected index, or -1 if the turn it was taken at no longer exists.
+// A checkpoint saved before v5.105.0 carries no fingerprint; its label is trusted
+// exactly as it was before, so nothing regresses for existing snapshots.
+function _relocateCheckpoint(chat, atTurn, tsig) {
+    if (typeof atTurn !== 'number' || atTurn < 0) return -1;
+    if (!tsig) return atTurn;                       // legacy snapshot — trust the label
+    if (_turnSig(chat, atTurn) === tsig) return atTurn;   // the common case: nothing moved
+    const floor = Math.max(0, atTurn - _CKPT_DRIFT_WINDOW);
+    let hit = -1;
+    for (let i = atTurn - 1; i >= floor; i--) {
+        if (_turnSig(chat, i) === tsig) {
+            if (hit !== -1) return -1;              // two turns match — ambiguous, refuse
+            hit = i;
+        }
+    }
+    return hit;   // -1 when the turn is gone: the snapshot describes a timeline this chat no longer has
+}
+
 function saveLedgerCheckpoint(atTurn, ledgerOverride) {
     try {
         if (typeof localStorage === 'undefined' || typeof atTurn !== 'number' || atTurn < 0) return;
@@ -3705,7 +3748,11 @@ function saveLedgerCheckpoint(atTurn, ledgerOverride) {
         const store = getChatStore();
         const src = (ledgerOverride && typeof ledgerOverride === 'object') ? ledgerOverride : store.ledger;
         if (!src || typeof src !== 'object' || Object.keys(src).length === 0) return;
-        const payload = JSON.stringify({ atTurn, ledger: src, savedAt: Date.now(), era: (store.ledgerEra | 0) });
+        // tsig: what the turn this snapshot is labelled with actually CONTAINED, so a
+        // later deletion cannot leave the label pointing at someone else's turn.
+        let _tsig = null;
+        try { _tsig = _turnSig((SillyTavern.getContext() || {}).chat, atTurn); } catch (_) {}
+        const payload = JSON.stringify({ atTurn, ledger: src, savedAt: Date.now(), era: (store.ledgerEra | 0), tsig: _tsig });
         const key = _CKPT_PREFIX + sig + '::' + atTurn;
         try { localStorage.setItem(key, payload); }
         catch (_) { _pruneCheckpoints(sig, Math.max(2, Math.floor(CKPT_KEEP / 2)), 0); try { localStorage.setItem(key, payload); } catch (_) {} }
@@ -3731,6 +3778,8 @@ function listLedgerCheckpoints() {
         // are edited or head messages deleted, which used to orphan EVERY checkpoint
         // at once. Metadata survives those edits, so older-sig snapshots stay usable.
         const store = getChatStore();
+        let _chatNow = null;
+        try { _chatNow = (SillyTavern.getContext() || {}).chat; } catch (_) {}
         const sigs = new Set([sig]);
         if (Array.isArray(store.ckptSigs)) for (const s2 of store.ckptSigs) if (s2) sigs.add(s2);
         const seen = new Set();   // dedupe by atTurn — the newest sig wins
@@ -3746,7 +3795,20 @@ function listLedgerCheckpoints() {
                     // ledger the user explicitly rejected) while branches — whose copied
                     // store carries the era they branched at — keep seeing theirs.
                     if (v && ((v.era | 0) !== (store.ledgerEra | 0))) continue;
-                    if (v && typeof v.atTurn === 'number' && v.ledger && !seen.has(v.atTurn)) { seen.add(v.atTurn); out.push(v); }
+                    if (v && typeof v.atTurn === 'number' && v.ledger && !seen.has(v.atTurn)) {
+                        // CORRECT ON READ, not on write. Re-keying every snapshot on every
+                        // deletion would mean CKPT_KEEP full-ledger writes per deleted
+                        // message — hundreds of KB on a phone, for a label that is only
+                        // ever consulted when the journal cannot cover a rewind. Checking
+                        // it here costs one hash of one message in the common case, and a
+                        // bounded downward scan only when it has actually moved.
+                        const _true = _relocateCheckpoint(_chatNow, v.atTurn, v.tsig);
+                        if (_true < 0) continue;   // its turn is gone — this snapshot belongs to a timeline this chat no longer has
+                        if (_true !== v.atTurn) v.atTurn = _true;
+                        if (seen.has(v.atTurn)) continue;
+                        seen.add(v.atTurn);
+                        out.push(v);
+                    }
                 } catch (_) {}
             }
         }
@@ -6462,16 +6524,11 @@ function updateInjection(force = false) {
 // was contradicted by the function's own body for several releases. These run only
 // on deletion, do no model calls, and are O(snippets).
 //
-// KNOWN BOUND — saved checkpoints are NOT re-keyed here. They live in localStorage
-// under 'sc_ledgerckpt::<sig>::<turn>', and _chatSig hashes only the first message
-// and first assistant message, so a mid-chat deletion leaves every stored label one
-// turn high. It costs at most one turn of un-replayed ledger, and ONLY on chats
-// whose journal cannot cover the rewind (a covered journal folds and never consults
-// a checkpoint). Re-keying dozens of localStorage entries on every deletion is a
-// worse trade on mobile than the drift it removes. The real fix is to stamp each
-// checkpoint with a short hash of the message at its turn and validate that on
-// restore — declining or re-locating the snapshot when it does not match — which
-// needs a new stored field plus a migration for existing checkpoints.
+// Saved checkpoints are not re-keyed here either — and since v5.105.0 they do not
+// need to be: each one stores a fingerprint of the turn it was taken at, and
+// listLedgerCheckpoints resolves the true index on read, dropping any snapshot
+// whose turn this timeline no longer has. Correct-on-read costs one hash per
+// lookup; re-keying would cost CKPT_KEEP full-ledger writes per deleted message.
 
 // Precise single-deletion shift at index D. An index x maps: x>D -> x-1; x==D
 // was the deleted message. A snippet whose entire source was the deleted

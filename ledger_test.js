@@ -34,7 +34,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'truncateLedgerToTurn', 'clampStoreToLength',
     'RETRY_CONFIG', 'isRetryableError', '_tpThreads',
     'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow',
-    '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn', '_ckptDue'];
+    '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn', '_ckptDue',
+    '_turnSig', '_CKPT_DRIFT_WINDOW', '_relocateCheckpoint'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -84,6 +85,7 @@ return {
   truncateLedgerToTurn, clampStoreToLength, isRetryableError, RETRY_CONFIG, ConnectionError, _tpThreads,
   recomputeSummarizedUpTo, _snipSig, _resolveSnipRow,
   _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn, _ckptDue,
+  _turnSig, _relocateCheckpoint, _CKPT_DRIFT_WINDOW,
 };
 `;
 const L = new Function(sandbox)();
@@ -3574,6 +3576,70 @@ section('MC name — resolved automatically, override only to correct');
     // Structural: the reader must go through it.
     ok(/if \(!_ckptDue\(st\._ckptLast, idx, CKPT_EVERY\)\) return;/.test(SRC_FULL),
         'maybeCheckpointLedger asks _ckptDue rather than comparing raw');
+}
+
+
+// ─── v5.105.0: a checkpoint's label is checked against the turn it claims ─────
+// A checkpoint's label is an INDEX, and indices are not stable: deleting message D
+// shifts everything above it down, so a snapshot labelled turn 40 describes turn 39
+// afterwards. Nothing re-keyed those labels — they live in localStorage and
+// _chatSig hashes only the first message and first assistant message, so a mid-chat
+// deletion changes neither key nor label. A restore then set ledgerLiveIdx one turn
+// HIGH and the replay skipped that turn's content entirely. This shipped as a
+// documented "known limitation" in v5.100.0–v5.104.0; it is a defect, and it is closed.
+{
+    section('checkpoint labels — validated against the turn, not trusted');
+    const mk = (name, mes, isUser) => ({ name, mes, is_user: !!isUser });
+    const chat = [];
+    for (let i = 0; i < 12; i++) chat.push(mk(i % 2 ? 'Narrator' : 'Player', 'message number ' + i, i % 2 === 0));
+
+    ok(L._turnSig(chat, 5) === L._turnSig(chat, 5), 'a turn fingerprint is stable');
+    ok(L._turnSig(chat, 5) !== L._turnSig(chat, 6), 'and distinguishes different turns');
+    ok(L._turnSig(chat, 99) === null && L._turnSig(chat, -1) === null && L._turnSig(null, 0) === null,
+        'an out-of-range or absent turn has no fingerprint');
+    // Speaker matters, not just text: an identical line from the other side is a different turn.
+    const twin = [mk('Player', 'same words', true), mk('Narrator', 'same words', false)];
+    ok(L._turnSig(twin, 0) !== L._turnSig(twin, 1), 'the same words from a different speaker fingerprint differently');
+
+    // Nothing moved.
+    const sig8 = L._turnSig(chat, 8);
+    ok(L._relocateCheckpoint(chat, 8, sig8) === 8, 'an undisturbed label is returned unchanged');
+
+    // THE BUG: one message deleted below the checkpoint.
+    const after = chat.slice(); after.splice(3, 1);
+    ok(L._relocateCheckpoint(after, 8, sig8) === 7,
+        'KILL SHOT: after a deletion below it, the label resolves to the turn it actually describes');
+    // Several deletions accumulate.
+    const after3 = chat.slice(); after3.splice(1, 3);
+    ok(L._relocateCheckpoint(after3, 8, sig8) === 5, 'and it tracks several deletions, not just one');
+
+    // Its turn is gone entirely -> refuse, so a WRONG label can never be restored.
+    const gone = chat.slice(); gone.splice(8, 1);
+    ok(L._relocateCheckpoint(gone, 8, sig8) === -1, 'a snapshot whose own turn was deleted is refused, not guessed');
+    ok(L._relocateCheckpoint(chat.slice(0, 4), 8, sig8) === -1, 'and so is one past the end of a trimmed chat');
+
+    // Ambiguity -> refuse. Two identical turns cannot decide which is meant.
+    const dup = [mk('Narrator', 'identical'), mk('Player', 'x', true), mk('Narrator', 'identical')];
+    ok(L._relocateCheckpoint(dup, 2, L._turnSig(dup, 2)) === 2, 'an exact hit at the label wins even with a duplicate below');
+    const dupShift = [mk('Narrator', 'identical'), mk('Narrator', 'identical'), mk('Player', 'z', true)];
+    ok(L._relocateCheckpoint(dupShift, 2, L._turnSig(dupShift, 0)) === -1,
+        'two candidates below a missed label is ambiguous — refused rather than guessed');
+
+    // Legacy snapshots carry no fingerprint and must behave exactly as before.
+    ok(L._relocateCheckpoint(chat, 8, null) === 8 && L._relocateCheckpoint(chat, 8, undefined) === 8,
+        'a pre-v5.105.0 snapshot keeps its label — no regression for existing checkpoints');
+    ok(L._relocateCheckpoint(chat, -1, sig8) === -1, 'a nonsense label is refused');
+
+    // Bounded: the scan never walks the whole chat.
+    ok(typeof L._CKPT_DRIFT_WINDOW === 'number' && L._CKPT_DRIFT_WINDOW > 0, 'the drift search is bounded');
+    const far = chat.slice(); far.splice(0, 1);
+    ok(L._relocateCheckpoint(far, 8 + L._CKPT_DRIFT_WINDOW + 5, sig8) === -1, 'a label beyond the window is refused rather than scanned forever');
+
+    // Wiring: saved with a fingerprint, corrected at the ONE door every consumer uses.
+    ok(/tsig: _tsig/.test(SRC_FULL), 'saveLedgerCheckpoint stamps the turn fingerprint');
+    ok(/const _true = _relocateCheckpoint\(_chatNow, v\.atTurn, v\.tsig\);/.test(SRC_FULL),
+        'listLedgerCheckpoints corrects the label for every consumer');
+    ok(/if \(_true < 0\) continue;/.test(SRC_FULL), 'and drops a snapshot whose turn no longer exists');
 }
 
 console.log('\n────────────────────────────────────────');
