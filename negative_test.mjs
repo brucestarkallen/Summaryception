@@ -25,6 +25,22 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.104.0: fossil checkpoint cursor (found by chaos_test.js) ──
+    ['the fossil cursor blocks checkpointing again', 'index.js',
+        "    if (last > idx) last = -999;   // fossil from a rewind — re-arm rather than block forever",
+        "",
+        'KILL SHOT: a cursor ABOVE the pointer is a fossil from a rewind — it re-arms instead of blocking forever'],
+
+    ['the reader compares the raw cursor again', 'index.js',
+        "        if (!_ckptDue(st._ckptLast, idx, CKPT_EVERY)) return;   // throttle by cadence (and skip same-turn repeats)",
+        "        const last = (typeof st._ckptLast === 'number') ? st._ckptLast : -999;\n        if (idx < last + CKPT_EVERY) return;",
+        'maybeCheckpointLedger asks _ckptDue rather than comparing raw'],
+
+    ['a zero cadence makes every turn a checkpoint', 'index.js',
+        "    const step = Math.max(1, (typeof every === 'number' && isFinite(every)) ? (every | 0) : 1);",
+        "    const step = (typeof every === 'number' && isFinite(every)) ? (every | 0) : 1;",
+        'a zero cadence falls back to 1 — the same turn is never re-checkpointed'],
+
     // ── v5.103.0: coverage-gated ghosting + autonomous auditor ──
     ['ghosting stops requiring coverage (deleted snippet reopens the memory hole)', 'index.js',
         "        if (!_turnHasCoverage(store, i)) continue;\n        msg.extra.sc_ghosted = true;",

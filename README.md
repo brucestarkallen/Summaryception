@@ -39,7 +39,15 @@ A memory system for long‑form roleplay in [SillyTavern](https://github.com/Sil
                          #    jsdom/jquery are absent: npm install --no-save jsdom jquery
   npx eslint@9 --config eslint.config.mjs index.js connectionutil.js   # 5. STATIC: no-undef / no-redeclare
                          #    across every code path, including ones no test executes.
-  node negative_test.mjs # 6. PROOF OF THE GATE: puts each fixed bug BACK in a scratch copy and
+  node chaos_test.js     # 6. CHAOS / INVARIANTS: randomised destructive sequences —
+                         #    settings punched to absurd values, snippets deleted from
+                         #    anywhere, messages deleted at any index, chats truncated,
+                         #    ledgers rewound — with the invariants re-checked after EVERY
+                         #    operation. Deterministic: a failure prints CHAOS_SEED=<n> to
+                         #    reproduce it exactly. Tune with CHAOS_RUNS / CHAOS_STEPS.
+                         #    This is what found the fossil-checkpoint-cursor bug in v5.104.0
+                         #    that six passes of reading the code did not.
+  node negative_test.mjs # 7. PROOF OF THE GATE: puts each fixed bug BACK in a scratch copy and
                          #    requires the matching assertion to fail. A guard that has never
                          #    failed is unproven. Slow (one full ledger_test.js run per mutation)
                          #    — run it whenever you add or change a guard, not on every trivial push.
@@ -177,6 +185,11 @@ Alexia Valois — Nature: Analytical, proud, guarded; calls Jovan "Ardent" until
   - **An auto‑applied correction is sanity‑checked.** A correction targets one claim; it is not a re‑summarization. Nothing validated the fixer's output, and with autoFix on there is no human in the loop — a gist, a refusal, or a truncated fragment silently replaced a full scene summary with no undo. `_fixVerdict` refuses a rewrite that keeps less than `continuityFixMinRatio` (default 0.5) of the snippet; the snippet is untouched and the flag stays open, because an unapplied correction is recoverable and a destroyed snippet is not. Short snippets are not judged by ratio; empty output is refused at any size.
   - **Autonomy is now the default:** `continuityEnabled`, `continuityNudge` and `continuityAutoFix` all ship **on**. Cost: one background LLM pass per snippet created, plus one per snippet‑level fix applied. Turn `continuityEnabled` off to go back to summaries only. The ledger auditor was already armed (`ledgerAuditEnabled`, every 12 turns, snapped relationships first, then on‑screen cast, then oldest‑audited round‑robin).
   - The panel now shows each flag's delivery state (`delivered n/12`, or *retired from injection*). An autonomous system that quietly stops acting on a finding is worse than one that never acted — the user cannot tell working from broken — so it says which it is.
+- **v5.104.0 — `chaos_test.js`, and the bug it immediately found.** The other gates prove the paths we thought of. This one hammers the real store‑mutating functions with randomised, deliberately stupid input — every numeric setting punched to `0 / -1 / NaN / Infinity / null / '' / [] / {}`, snippets deleted from any layer at any index, messages deleted at any index, chats truncated to any length, ledgers rewound/truncated/wiped/compacted in any order — and re‑checks every invariant after **each** operation. 300,000 operations across five seeds currently pass.
+  - **What it found on its first run:** `_ckptLast` and `ledgerLiveIdx` are a coupled pair and only some writers know it. **Five** separate sites move the pointer DOWN (both rewind clears, the fold path, the pre‑first‑reply install, the transplant import) and leave the cursor where it was. A cursor above the pointer describes a turn the chat no longer has — and with `CKPT_EVERY` at 1, `idx < last + CKPT_EVERY` is not a delay but a permanent **stop**. Checkpoints are the fallback for every rewind the journal cannot cover, so this silently degraded recovery on any chat that had ever been rewound. Six passes of reading the code missed it; a random nine‑op sequence found it in under a second.
+  - **Fixed in ONE place, deliberately.** Patching five writers leaves a sixth to be missed by whoever adds the next rewind path. The cursor has exactly one reader, so the rule lives there: `_ckptDue` treats a cursor above the pointer as a fossil and re‑arms instead of blocking. Every writer, present and future, is covered by construction.
+  - The invariants it enforces: `summarizedUpTo` / `ledgerLiveIdx` stay finite and inside the chat; no fossil cursor can block checkpointing; no journal note (live or staging) sits past the chat end; no snippet range is inverted, negative, or past the end; no continuity flag or receipt points outside the chat; the page never loses a character `fold(notes)` still has; and **nothing is hidden that no surviving snippet narrates**.
+  - Two harness defects were corrected rather than blamed on the code: an op that journalled without touching the page (production never does — `appendLedgerNotes` has one call site, inside `mergeLedgerDeltas`, after the page is written), and an invariant that asked `_ckptDue` about `pointer + 1` where the real reader asks about the pointer itself.
 - The file‑header comment version is intentionally stale; the real version lives in `manifest.json` **and** the `SC_VERSION` constant (top of `index.js`, printed at `APP_READY`) — keep those two in sync on every release.
 
 ### Files

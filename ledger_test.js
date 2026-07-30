@@ -34,7 +34,7 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'truncateLedgerToTurn', 'clampStoreToLength',
     'RETRY_CONFIG', 'isRetryableError', '_tpThreads',
     'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow',
-    '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn'];
+    '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn', '_ckptDue'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -83,7 +83,7 @@ return {
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
   truncateLedgerToTurn, clampStoreToLength, isRetryableError, RETRY_CONFIG, ConnectionError, _tpThreads,
   recomputeSummarizedUpTo, _snipSig, _resolveSnipRow,
-  _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn,
+  _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn, _ckptDue,
 };
 `;
 const L = new Function(sandbox)();
@@ -3537,6 +3537,43 @@ section('MC name — resolved automatically, override only to correct');
     ok(/continuityNudgeDeliveries: 12/.test(dflt), 'deliveries are bounded so new findings always get a slot');
     ok(/continuityFixMinRatio: 0\.5/.test(dflt), 'and an auto-rewrite must keep at least half the snippet');
     ok(/ledgerAuditEnabled: true/.test(dflt) && /ledgerAuditEveryTurns: 12/.test(dflt), 'the ledger auditor was already armed');
+}
+
+
+// ─── v5.104.0: a fossil checkpoint cursor cannot block checkpointing ──────────
+// _ckptLast and ledgerLiveIdx are a coupled pair, and only some writers know it:
+// FIVE sites move the pointer DOWN (both rewind clears, the fold path, the
+// pre-first-reply install, the transplant import) and leave the cursor where it was.
+// A cursor above the pointer describes a turn the chat no longer has, and with
+// CKPT_EVERY at 1 the old `idx < last + CKPT_EVERY` was not a delay but a permanent
+// STOP — checkpoints are the fallback for every rewind the journal cannot cover, so
+// losing them silently degrades recovery. Patching five writers leaves a sixth to be
+// missed; the cursor has exactly ONE reader, so the rule lives there.
+// Found by chaos_test.js, not by reading: seed 3006130615, run 0, nine random ops.
+{
+    section('checkpoint cadence — the cursor is a throttle, never a wall');
+    ok(L._ckptDue(-999, 0, 1) === true, 'a fresh chat checkpoints its first ledgered turn');
+    ok(L._ckptDue(5, 5, 1) === false, 'the same turn is not checkpointed twice');
+    ok(L._ckptDue(5, 6, 1) === true, 'the next turn is due at cadence 1');
+    ok(L._ckptDue(5, 9, 5) === false && L._ckptDue(5, 10, 5) === true, 'a wider cadence is honoured exactly');
+    // THE BUG: a rewind moved the pointer to 24 and left the cursor at 25.
+    ok(L._ckptDue(25, 24, 1) === true,
+        'KILL SHOT: a cursor ABOVE the pointer is a fossil from a rewind — it re-arms instead of blocking forever');
+    ok(L._ckptDue(500, 3, 1) === true, 'and a wildly stale cursor after a deep trim re-arms too');
+    // Junk must not be read as a throttle either.
+    ok(L._ckptDue(undefined, 0, 1) === true && L._ckptDue(null, 0, 1) === true && L._ckptDue(NaN, 0, 1) === true,
+        'a missing or NaN cursor never blocks');
+    ok(L._ckptDue(0, -1, 1) === false && L._ckptDue(0, NaN, 1) === false, 'an invalid pointer never triggers a checkpoint');
+    // The DISCRIMINATING case: with a step of 0, `idx >= last + step` is true for the
+    // SAME turn, so every call would re-checkpoint the turn already checkpointed —
+    // an unbounded write loop into localStorage. `-999, 4, 0` passes either way and
+    // proved nothing, which the negative test correctly called decorative.
+    ok(L._ckptDue(5, 5, 0) === false, 'a zero cadence falls back to 1 — the same turn is never re-checkpointed');
+    ok(L._ckptDue(5, 5, NaN) === false && L._ckptDue(5, 5, -3) === false, 'NaN and negative cadences fall back too');
+    ok(L._ckptDue(5, 6, 0) === true, 'and the next turn is still due');
+    // Structural: the reader must go through it.
+    ok(/if \(!_ckptDue\(st\._ckptLast, idx, CKPT_EVERY\)\) return;/.test(SRC_FULL),
+        'maybeCheckpointLedger asks _ckptDue rather than comparing raw');
 }
 
 console.log('\n────────────────────────────────────────');

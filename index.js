@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.103.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.104.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -3765,6 +3765,28 @@ function _pickCheckpoint(list, targetTurn) {
     return best;
 }
 
+// Pure: is a checkpoint due at `idx`, given the cursor of the last one?
+//
+// The cursor and the pointer are a COUPLED PAIR, and only some writers know it:
+// five separate sites move ledgerLiveIdx DOWN (both rewind clears, the fold path,
+// the pre-first-reply install, the transplant import) and leave _ckptLast where it
+// was. A cursor left ABOVE the pointer describes a turn the chat no longer has, and
+// `idx < last + CKPT_EVERY` then blocks EVERY checkpoint until the chat regrows past
+// it — with CKPT_EVERY at 1 that is not a delay, it is a permanent stop. This is the
+// v5.51 failure re-entering through a new door each time a rewind path is added.
+//
+// Patching the five writers would leave a sixth to be missed. The cursor has exactly
+// ONE reader, so the rule lives here instead: a cursor above the pointer is not a
+// throttle, it is a fossil — ignore it and re-arm. Every writer, present and future,
+// is covered by construction.
+function _ckptDue(lastCursor, idx, every) {
+    if (typeof idx !== 'number' || !isFinite(idx) || idx < 0) return false;
+    const step = Math.max(1, (typeof every === 'number' && isFinite(every)) ? (every | 0) : 1);
+    let last = (typeof lastCursor === 'number' && isFinite(lastCursor)) ? lastCursor : -999;
+    if (last > idx) last = -999;   // fossil from a rewind — re-arm rather than block forever
+    return idx >= last + step;
+}
+
 function maybeCheckpointLedger(ledgerOverride) {
     try {
         const st = getChatStore();
@@ -3773,9 +3795,8 @@ function maybeCheckpointLedger(ledgerOverride) {
         // Per-chat cursor (in the chat store, not module state): a module-global
         // cursor leaked across chats — after a long chat, a shorter chat's turns
         // never exceeded the stale cursor and checkpointing silently stopped.
-        const last = (typeof st._ckptLast === 'number') ? st._ckptLast : -999;
-        if (idx < last + CKPT_EVERY) return;   // throttle by cadence (and skip same-turn repeats)
-        st._ckptLast = idx;
+        if (!_ckptDue(st._ckptLast, idx, CKPT_EVERY)) return;   // throttle by cadence (and skip same-turn repeats)
+        st._ckptLast = idx;   // writing it here also heals a fossil cursor permanently
         saveLedgerCheckpoint(idx, ledgerOverride);
     } catch (_) {}
 }
