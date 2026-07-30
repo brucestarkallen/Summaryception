@@ -31,7 +31,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
-    'truncateLedgerToTurn', 'clampStoreToLength'];
+    'truncateLedgerToTurn', 'clampStoreToLength',
+    'RETRY_CONFIG', 'isRetryableError', '_tpThreads'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -43,6 +44,9 @@ let _rosterTick = 0;
 function getSettings(){ return __settings; }
 function getChatStore(){ return __store; }
 function log(){}
+class ConnectionError extends Error {
+  constructor(message, { retryable = false, status = null } = {}) { super(message); this.name = 'ConnectionError'; this.retryable = retryable; this.status = status; }
+}
 const document = { createElement(){ let _v = ''; return { set textContent(x){ _v = String(x); }, get innerHTML(){ return _v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); } }; } };
 function toastr_noop(){}
 let __ctxExtra = {};
@@ -75,7 +79,7 @@ return {
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
-  truncateLedgerToTurn, clampStoreToLength,
+  truncateLedgerToTurn, clampStoreToLength, isRetryableError, RETRY_CONFIG, ConnectionError, _tpThreads,
 };
 `;
 const L = new Function(sandbox)();
@@ -3187,6 +3191,134 @@ section('MC name — resolved automatically, override only to correct');
     const gmu = fnBody('ghostMessagesUpTo');
     ok(gmu.indexOf('_chatEpoch !== _ghostEpoch') < gmu.indexOf('executeSlashCommandsWithOptions'),
         'ghostMessagesUpTo checks the epoch inside the /hide loop, before each write');
+}
+
+
+// ─── v5.99.0: errors WE author carry an explicit retryable flag ───────────────
+// isRetryableError falls back to substring-matching the message, and its list
+// contains 'timeout'. The 120s ceiling this extension imposes on itself rejected
+// with 'Request timed out after 120s' — 'timed out', not 'timeout' — so the ONE
+// timeout the extension generates was the one it classified as fatal: zero retries,
+// batch dead, while the toast claimed all retries were exhausted. A 120s ceiling is
+// routine for a slow local model on a long promotion merge.
+{
+    section('retry classification — the self-imposed timeout is retryable');
+    const own = new L.ConnectionError('Request timed out after 120s', { retryable: true });
+    ok(L.isRetryableError(own) === true, 'KILL SHOT: the extension\u2019s own 120s timeout retries');
+    ok(own.name === 'ConnectionError' && own.retryable === true, 'it carries the flag rather than depending on its own wording');
+    // The flag must WIN over the substring table, in both directions.
+    ok(L.isRetryableError(new L.ConnectionError('deleted profile', { retryable: false })) === false,
+        'and an explicitly non-retryable ConnectionError is still never retried');
+    // Errors we RECEIVE still go through the substring table — unchanged.
+    ok(L.isRetryableError(new Error('Upstream timeout')) === true, 'a provider error mentioning a timeout still retries');
+    ok(L.isRetryableError(Object.assign(new Error('x'), { status: 429 })) === true, 'a 429 still retries');
+    ok(L.isRetryableError(Object.assign(new Error('x'), { name: 'AbortError' })) === false, 'an abort is never retried');
+    // Structural: the timeout rejection must not go back to a bare Error.
+    ok(/reject\(new ConnectionError\('Request timed out after 120s', \{ retryable: true \}\)\)/.test(SRC_FULL),
+        'the timeout rejection is a flagged ConnectionError, not a bare Error');
+}
+
+// ─── v5.99.0: eviction order is by KIND first, because `at` has two units ─────
+// A checkpoint's `at` is a turn number; a backup's is epoch milliseconds. Sorting
+// them together never compared age — every turn number sorts below every timestamp.
+{
+    section('storage eviction — ranked by kind, not by two incompatible units');
+    const mk = (key, at, rank, group, bytes) => ({ key, at, rank, group, bytes, tiered: rank === 0 });
+    // A backup from 1970 (at=1) against a checkpoint at turn 900. Raw `at` would
+    // evict the backup first; rank must still send the checkpoint first.
+    const entries = [
+        mk('sc_ledgerckpt::A::900', 900, 0, 'sc_ledgerckpt::A', 50000),
+        mk('summaryception_bak::i:old', 1, 1, 'summaryception_bak', 50000),
+    ];
+    const ev = L._selectStorageEvictions(entries, 60000, 0, 0);
+    ok(ev.length === 1, 'exactly one entry is evicted to get under budget');
+    ok(ev[0].indexOf('sc_ledgerckpt') === 0,
+        'KILL SHOT: the re-derivable checkpoint goes first even though its `at` is numerically larger');
+    // Within a kind the unit IS consistent, so oldest-first must still hold.
+    const sameKind = [
+        mk('sc_ledgerckpt::A::30', 30, 0, 'sc_ledgerckpt::A', 50000),
+        mk('sc_ledgerckpt::A::10', 10, 0, 'sc_ledgerckpt::A', 50000),
+    ];
+    const ev2 = L._selectStorageEvictions(sameKind, 60000, 0, 0);
+    ok(ev2.length === 1 && ev2[0].endsWith('::10'), 'within one kind, the oldest still goes first');
+    // An unranked entry must never be evicted ahead of something known re-derivable.
+    const mixed = [
+        { key: 'unknown::x', at: 1, bytes: 50000, group: 'u' },
+        mk('sc_ledgerckpt::A::5', 5, 0, 'sc_ledgerckpt::A', 50000),
+    ];
+    const ev3 = L._selectStorageEvictions(mixed, 60000, 0, 0);
+    ok(ev3.length === 1 && ev3[0].indexOf('sc_ledgerckpt') === 0, 'an unranked entry sorts last, not first');
+    // The producer must actually stamp the rank, or the comparator is inert.
+    ok(/rank: isCkpt \? 0 : 1/.test(SRC_FULL), 'gcLocalStorageBudget stamps the rank it sorts by');
+}
+
+// ─── v5.99.0: the checkpoint cursor follows a deletion, like the pointer it is
+// compared against (maybeCheckpointLedger: idx < _ckptLast + CKPT_EVERY, CKPT_EVERY 1)
+{
+    section('checkpoint cursor — never left above the pointer it gates on');
+    const store = { summarizedUpTo: 20, ledgerLiveIdx: 20, _ckptLast: 20, layers: [], ghostedIndices: [] };
+    L.__setStore(store);
+    L.reindexAfterDeletion(store, 5);
+    ok(store.ledgerLiveIdx === 19, 'the live pointer follows the deletion');
+    ok(store._ckptLast === 19, 'and so does the checkpoint cursor — no free blackout turn per deletion');
+    ok(store._ckptLast <= store.ledgerLiveIdx, 'the cursor is never left above the pointer');
+    // A cursor BELOW the deletion describes a turn that did not move.
+    const s2 = { summarizedUpTo: 20, ledgerLiveIdx: 20, _ckptLast: 2, layers: [], ghostedIndices: [] };
+    L.__setStore(s2);
+    L.reindexAfterDeletion(s2, 5);
+    ok(s2._ckptLast === 2, 'a cursor before the deletion point does not move');
+}
+
+
+// ─── v5.99.0: threads survive a transplant ────────────────────────────────────
+// threads is an ARRAY everywhere. The export wrote String(e.threads) — a comma-join
+// of a field whose members routinely contain commas — and the import copied the
+// joined STRING straight into entry.threads, where every consumer gates on
+// Array.isArray. The flagship field arrived in the new chat as dead text that no
+// fold, no scribe and no injection ever read: silently emptied by the one feature
+// built to carry it.
+{
+    section('transplant — the one non-string field round-trips');
+    const store = {
+        notepad: '', layers: [[]], pins: [], continuityFlags: [],
+        ledger: { 'Claire Argent': {
+            core: 'guarded, dry', state: 'waiting by the arch', arc: 'warming, slowly',
+            threads: ['owes Jovan an answer about the letter',
+                      'has not admitted she waited, and she waited a long time'],
+            _t: 12, updatedAt: 1 } },
+    };
+    L.__setStore(store);
+    const doc = L.buildTransplantExport(store, {});
+    const back = L.storeFieldsFromTransplant(L.parseTransplant(doc), 0);
+    const e = back.ledger['Claire Argent'];
+    ok(Array.isArray(e.threads), 'KILL SHOT: threads come back as an ARRAY, not a joined string');
+    ok(e.threads.length === 2, 'both threads survive — the count is not collapsed');
+    ok(e.threads[1].indexOf('waited, and she waited') >= 0,
+        'a thread containing a COMMA is not split at it (the old encoding could not express this)');
+    ok(L.formatLedgerEntry('Claire Argent', e, 600).indexOf('Open:') >= 0,
+        'and the Open: line therefore reaches the storyteller');
+    // page == fold(notes) must hold from the first instant in the new chat.
+    const bn = (back.ledgerNotes || []).find(n => n.name === 'Claire Argent');
+    ok(bn && Array.isArray(bn.threads) && bn.threads.length === 2,
+        'the base note carries the same array — page and journal agree on arrival');
+
+    // The importer is a trust boundary: a hand-edited or AI-rewritten document
+    // must never be able to put a non-array in that slot.
+    ok(Array.isArray(L._tpThreads('- a\n- b')) && L._tpThreads('- a\n- b').length === 2, 'bulleted lines parse to two threads');
+    ok(L._tpThreads('\u2022 a\n* b').length === 2, 'bullet and asterisk markers are accepted too');
+    ok(L._tpThreads('one line, with a comma').length === 1,
+        'a legacy single-line value becomes ONE thread — never comma-split, which would invent boundaries');
+    ok(L._tpThreads(['  x  ', '', 42, null, 'y']).length === 2, 'junk members are dropped, survivors trimmed');
+    // Array.isArray FIRST: reading .length off a non-array THROWS, which crashes the
+    // harness instead of failing this assertion — and a guard that cannot be
+    // attributed to its own bug is not a guard.
+    ok(Array.isArray(L._tpThreads(undefined)) && Array.isArray(L._tpThreads(null)) && Array.isArray(L._tpThreads(7))
+        && L._tpThreads(undefined).length === 0 && L._tpThreads(null).length === 0 && L._tpThreads(7).length === 0,
+        'anything else yields an empty array, never a non-array');
+    ok(L.storeFieldsFromTransplant({ ledger: { X: { core: 'c', threads: 'solo' } } }, 0).ledger.X.threads.length === 1,
+        'a document with a raw string threads field is coerced at import');
+    // Structural: the export must not go back to String(array).
+    ok(!/THREADS: ' \+ String\(e\.threads/.test(SRC_FULL), 'the export never comma-joins the array again');
 }
 
 console.log('\n────────────────────────────────────────');

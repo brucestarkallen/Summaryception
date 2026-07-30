@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.99.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.100.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -742,7 +742,19 @@ function _selectStorageEvictions(entries, budgetBytes, protectPerGroup, sparseEv
             for (let i = 0; i < Math.min(per, list.length); i++) exempt.add(list[i].key);
         }
     }
-    const sorted = entries.slice().sort((a, b) => ((a && a.at) || 0) - ((b && b.at) || 0));
+    // TWO keys, because `at` carries different UNITS per kind: a checkpoint's `at`
+    // is a TURN NUMBER (single digits to low hundreds), a backup's is EPOCH
+    // MILLISECONDS (~1.7e12). A single-key sort on it never compared age at all —
+    // every turn number sorts below every timestamp, so "oldest first across both
+    // prefixes" was really "every checkpoint before any backup", by accident.
+    // That order is the RIGHT one, so it is now deliberate and explicit: a lost
+    // checkpoint costs a replay, a lost backup can cost the entire store. Rank
+    // decides kind; `at` then breaks ties within a kind, where the unit is
+    // consistent and oldest-first is a real comparison. (Entries without a rank
+    // sort last — never evicted ahead of something known to be re-derivable.)
+    const _rank = (e) => (e && typeof e.rank === 'number') ? e.rank : 99;
+    const sorted = entries.slice().sort((a, b) =>
+        (_rank(a) - _rank(b)) || (((a && a.at) || 0) - ((b && b.at) || 0)));
     for (const e of sorted) {
         if (total <= budgetBytes) break;
         if (!e || !e.key || exempt.has(e.key)) continue;
@@ -772,10 +784,22 @@ function gcLocalStorageBudget() {
             // branches jump backward in turns, not in wall-clock); backups keep
             // timestamp recency.
             try { const p = JSON.parse(v) || {}; at = isCkpt ? (p.atTurn || 0) : (p.savedAt || p.at || 0); } catch (_) {}
-            // group = everything up to the last '::' (i.e. prefix + chat signature),
-            // so per-group protection means per-chat protection.
+            // group = everything up to the last '::'. For a checkpoint
+            // ('sc_ledgerckpt::<sig>::<turn>') that is prefix + chat signature, so
+            // per-group protection really is per-chat. For a BACKUP
+            // ('summaryception_bak::i:<uuid>') the only '::' is the one inside the
+            // prefix, so every backup in every chat lands in ONE group and the
+            // protection is global-newest-4, not per-chat. That is acceptable and
+            // deliberate rather than merely tolerated: _pruneBackups already caps
+            // backups by recency (_BAK_MAX keys, oldest evicted first), so the GC's
+            // order here matches the policy that already governs them. Do not 'fix'
+            // this by grouping backups per key — each would become a group of one,
+            // every backup would be exempt, and an oversized store could hold the
+            // whole budget hostage and starve checkpoints entirely.
+            // rank: checkpoints (re-derivable by replay) are evicted before backups
+            // (the only recovery when chat_metadata itself is lost).
             const cut = k.lastIndexOf('::');
-            entries.push({ key: k, bytes: k.length + v.length, at, tiered: isCkpt, group: cut > 0 ? k.slice(0, cut) : k });
+            entries.push({ key: k, bytes: k.length + v.length, at, tiered: isCkpt, rank: isCkpt ? 0 : 1, group: cut > 0 ? k.slice(0, cut) : k });
         }
         const evict = _selectStorageEvictions(entries, _SC_STORAGE_BUDGET, 4, CKPT_SPARSE_EVERY);
         for (const k of evict) { try { localStorage.removeItem(k); } catch (_) {} }
@@ -1770,7 +1794,15 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
                 const _reqP = sendSummarizerRequest(s, sysPrompt, prompt, { signal });
                 _reqP.catch(() => {});   // handled via the race; this guards the late-loss case
                 const _toP = new Promise((_, reject) => {
-                    _toTimer = setTimeout(() => reject(new Error('Request timed out after 120s')), timeoutMs);
+                    // ConnectionError with an EXPLICIT flag, not a bare Error: isRetryableError
+                    // falls back to substring-matching the message, its list contains
+                    // 'timeout', and this message said 'timed out' — so the one timeout this
+                    // extension generates itself was the one timeout it classified as fatal.
+                    // The batch died on the spot after ZERO retries while the toast claimed
+                    // all retries were exhausted, and a 120s ceiling is routine for a slow
+                    // local model on a long promotion merge. Errors we author carry the flag;
+                    // string matching is for errors we receive.
+                    _toTimer = setTimeout(() => reject(new ConnectionError('Request timed out after 120s', { retryable: true })), timeoutMs);
                     signal.addEventListener('abort', () => {
                         clearTimeout(_toTimer);
                         reject(new Error('Aborted by user'));
@@ -6252,10 +6284,25 @@ function updateInjection(force = false) {
 
 // When a message is deleted, SillyTavern splices the chat array so every later
 // message's index shifts down. Our stored bookkeeping is index-based
-// (summarizedUpTo, each snippet's turnRange, ghostedIndices), so it must shift
-// too — otherwise recall / snippet-regen / backfill would later read the wrong
-// source turns. The ledger is name-keyed and carries no indices, so it is
-// untouched. These run only on deletion, do no model calls, and are O(snippets).
+// (summarizedUpTo, each snippet's turnRange, ghostedIndices, the ledger's notes
+// journal and its two turn cursors, and the continuity flags and receipts), so it
+// must shift too — otherwise recall / snippet-regen / backfill would later read the
+// wrong source turns. The ledger PAGE is name-keyed and carries no indices, but the
+// JOURNAL it folds from is turn-indexed and is handled below; the line that used to
+// stand here claiming "the ledger is untouched" predates the journal entirely and
+// was contradicted by the function's own body for several releases. These run only
+// on deletion, do no model calls, and are O(snippets).
+//
+// KNOWN BOUND — saved checkpoints are NOT re-keyed here. They live in localStorage
+// under 'sc_ledgerckpt::<sig>::<turn>', and _chatSig hashes only the first message
+// and first assistant message, so a mid-chat deletion leaves every stored label one
+// turn high. It costs at most one turn of un-replayed ledger, and ONLY on chats
+// whose journal cannot cover the rewind (a covered journal folds and never consults
+// a checkpoint). Re-keying dozens of localStorage entries on every deletion is a
+// worse trade on mobile than the drift it removes. The real fix is to stamp each
+// checkpoint with a short hash of the message at its turn and validate that on
+// restore — declining or re-locating the snapshot when it does not match — which
+// needs a new stored field plus a migration for existing checkpoints.
 
 // Precise single-deletion shift at index D. An index x maps: x>D -> x-1; x==D
 // was the deleted message. A snippet whose entire source was the deleted
@@ -6267,6 +6314,14 @@ function reindexAfterDeletion(store, D) {
     }
     if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx >= D) {
         store.ledgerLiveIdx = store.ledgerLiveIdx - 1;   // keep the live pointer aligned after a deletion
+    }
+    // The checkpoint cursor is measured against that same pointer (maybeCheckpointLedger:
+    // idx < _ckptLast + CKPT_EVERY, and CKPT_EVERY is 1). Leaving it put while the pointer
+    // moves down costs one turn of checkpointing per deletion, and deletions come in runs —
+    // ten one-at-a-time deletions bought a ten-turn checkpoint blackout, precisely when the
+    // user is editing hardest and most likely to need a restore point.
+    if (typeof store._ckptLast === 'number' && store._ckptLast >= D) {
+        store._ckptLast = store._ckptLast - 1;
     }
     // The notes journal is indexed by turn like everything else, and v5.65.0 forgot
     // to reindex it: every note sat one turn off the chat afterwards. Worse, the turn
@@ -7469,6 +7524,18 @@ let _editorCancelled = false;
 // import range-less ("unrecallable": their source turns lived in another
 // chat), pins import as free pins (their source text does not exist here),
 // and the ledger re-bases to "state as of import".
+// THE threads type boundary for the transplant document, both directions.
+// A document is external data — hand-edited, or rewritten by an auditor AI — so
+// the importer must guarantee the store's type contract no matter what arrives.
+// Lines (optionally bulleted) are the format; a legacy single-line value becomes
+// ONE thread rather than being comma-split, because splitting a field that
+// contains commas invents boundaries that were never there. Lossy for an old
+// multi-thread export, never wrong — and wrong is the worse failure here.
+function _tpThreads(v) {
+    if (Array.isArray(v)) return v.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim().replace(/\s+/g, ' '));
+    if (typeof v !== 'string') return [];
+    return v.split('\n').map(l => l.replace(/^\s*[-*\u2022]\s+/, '').trim()).filter(Boolean);
+}
 function _tpMark(kind, payload) {
     return '<!-- SC-' + kind + (payload ? ' ' + JSON.stringify(payload) : '') + ' -->';
 }
@@ -7493,7 +7560,18 @@ function buildTransplantExport(store, meta) {
         L.push('CORE: ' + String(e.core || '').trim());
         L.push('STATE: ' + String(e.state || '').trim());
         L.push('ARC: ' + String(e.arc || '').trim());
-        L.push('THREADS: ' + String(e.threads || '').trim());
+        // ONE PER LINE. threads is an ARRAY everywhere in this codebase, and this
+        // line used to write String(e.threads) — a comma-join of a field whose
+        // members routinely contain commas ("has not admitted she waited, and she
+        // waited a long time"). That is an encoding nothing can decode, and the
+        // import side did not try: it copied the joined STRING into entry.threads,
+        // where every consumer gates on Array.isArray and skipped it. The threads
+        // survived transplant as dead text no fold, no scribe and no injection ever
+        // read — the flagship field, silently emptied by the feature built to carry
+        // it. The parser already accumulates continuation lines, so a line each
+        // round-trips exactly and reads better for the auditor editing this file.
+        L.push('THREADS:');
+        for (const _t of _tpThreads(e.threads)) L.push('- ' + _t);
         L.push('<!-- /SC-LEDGER -->');
         L.push('');
     }
@@ -7627,10 +7705,18 @@ function storeFieldsFromTransplant(parsed, baseTurn) {
     for (const name of Object.keys(parsed.ledger || {})) {
         const e = parsed.ledger[name];
         const entry = { updatedAt: Date.now(), _t: b };
-        for (const k of ['core', 'state', 'arc', 'threads']) if (e[k]) entry[k] = e[k];
+        for (const k of ['core', 'state', 'arc']) if (e[k]) entry[k] = e[k];
+        // threads is the one non-string field, so it is the one that needs a
+        // conversion — copying it verbatim put a STRING in a slot every consumer
+        // reads with Array.isArray, which is indistinguishable from having no
+        // threads at all. Page and base note must agree, or page == fold(notes)
+        // breaks on the very first fold of the transplanted chat.
+        const _th = _tpThreads(e.threads);
+        if (_th.length) entry.threads = _th;
         ledger[name] = entry;
         const bn = { t: b, name, at: Date.now(), base: true };
-        for (const k of ['core', 'state', 'arc', 'threads']) if (e[k]) bn[k] = e[k];
+        for (const k of ['core', 'state', 'arc']) if (e[k]) bn[k] = e[k];
+        if (_th.length) bn.threads = _th.slice();
         notes.push(bn);
     }
     const snippets = (parsed.snippets || []).map(sn => {

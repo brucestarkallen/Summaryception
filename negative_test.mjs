@@ -21,6 +21,65 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 
 /** [label, file, currentText, bugText, assertionThatMustFail] */
 const MUTATIONS = [
+    // ── v5.99.0 round 3: transplant threads round-trip ──
+    ['the export comma-joins the threads array again', 'index.js',
+        "        L.push('THREADS:');\n        for (const _t of _tpThreads(e.threads)) L.push('- ' + _t);",
+        "        L.push('THREADS: ' + String(e.threads || '').trim());",
+        // The importer coercion still yields an ARRAY here — of ONE collapsed member.
+        // The count is what proves the export encoding, so the count is what is named.
+        'both threads survive — the count is not collapsed'],
+
+    ['the import copies threads verbatim (string lands in an array slot)', 'index.js',
+        "        const _th = _tpThreads(e.threads);\n        if (_th.length) entry.threads = _th;",
+        "        const _th = [];\n        if (e.threads) entry.threads = e.threads;",
+        'a document with a raw string threads field is coerced at import'],
+
+    ['the base note stops carrying threads (page and journal disagree on arrival)', 'index.js',
+        "        if (_th.length) bn.threads = _th.slice();",
+        "",
+        'the base note carries the same array — page and journal agree on arrival'],
+
+    ['_tpThreads comma-splits a legacy line (invents boundaries)', 'index.js',
+        "    return v.split('\\n').map(l => l.replace(/^\\s*[-*\\u2022]\\s+/, '').trim()).filter(Boolean);",
+        "    return v.split(/[\\n,]/).map(l => l.replace(/^\\s*[-*\\u2022]\\s+/, '').trim()).filter(Boolean);",
+        'a legacy single-line value becomes ONE thread — never comma-split, which would invent boundaries'],
+
+    // `return v` would make the export's for..of throw on undefined and kill the
+    // harness before any assertion runs — exit 1 with nothing named, which proves
+    // nothing about THIS guard. `return ''` is iterable, so the export survives and
+    // the type assertion is the thing that fires: the mutation is isolated to the
+    // behaviour under test.
+    ['_tpThreads can return a non-array', 'index.js',
+        "    if (typeof v !== 'string') return [];",
+        "    if (typeof v !== 'string') return '';",
+        'anything else yields an empty array, never a non-array'],
+
+    // ── v5.99.0 round 2 ──
+    ['the self-imposed timeout goes back to a bare Error (zero retries)', 'index.js',
+        "reject(new ConnectionError('Request timed out after 120s', { retryable: true }))",
+        "reject(new Error('Request timed out after 120s'))",
+        'the timeout rejection is a flagged ConnectionError, not a bare Error'],
+
+    ['eviction sorts on `at` alone again (turn numbers vs epoch millis)', 'index.js',
+        "    const sorted = entries.slice().sort((a, b) =>\n        (_rank(a) - _rank(b)) || (((a && a.at) || 0) - ((b && b.at) || 0)));",
+        "    const sorted = entries.slice().sort((a, b) => ((a && a.at) || 0) - ((b && b.at) || 0));",
+        'KILL SHOT: the re-derivable checkpoint goes first even though its `at` is numerically larger'],
+
+    ['unranked entries sort FIRST instead of last', 'index.js',
+        "    const _rank = (e) => (e && typeof e.rank === 'number') ? e.rank : 99;",
+        "    const _rank = (e) => (e && typeof e.rank === 'number') ? e.rank : -1;",
+        'an unranked entry sorts last, not first'],
+
+    ['the producer stops stamping the rank (comparator goes inert)', 'index.js',
+        "rank: isCkpt ? 0 : 1, ",
+        "",
+        'gcLocalStorageBudget stamps the rank it sorts by'],
+
+    ['the checkpoint cursor stops following deletions', 'index.js',
+        "    if (typeof store._ckptLast === 'number' && store._ckptLast >= D) {\n        store._ckptLast = store._ckptLast - 1;\n    }",
+        "",
+        'and so does the checkpoint cursor — no free blackout turn per deletion'],
+
     // ── v5.99.0: truncation hygiene + the chat-switch law ──
     ['clampStoreToLength forgets the journal (bulk trim resurrects the dead timeline)', 'index.js',
         "    truncateLedgerToTurn(store, max);",
