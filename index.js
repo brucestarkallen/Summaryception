@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.98.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.99.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1039,6 +1039,7 @@ async function ghostMessagesUpTo(endIndex) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
     const s = getSettings();
+    const _ghostEpoch = _chatEpoch;
 
     // First pass (in memory, cheap): mark every message WE should newly ghost and
     // collect its index. We do NOT call /hide per message — in SillyTavern each /hide
@@ -1084,6 +1085,11 @@ async function ghostMessagesUpTo(endIndex) {
     try {
         const ctx = SillyTavern.getContext();
         for (const [a, b] of ranges) {
+            // Each /hide is a full chat-file write against the CURRENTLY loaded chat,
+            // and the loop awaits between them. These indices were computed from the
+            // chat that was open when we started; continuing after a switch hides
+            // messages in a chat that was never summarized.
+            if (_chatEpoch !== _ghostEpoch) { log('Ghosting: chat switched mid-hide — stopping. The remainder is repaired on next load.'); break; }
             const cmd = (a === b) ? `/hide ${a}` : `/hide ${a}-${b}`;
             try {
                 await ctx.executeSlashCommandsWithOptions(cmd, { showOutput: false });
@@ -1206,9 +1212,13 @@ async function repairIfBranched() {
         ? Math.max(...survivors.map(sn => sn.turnRange[1]))
         : -1;
 
-    // The ledger is NOT touched here — tryAutoRewindLedger below owns it entirely
-    // (journal fold when covered, checkpoint, or staged rebuild). A previous line
-    // here pre-set ledgerLiveIdx = summarizedUpTo "so the live pass re-derives
+    // The ledger's RECOVERY STRATEGY is not chosen here — tryAutoRewindLedger below
+    // owns that entirely (journal fold when covered, checkpoint, or staged rebuild).
+    // Since v5.99.0 this function does perform the one piece that is not a strategy:
+    // truncateLedgerToTurn drops notes about turns this branch abandoned, because
+    // that cleanup cannot be allowed to inherit the auto-rewind opt-out. It clamps
+    // the pointer only DOWN TO THE CHAT END, which is not the fossil below: that one
+    // pre-set ledgerLiveIdx = summarizedUpTo "so the live pass re-derives
     // forward" — a fossil from before the journal existed. Its only surviving
     // effect was destruction: on a young branch (nothing summarized, pointer at 9)
     // it nuked the pointer to -1 BEFORE the rewind, and the rewind's clamp only
@@ -1255,7 +1265,13 @@ async function repairIfBranched() {
 
     // Try to auto-rewind the cumulative ledger from a checkpoint (restore the nearest
     // snapshot at/before the branch and re-derive only the small delta — no full rebuild).
-    const _rewound = await tryAutoRewindLedger(chatLength - 1, 'branch');
+    // Hygiene first, strategy second. ledgerNotesAhead is one of THIS function's own
+    // triggers, so by here we may already know the journal describes turns this
+    // branch abandoned — handing that to a function the user can switch off is how
+    // the dead timeline survived. Drop it unconditionally; when the journal covers
+    // the branch that IS the rewind, exactly and for free.
+    const _foldedExact = truncateLedgerToTurn(store, chatLength - 1) === 'exact';
+    const _rewound = (await tryAutoRewindLedger(chatLength - 1, 'branch')) || _foldedExact;
     if (_rewound) {
         toastr.info(
             `Branch repaired [${_trigger}] — summary rewound to turn ${store.summarizedUpTo}, ${unghosted} turn(s) back to verbatim. Snippets past the branch were dropped at EVERY layer (meta-summaries narrating the abandoned timeline included); the character ledger is being brought back in line automatically.`,
@@ -2747,6 +2763,73 @@ function wipeLedgerData(store) {
     store.ledgerRebuild = null;
     store.ledgerStaging = null;
     store.ledgerStagingNotes = null;
+}
+
+// THE one way to tell the ledger the chat got SHORTER. Notes are turn-indexed, so
+// a note past the last surviving turn describes a message that does not exist on
+// any timeline — and every fold reads the whole journal, so one such note repaints
+// the abandoned future over the page at the next routine deletion.
+//
+// Through v5.98.0 exactly ONE call site dropped them: rewindLedgerFromNotes, which
+// is reachable only through tryAutoRewindLedger — and that returns at its first
+// line when `ledgerAutoRewind` is off. So a single user-facing toggle decided
+// whether dead notes were ever cleaned, and with it off a branch or a bulk trim
+// left the abandoned timeline in the journal PERMANENTLY (repairIfBranched even
+// detects the condition — ledgerNotesAhead is one of its own triggers — and then
+// delegated the cleanup to the function that can decline it). clampStoreToLength
+// never touched the journal at all, despite its contract being that nothing may
+// reference a non-existent message.
+//
+// Auto-rewind is a preference about how much WORK to spend re-deriving. It was
+// never a preference about keeping data the timeline disowned. Hygiene is not
+// optional, so it lives here, in one primitive both repair paths call.
+//
+// Returns 'exact'   — the journal covered the survivors, so the page was refolded
+//                     from them: a true rewind, instant and free,
+//         'trimmed' — dead notes are gone but the journal cannot vouch for the
+//                     survivors; the PAGE is left untouched for the rewind path,
+//         false     — nothing was past the end; no change.
+function truncateLedgerToTurn(store, lastTurn) {
+    if (!store) return false;
+    const last = (typeof lastTurn === 'number' && isFinite(lastTurn)) ? Math.floor(lastTurn) : -1;
+    // Pointer hygiene is unconditional: _ckptLast is compared against ledgerLiveIdx
+    // by maybeCheckpointLedger (`idx < last + CKPT_EVERY`), and CKPT_EVERY is 1 —
+    // so a cursor left above a trimmed pointer does not delay checkpointing, it
+    // STOPS it for the rest of the chat's life. That is the exact failure the
+    // v5.51 per-chat-cursor fix was written to kill, re-entering through the
+    // truncation door instead of the chat-switch one.
+    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > last) store.ledgerLiveIdx = last;
+    if (typeof store._ckptLast === 'number' && store._ckptLast > last) store._ckptLast = last;
+    if (!Array.isArray(store.ledgerNotes)) return false;   // pre-notes chat: no journal to trim
+    const past = (arr) => Array.isArray(arr) && arr.some(n => n && typeof n.t === 'number' && n.t > last);
+    if (!past(store.ledgerNotes) && !past(store.ledgerStagingNotes)) return false;   // idempotent — nothing to do
+    // Journal genuine page edits BEFORE the trim, exactly as rewindLedgerFromNotes
+    // and reindexAfterDeletion do: while the dead notes are still present the page
+    // and the fold AGREE about the dead content, so only real external work is
+    // adopted. (Trimming first would make the abandoned content look like a fresh
+    // copilot edit and launder it back in at a surviving turn.)
+    try { adoptExternalLedgerEdits(store); } catch (e) { log('truncateLedgerToTurn: adoption failed (non-fatal):', e); }
+    store.ledgerNotes = store.ledgerNotes.filter(n => n && typeof n.t === 'number' && n.t <= last);
+    if (Array.isArray(store.ledgerStagingNotes)) {
+        store.ledgerStagingNotes = store.ledgerStagingNotes.filter(n => n && typeof n.t === 'number' && n.t <= last);
+    }
+    if (notesCover(store, last)) {
+        store.ledger = foldLedgerNotes(store.ledgerNotes, last);
+        log(`Ledger truncated to turn ${last}: dropped every note past the chat end and refolded — exact, no model call.`);
+        return 'exact';
+    }
+    // The journal's base turn is itself gone, so it cannot describe the survivors —
+    // and that INABILITY IS THE SIGNAL. notesCover saying no is precisely what routes
+    // tryAutoRewindLedger to a checkpoint, a synthesized restore point, or a staged
+    // rebuild, which is the correct handling for a page that may be entirely
+    // abandoned-timeline content. An earlier draft of this function "helpfully"
+    // re-based the journal off that page here; the page was then vouched for by its
+    // own journal, notesCover flipped to true, and the rebuild never ran — the stale
+    // ledger enshrined as truth. (Caught by e2e scene 11, which exists for exactly
+    // that shape.) Removing dead notes is this function's whole job; manufacturing
+    // coverage is not, and neither is deciding the recovery strategy.
+    log(`Ledger truncated to turn ${last}: dropped every note past the chat end; the journal cannot vouch for the survivors, so the rewind path owns the page.`);
+    return 'trimmed';
 }
 
 // Migration: adopt the existing page as a base note at the current pointer, so no
@@ -4762,6 +4845,13 @@ async function summarizeOneBatch(visibleTurns) {
     const s = getSettings();
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    // `store` is captured now and written after a model round-trip. A chat switch in
+    // between REPLACES chatMetadata, so that write lands in a detached object nothing
+    // will save — while ghostMessagesUpTo below re-reads the LIVE context and would
+    // /hide turns in whichever chat is open now. abortSummarization() covers a switch
+    // DURING the call; it cannot cover one that arrives after the call resolved, and
+    // the promotion round-trip and the /hide writes that follow are a wide window.
+    const startEpoch = _chatEpoch;
 
     // ─── FIX: Filter out turns that are at or before summarizedUpTo ───
     const eligibleTurns = visibleTurns.filter(t => t.index > store.summarizedUpTo);
@@ -4838,6 +4928,12 @@ async function summarizeOneBatch(visibleTurns) {
             return false;
         }
 
+        if (_chatEpoch !== startEpoch) {
+            log('Summarizer: chat switched mid-batch — summary discarded, nothing ghosted. The turns stay eligible in their own chat.');
+            trace('<<< EXITING summarizeOneBatch - CHAT SWITCHED');
+            return false;
+        }
+
         store.layers[0].push({
             text: summary,
             turnRange: [passageStart, endIdx],
@@ -4883,6 +4979,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
     const s = getSettings();
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
+    const startEpoch = _chatEpoch;   // same law as summarizeOneBatch — never write a batch across a chat switch
 
     // ─── FIX: Filter out turns that are at or before summarizedUpTo ───
     // This handles desync where summarizedUpTo advanced but ghosting failed
@@ -4963,6 +5060,12 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         if (!summary) {
             log('Summarization failed for batch, leaving turns intact for next attempt.');
             trace('  <<< EXITING - summary is empty');
+            return false;
+        }
+
+        if (_chatEpoch !== startEpoch) {
+            log('Catch-up: chat switched mid-batch — summary discarded, nothing ghosted.');
+            trace('  <<< EXITING - chat switched');
             return false;
         }
 
@@ -5239,6 +5342,11 @@ function _stashSources(texts, cap) {
 async function maybePromoteLayer(layerIndex) {
     const s = getSettings();
     const store = getChatStore();
+    // `layer` and `destLayer` below are references INTO this store. A chat switch
+    // mid-merge detaches all three, so the splice would cut snippets out of the
+    // previous chat's layer and the push would land in an object nothing saves —
+    // the sources destroyed, the merge lost.
+    const startEpoch = _chatEpoch;
 
     if (layerIndex >= s.maxLayers - 1) {
         log(`Max layer depth (${s.maxLayers}) reached.`);
@@ -5293,6 +5401,7 @@ async function maybePromoteLayer(layerIndex) {
 
     let metaSummary = await callSummarizer(storyTxt, contextStr);
     if (!metaSummary) return;
+    if (_chatEpoch !== startEpoch) { log('Promotion: chat switched mid-merge — merged summary discarded, sources untouched.'); return; }
 
     // SHRINK GUARD. Everything below this point destroys `toMerge` permanently.
     let shrink = { thin: false, ratio: 1 };
@@ -5352,6 +5461,10 @@ async function maybePromoteLayer(layerIndex) {
             Math.max(...childRanges.map(r => r[1])),
         ];
     }
+    // The shrink retry is a SECOND round-trip; re-check immediately before the one
+    // irreversible step in this function. Everything above is deliberately
+    // non-destructive ("COPY, don't cut"), so abandoning here costs only the call.
+    if (_chatEpoch !== startEpoch) { log('Promotion: chat switched during the shrink retry — sources untouched.'); return; }
     // Accepted: NOW the sources leave the layer (identity-safe — a concurrent
     // reader reordered nothing while we were in flight, and if the array
     // somehow changed we remove exactly the objects we merged, by reference).
@@ -6193,6 +6306,22 @@ function reindexAfterDeletion(store, D) {
             return true;
         });
     }
+    // The "recently resolved" receipts are turn-indexed exactly like the flags they
+    // came from, and sat one line below them being shifted — while the receipts
+    // were left pointing at whatever moved into their old coordinates. Display-only,
+    // but a receipt that names the wrong turns is worse than no receipt.
+    if (Array.isArray(store.continuityResolved)) {
+        store.continuityResolved = store.continuityResolved.filter(r => {
+            if (!r) return false;
+            if (!Array.isArray(r.turnRange)) return true;
+            let a = r.turnRange[0], b = r.turnRange[1];
+            if (a > D) a -= 1;
+            if (b >= D) b -= 1;
+            if (a > b || b < 0) return false;   // the turns it describes are gone — drop the receipt
+            r.turnRange = [a, b];
+            return true;
+        });
+    }
     if (Array.isArray(store.layers)) {
         for (const layer of store.layers) {
             if (!Array.isArray(layer)) continue;
@@ -6220,7 +6349,10 @@ function clampStoreToLength(store, newLen) {
     if (!store) return;
     const max = (newLen | 0) - 1;
     if (typeof store.summarizedUpTo === 'number' && store.summarizedUpTo > max) store.summarizedUpTo = max;
-    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > max) store.ledgerLiveIdx = max;
+    // Ledger pointers AND the turn-indexed journal — one owner, so this function's
+    // contract ("nothing references a non-existent message") finally covers the
+    // structure that references messages most densely.
+    truncateLedgerToTurn(store, max);
     if (Array.isArray(store.continuityFlags)) {
         store.continuityFlags = store.continuityFlags.filter(f => {
             if (!f) return false;
@@ -6343,8 +6475,11 @@ function onChatChanged() {
     try { if (typeof window !== 'undefined' && typeof window._closeNotepadFs === 'function') window._closeNotepadFs(); } catch (_) {}
     log('Chat changed.');
     _resetCatchupDismissal();
-    // Abort in-flight calls for the OLD chat: every driver is epoch-guarded and
-    // would discard the result anyway — aborting saves the tokens and unwinds
+    // Abort in-flight calls for the OLD chat: every driver captures _chatEpoch before
+    // its first await and discards anything computed across a bump (the summarizer,
+    // catch-up and promotion drivers were the last three without that guard — they
+    // relied on the abort alone, which cannot cover a call that already resolved) —
+    // so aborting saves the tokens and unwinds
     // loops (catch-up, redos, exports) at their next checkpoint instead of
     // minutes later. The next acquire resets the cancel flag.
     abortSummarization();

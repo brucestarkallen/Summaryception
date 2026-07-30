@@ -21,6 +21,72 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 
 /** [label, file, currentText, bugText, assertionThatMustFail] */
 const MUTATIONS = [
+    // ── v5.99.0: truncation hygiene + the chat-switch law ──
+    ['clampStoreToLength forgets the journal (bulk trim resurrects the dead timeline)', 'index.js',
+        "    truncateLedgerToTurn(store, max);",
+        "    if (typeof store.ledgerLiveIdx === 'number' && store.ledgerLiveIdx > max) store.ledgerLiveIdx = max;",
+        'the abandoned timeline cannot come back through a later deletion refold'],
+
+    ['truncation leaves notes past the chat end', 'index.js',
+        "    store.ledgerNotes = store.ledgerNotes.filter(n => n && typeof n.t === 'number' && n.t <= last);\n    if (Array.isArray(store.ledgerStagingNotes)) {",
+        "    if (Array.isArray(store.ledgerStagingNotes)) {",
+        'no note survives past the last turn'],
+
+    ['truncation skips the staging journal', 'index.js',
+        "        store.ledgerStagingNotes = store.ledgerStagingNotes.filter(n => n && typeof n.t === 'number' && n.t <= last);",
+        "        store.ledgerStagingNotes = store.ledgerStagingNotes.slice();",
+        'the staging journal is trimmed with the live one'],
+
+    ['truncation leaves _ckptLast above the pointer (checkpointing stops dead)', 'index.js',
+        "    if (typeof store._ckptLast === 'number' && store._ckptLast > last) store._ckptLast = last;",
+        "",
+        'both turn cursors are clamped to the new end'],
+
+    ['truncation manufactures coverage (stale page vouches for itself, rebuild never runs)', 'index.js',
+        "    log(`Ledger truncated to turn ${last}: dropped every note past the chat end; the journal cannot vouch",
+        "    store.ledgerNotes = _baseNotesFromPage(store.ledger, Math.max(0, last));\n    store.ledgerNotesFrom = Math.max(0, last);\n    log(`Ledger truncated to turn ${last}: dropped every note past the chat end; the journal cannot vouch",
+        'KILL SHOT: coverage stays false — the signal that routes to the rebuild is intact'],
+
+    ['truncation refolds the page even when the journal cannot cover it', 'index.js',
+        "    if (notesCover(store, last)) {\n        store.ledger = foldLedgerNotes(store.ledgerNotes, last);",
+        "    if (true) {\n        store.ledger = foldLedgerNotes(store.ledgerNotes, last);",
+        'the page is left untouched for the rewind path to replace'],
+
+    ['branch repair delegates hygiene to the declinable rewind again', 'index.js',
+        "    const _foldedExact = truncateLedgerToTurn(store, chatLength - 1) === 'exact';",
+        "    const _foldedExact = false;",
+        'branch repair truncates the journal ITSELF, before the rewind strategy it may decline'],
+
+    ['truncation is called from inside tryAutoRewindLedger (inherits its opt-out)', 'index.js',
+        "        if (s.ledgerAutoRewind === false) return false;",
+        "        if (s.ledgerAutoRewind === false) { truncateLedgerToTurn(getChatStore(), targetTurn); return false; }",
+        'the primitive is NOT called from inside tryAutoRewindLedger — hygiene must not inherit its opt-out'],
+
+    ['resolved receipts stop shifting with their flags', 'index.js',
+        "    if (Array.isArray(store.continuityResolved)) {\n        store.continuityResolved = store.continuityResolved.filter(r => {\n            if (!r) return false;",
+        "    if (false) {\n        store.continuityResolved = store.continuityResolved.filter(r => {\n            if (!r) return false;",
+        'a receipt shifts by exactly what its flag shifted by'],
+
+    ['summarizeOneBatch writes its snippet across a chat switch', 'index.js',
+        "        if (_chatEpoch !== startEpoch) {\n            log('Summarizer: chat switched mid-batch",
+        "        if (false) {\n            log('Summarizer: chat switched mid-batch",
+        'summarizeOneBatch checks the epoch again after it'],
+
+    ['catch-up writes its snippet across a chat switch', 'index.js',
+        "        if (_chatEpoch !== startEpoch) {\n            log('Catch-up: chat switched mid-batch",
+        "        if (false) {\n            log('Catch-up: chat switched mid-batch",
+        'summarizeOneBatchFromTurns checks the epoch again after it'],
+
+    ['promotion destroys its sources across a chat switch', 'index.js',
+        "    if (_chatEpoch !== startEpoch) { log('Promotion: chat switched during the shrink retry",
+        "    if (false) { log('Promotion: chat switched during the shrink retry",
+        'maybePromoteLayer re-checks AFTER the shrink retry and BEFORE the irreversible splice'],
+
+    ['ghosting keeps /hide-ing into the newly opened chat', 'index.js',
+        "            if (_chatEpoch !== _ghostEpoch) { log('Ghosting: chat switched mid-hide",
+        "            if (false) { log('Ghosting: chat switched mid-hide",
+        'ghostMessagesUpTo checks the epoch again after it'],
+
     ['fold re-resolves keys (the runaway duplication)', 'index.js',
         "        const key = n.name.trim();\n        if (n.gone === true) { delete out[key]; continue; }",
         "        const key = resolveLedgerKey(out, n.name.trim());\n        if (n.gone === true) { delete out[key]; continue; }",

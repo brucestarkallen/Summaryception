@@ -30,7 +30,8 @@ const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
 const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
-    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName'];
+    'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
+    'truncateLedgerToTurn', 'clampStoreToLength'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -74,6 +75,7 @@ return {
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
+  truncateLedgerToTurn, clampStoreToLength,
 };
 `;
 const L = new Function(sandbox)();
@@ -1328,7 +1330,17 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     const abortBody = (SRC_FULL.match(/function abortSummarization\(\) \{[\s\S]*?\n\}/) || [''])[0];
     ok(abortBody.length > 0 && !/isSummarizing =/.test(abortBody), 'abortSummarization never releases a mutex it does not own');
     ok(abortBody.includes('_summarizeCancelRequested = true;'), 'abort raises the shared cancel token');
-    ok(/function onChatChanged\(\) \{[\s\S]{0,500}?abortSummarization\(\);/.test(SRC_FULL), 'chat change aborts in-flight work for the old chat');
+    // Body-scoped, not window-scoped: the previous form allowed 500 characters
+    // between the header and the call, so it measured COMMENT LENGTH and failed
+    // the moment a comment above the call grew. What it means is 'the call is in
+    // this function', so that is what it now asserts.
+    {
+        const _i = SRC_FULL.indexOf('function onChatChanged() {');
+        const _j = SRC_FULL.indexOf('\nfunction onGenerationStarted(', _i);
+        const _body = (_i >= 0 && _j > _i) ? SRC_FULL.slice(_i, _j) : '';
+        ok(_body.includes('abortSummarization();'), 'chat change aborts in-flight work for the old chat');
+        ok(_body.indexOf('abortSummarization();') < _body.indexOf('setTimeout('), 'and aborts BEFORE it schedules the new chat\'s repair');
+    }
     ok((SRC_FULL.match(/_acquireSummarize\(\);/g) || []).length >= 8, 'every driver goes through the single acquire helper');
     const noHelpers = SRC_FULL
         .replace('let isSummarizing = false;', '')
@@ -3009,6 +3021,172 @@ section('MC name — resolved automatically, override only to correct');
     ok(SRC_FULL.includes('if (!resolveMcName())'), 'learning only ever FILLS an unknown name; it can never overwrite a working setup');
     ok(SRC_FULL.includes("chatMetadata.arbiter.mcName") || SRC_FULL.includes("chatMetadata && chatMetadata.arbiter"), 'the sibling extension is read directly');
     ok(!/must be set|please set the/i.test(SRC_FULL.slice(SRC_FULL.indexOf('function resolveMcName'), SRC_FULL.indexOf('function resolveMcName') + 1200)), 'the resolver never demands user input');
+}
+
+
+// ─── v5.99.0: a shorter chat can never leave live notes about turns it dropped ──
+// The journal is turn-indexed and every fold reads ALL of it, so a single note past
+// the chat end repaints the abandoned timeline over the page at the next routine
+// deletion. Until v5.99.0 the ONLY function that dropped such notes was
+// rewindLedgerFromNotes, reachable only through tryAutoRewindLedger — which returns
+// on its first line when `ledgerAutoRewind` is off. One user-facing toggle therefore
+// decided whether dead notes were ever cleaned at all.
+{
+    section('truncation hygiene — dead notes never survive a shorter chat');
+
+    // Case A: the journal covers the survivors -> exact fold, no model call.
+    {
+        const store = {
+            summarizedUpTo: 30, ledgerLiveIdx: 30, _ckptLast: 29, ledgerNotesFrom: 0,
+            ledgerNotes: [
+                { t: 2,  name: 'Rukia',    core: 'shinigami',      at: 1 },
+                { t: 25, name: 'Malachar', core: 'the hollow king', at: 2 },
+            ],
+            layers: [], ghostedIndices: [], continuityFlags: [],
+        };
+        L.__setStore(store);
+        const verdict = L.truncateLedgerToTurn(store, 10);
+        ok(verdict === 'exact', 'a covered journal truncates to an EXACT fold');
+        ok(!store.ledgerNotes.some(n => n.t > 10), 'no note survives past the last turn');
+        ok(!Object.prototype.hasOwnProperty.call(store.ledger, 'Malachar'), 'a character recorded only on the dropped turns is gone from the page');
+        ok(Object.prototype.hasOwnProperty.call(store.ledger, 'Rukia'), 'and one recorded on a surviving turn is kept');
+        ok(store.ledgerLiveIdx === 10 && store._ckptLast === 10, 'both turn cursors are clamped to the new end');
+        ok(L.truncateLedgerToTurn(store, 10) === false, 'truncating again is a no-op — idempotent');
+    }
+
+    // The resurrection itself: trim, then delete one more message (which refolds).
+    {
+        const store = {
+            summarizedUpTo: 30, ledgerLiveIdx: 30, ledgerNotesFrom: 0,
+            ledgerNotes: [
+                { t: 2,  name: 'Rukia',    core: 'shinigami',      at: 1 },
+                { t: 25, name: 'Malachar', core: 'the hollow king', at: 2 },
+            ],
+            layers: [], ghostedIndices: [], continuityFlags: [],
+        };
+        L.__setStore(store);
+        L.clampStoreToLength(store, 11);   // bulk trim, auto-rewind irrelevant
+        L.reindexAfterDeletion(store, 5);  // a later single deletion refolds the journal
+        ok(!Object.prototype.hasOwnProperty.call(store.ledger || {}, 'Malachar'),
+            'the abandoned timeline cannot come back through a later deletion refold');
+    }
+
+    // Case B: the journal's own base turn is gone. Dead notes still go — but the
+    // page is NOT touched and coverage is NOT manufactured. notesCover saying "no"
+    // is the signal that routes tryAutoRewindLedger to a checkpoint / synthesized
+    // restore point / staged rebuild, and a page that may be entirely abandoned-
+    // timeline content is exactly what that path exists to replace. An earlier
+    // draft re-based the journal off that page here: the stale page then vouched
+    // for itself, notesCover flipped true, and the rebuild never ran.
+    {
+        const store = {
+            summarizedUpTo: 400, ledgerLiveIdx: 400, ledgerNotesFrom: 100,
+            ledger: { 'Malachar': { core: 'STALE — from the abandoned timeline' } },
+            ledgerNotes: [{ t: 250, name: 'Malachar', core: 'STALE — from the abandoned timeline', at: 2 }],
+            layers: [], ghostedIndices: [],
+        };
+        L.__setStore(store);
+        const verdict = L.truncateLedgerToTurn(store, 10);
+        ok(verdict === 'trimmed', 'a journal that cannot cover the survivors reports a trim, never an exact rewind');
+        ok(store.ledgerNotes.length === 0, 'its dead notes are gone all the same');
+        ok(store.ledgerNotesFrom === 100, 'and it does NOT lower its base turn to fake coverage');
+        ok(L.notesCover(store, 10) === false, 'KILL SHOT: coverage stays false — the signal that routes to the rebuild is intact');
+        ok(String(store.ledger['Malachar'].core).includes('STALE'), 'the page is left untouched for the rewind path to replace');
+    }
+
+    // The staging journal is the same structure and gets the same treatment.
+    {
+        const store = {
+            ledgerLiveIdx: 30, ledgerNotesFrom: 0,
+            ledgerNotes: [{ t: 2, name: 'Rukia', core: 'c', at: 1 }],
+            ledgerStagingNotes: [{ t: 2, name: 'Rukia', core: 'c', at: 1 }, { t: 28, name: 'Ghost', core: 'g', at: 2 }],
+        };
+        L.__setStore(store);
+        L.truncateLedgerToTurn(store, 10);
+        ok(!store.ledgerStagingNotes.some(n => n.t > 10), 'the staging journal is trimmed with the live one');
+    }
+
+    // A pre-notes chat has no journal to trim and must not be invented one.
+    {
+        const store = { ledgerLiveIdx: 30, _ckptLast: 30, ledger: { 'Rukia': { core: 'c' } } };
+        L.__setStore(store);
+        ok(L.truncateLedgerToTurn(store, 10) === false, 'a chat with no journal reports no truncation');
+        ok(store.ledgerNotes === undefined, 'and no journal is fabricated for it');
+        ok(store.ledgerLiveIdx === 10 && store._ckptLast === 10, 'its pointers are still clamped — that part is unconditional');
+    }
+
+    // STRUCTURAL: the hygiene must not sit behind the auto-rewind opt-out again.
+    ok(/function clampStoreToLength[\s\S]{0,1200}?truncateLedgerToTurn\(store, max\)/.test(SRC_FULL),
+        'clampStoreToLength delegates journal + pointer hygiene to the one primitive');
+    ok(/truncateLedgerToTurn\(store, chatLength - 1\)/.test(SRC_FULL),
+        'branch repair truncates the journal ITSELF, before the rewind strategy it may decline');
+    {
+        const i = SRC_FULL.indexOf('async function tryAutoRewindLedger');
+        const j = SRC_FULL.indexOf('truncateLedgerToTurn', i);
+        const k = SRC_FULL.indexOf('\nfunction queueLedgerUpdate', i);
+        ok(i > 0 && (j === -1 || j > k), 'the primitive is NOT called from inside tryAutoRewindLedger — hygiene must not inherit its opt-out');
+    }
+}
+
+// ─── v5.99.0: resolved receipts shift with the flags they came from ────────────
+{
+    section('continuity receipts — reindexed like everything else turn-indexed');
+    const store = {
+        summarizedUpTo: 20, ledgerLiveIdx: 20, layers: [], ghostedIndices: [],
+        continuityFlags:    [{ turnRange: [10, 12], issue: 'x' }],
+        continuityResolved: [{ turnRange: [10, 12], issue: 'x' }, { turnRange: [3, 3], issue: 'dies' }],
+    };
+    L.__setStore(store);
+    L.reindexAfterDeletion(store, 3);
+    ok(JSON.stringify(store.continuityResolved[0].turnRange) === JSON.stringify(store.continuityFlags[0].turnRange),
+        'a receipt shifts by exactly what its flag shifted by');
+    ok(store.continuityResolved.length === 1, 'a receipt whose only turn was deleted is dropped, not left pointing at a stranger');
+    ok(store.continuityResolved.every(r => !Array.isArray(r.turnRange) || r.turnRange[0] <= r.turnRange[1]), 'no inverted range survives');
+}
+
+// ─── v5.99.0: every driver that writes after a model call is epoch-guarded ─────
+// abortSummarization() covers a chat switch DURING a call. It cannot cover one that
+// arrives after the call resolved — and the summarization drivers keep writing for a
+// long time after that: a /hide per contiguous range (each a full chat-file write
+// against whatever chat is loaded NOW) and a whole second model round-trip for
+// promotion. These three were the last drivers in the file relying on the abort alone.
+{
+    section('chat-switch law — no driver writes a result across an epoch bump');
+    const fnBody = (name) => {
+        const i = SRC_FULL.indexOf('async function ' + name + '(');
+        if (i < 0) return '';
+        const j = SRC_FULL.indexOf('\nasync function ', i + 10);
+        const k = SRC_FULL.indexOf('\nfunction ', i + 10);
+        const end = Math.min(j < 0 ? SRC_FULL.length : j, k < 0 ? SRC_FULL.length : k);
+        return SRC_FULL.slice(i, end);
+    };
+    for (const name of ['summarizeOneBatch', 'summarizeOneBatchFromTurns', 'maybePromoteLayer', 'ghostMessagesUpTo']) {
+        const body = fnBody(name);
+        ok(body.length > 0, `${name} is locatable in the source`);
+        ok(/const (startEpoch|_ghostEpoch) = _chatEpoch;/.test(body), `${name} captures the epoch before its first await`);
+        ok(/_chatEpoch !== (startEpoch|_ghostEpoch)/.test(body), `${name} checks the epoch again after it`);
+    }
+    // The guard must sit BEFORE the write it protects, not after.
+    const sob = fnBody('summarizeOneBatch');
+    ok(sob.indexOf('_chatEpoch !== startEpoch') < sob.indexOf('store.layers[0].push'),
+        'summarizeOneBatch checks the epoch BEFORE pushing the snippet');
+    const mpl = fnBody('maybePromoteLayer');
+    {
+        // Anchored on the SHRINK RETRY, not on the function start. The retry is a
+        // second model round-trip, so a guard placed only before it proves nothing
+        // about the window that actually precedes the splice. (The earlier form
+        // asked whether ANY check came before the loop — the top-of-function one
+        // always did, so deleting the real guard left the assertion green.)
+        const _retry = mpl.indexOf('const retry = await callSummarizer(');
+        const _splice = mpl.indexOf('for (const sn of toMerge) {');
+        const _guard = mpl.indexOf('_chatEpoch !== startEpoch', _retry);
+        ok(_retry > 0 && _splice > _retry, 'maybePromoteLayer: shrink retry and splice are both locatable, in that order');
+        ok(_guard > _retry && _guard < _splice,
+            'maybePromoteLayer re-checks AFTER the shrink retry and BEFORE the irreversible splice');
+    }
+    const gmu = fnBody('ghostMessagesUpTo');
+    ok(gmu.indexOf('_chatEpoch !== _ghostEpoch') < gmu.indexOf('executeSlashCommandsWithOptions'),
+        'ghostMessagesUpTo checks the epoch inside the /hide loop, before each write');
 }
 
 console.log('\n────────────────────────────────────────');
