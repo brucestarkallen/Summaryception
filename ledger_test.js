@@ -32,7 +32,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
     'truncateLedgerToTurn', 'clampStoreToLength',
-    'RETRY_CONFIG', 'isRetryableError', '_tpThreads'];
+    'RETRY_CONFIG', 'isRetryableError', '_tpThreads',
+    'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -80,6 +81,7 @@ return {
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
   truncateLedgerToTurn, clampStoreToLength, isRetryableError, RETRY_CONFIG, ConnectionError, _tpThreads,
+  recomputeSummarizedUpTo, _snipSig, _resolveSnipRow,
 };
 `;
 const L = new Function(sandbox)();
@@ -3319,6 +3321,102 @@ section('MC name — resolved automatically, override only to correct');
         'a document with a raw string threads field is coerced at import');
     // Structural: the export must not go back to String(array).
     ok(!/THREADS: ' \+ String\(e\.threads/.test(SRC_FULL), 'the export never comma-joins the array again');
+}
+
+
+// ─── v5.102.0: the pointer helper RETURNS what it computes ────────────────────
+// The snippet-browser delete handler is written `store.summarizedUpTo =
+// recomputeSummarizedUpTo()`. While the helper returned undefined, that assignment
+// OVERWROTE the correct value it had just computed — so deleting one snippet from
+// the Memory panel set the pointer to undefined, and nothing recovered: every
+// eligibility test (`t.index > undefined`) is false, so summarization found zero
+// turns forever; the "repair ghosting" branch (`t.index <= undefined`) ghosted
+// nothing either; passageStart computed to NaN; every downstream guard is
+// `typeof === 'number'` and skipped it; and JSON.stringify DROPS undefined, so the
+// key vanished from the saved metadata. One click ended summarization for that chat.
+{
+    section('summarizedUpTo — the helper returns a number, always');
+    const store = { layers: [[{ text: 'a', turnRange: [0, 3] }, { text: 'b', turnRange: [4, 7] }]], summarizedUpTo: 7 };
+    L.__setStore(store);
+    store.layers[0].splice(1, 1);
+    store.summarizedUpTo = L.recomputeSummarizedUpTo();   // verbatim, as the handler does it
+    ok(typeof store.summarizedUpTo === 'number',
+        'KILL SHOT: assigning FROM the helper leaves a number, not undefined');
+    ok(store.summarizedUpTo === 3, 'and the number is the max surviving Layer-0 range end');
+    ok(store.summarizedUpTo > -1 ? [{ index: 4 }].filter(t => t.index > store.summarizedUpTo).length === 1 : false,
+        'so the eligibility filter still finds turns to summarize');
+    // Empty / range-less must answer -1, never -Infinity (which JSON saves as null).
+    L.__setStore({ layers: [[]] });
+    ok(L.recomputeSummarizedUpTo() === -1, 'an empty Layer 0 answers -1');
+    L.__setStore({ layers: [[{ text: 'x' }]] });
+    ok(L.recomputeSummarizedUpTo() === -1, 'a Layer 0 of range-less snippets answers -1, not -Infinity');
+    ok(JSON.parse(JSON.stringify({ v: L.recomputeSummarizedUpTo() })).v === -1, 'and -1 survives a save round-trip');
+    // Structural: getChatStore repairs a chat already broken in the field, where the
+    // key is now ABSENT from the saved metadata and no guard can see the damage.
+    ok(/typeof chatMetadata\[MODULE_NAME\]\.summarizedUpTo !== 'number'/.test(SRC_FULL),
+        'getChatStore repairs a non-numeric summarizedUpTo — chats already damaged recover on load');
+}
+
+// ─── v5.102.0: a snippet's POSITION is not its identity ───────────────────────
+// The browser renders data-layer/data-idx, but a background promotion splices
+// snippetsPerPromotion entries off the FRONT of Layer 0 (branch repair filters whole
+// layers), so every rendered index below the splice shifts. A click then resolved to
+// a DIFFERENT snippet — and .sc-snippet-delete does layer.splice(idx, 1), destroying
+// the wrong scene's summary while the row on screen survived.
+{
+    section('snippet browser — a row resolves by content, not by position');
+    const mk = (t) => ({ text: t, turnRange: [0, 1] });
+    const store = { layers: [[mk('scene one'), mk('scene two'), mk('scene three')]] };
+    L.__setStore(store);
+    const sigTwo = L._snipSig(store.layers[0][1]);
+
+    // Nothing moved: the rendered position is honoured.
+    let r = L._resolveSnipRow(0, 1, sigTwo);
+    ok(r && r.idx === 1 && r.sn.text === 'scene two', 'an unshifted row resolves at its rendered position');
+
+    // A promotion spliced the front entry away AFTER the render.
+    store.layers[0].shift();
+    r = L._resolveSnipRow(0, 1, sigTwo);
+    ok(r && r.sn.text === 'scene two',
+        'KILL SHOT: after a promotion shifted the layer, the row still resolves to the snippet it DEPICTS');
+    ok(r.idx === 0, 'and it reports the TRUE index, so a splice removes the right one');
+
+    // Gone entirely -> refuse, never guess.
+    L.__setStore({ layers: [[mk('scene one'), mk('scene three')]] });
+    ok(L._resolveSnipRow(0, 1, sigTwo) === null, 'a row whose snippet no longer exists resolves to null');
+    // Ambiguity only ARISES when the rendered position does not match: a hit AT the
+    // rendered position is the row the user clicked, duplicate elsewhere or not, and
+    // acting on it is correct rather than a guess. The refusal is for the search path.
+    L.__setStore({ layers: [[mk('scene two'), mk('scene two')]] });
+    ok((L._resolveSnipRow(0, 0, sigTwo) || {}).idx === 0,
+        'a duplicate elsewhere does not disturb a row that matches where it was rendered');
+    L.__setStore({ layers: [[mk('scene two'), mk('other'), mk('scene two')]] });
+    ok(L._resolveSnipRow(0, 1, sigTwo) === null,
+        'but when the position misses and the search finds TWO candidates, it refuses rather than guessing');
+    // No signature (a row rendered before this existed) -> positional, as before.
+    L.__setStore({ layers: [[mk('a'), mk('b')]] });
+    r = L._resolveSnipRow(0, 1, undefined);
+    ok(r && r.sn.text === 'b', 'a signature-less legacy row falls back to the position it always used');
+    ok(L._resolveSnipRow(9, 0, undefined) === null && L._resolveSnipRow(0, 99, undefined) === null,
+        'a missing layer or out-of-range index resolves to null rather than throwing');
+    // Signature must actually distinguish content.
+    ok(L._snipSig(mk('scene one')) !== L._snipSig(mk('scene two')), 'the signature distinguishes different text');
+    ok(L._snipSig(mk('same')) === L._snipSig(mk('same')), 'and is stable for identical text');
+
+    // Structural: every handler that indexes into a layer must go through the resolver.
+    {
+        const i = SRC_FULL.indexOf('function updateSnippetBrowser() {');
+        const j = SRC_FULL.indexOf('\nfunction escapeHtml', i);
+        const body = SRC_FULL.slice(i, j);
+        const sels = ['.sc-snippet-text', '.sc-thin-restore', '.sc-snippet-redo', '.sc-snippet-delete',
+                      '.sc-detail-text', '.sc-detail-redo', '.sc-detail-delete', '.sc-detail-ledger'];
+        for (const sel of sels) {
+            const k = body.indexOf(`$('${sel}')`);
+            ok(k > 0 && /_resolveSnipRow\(/.test(body.slice(k, k + 700)), `${sel} resolves through _resolveSnipRow`);
+        }
+        ok((body.match(/data-sig="\$\{_snipSig\(sn\)\}"/g) || []).length >= 5,
+            'every rendered row carries the signature the resolver needs');
+    }
 }
 
 console.log('\n────────────────────────────────────────');

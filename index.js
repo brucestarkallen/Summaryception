@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.101.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.102.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -630,6 +630,21 @@ function getChatStore() {
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityFlags)) chatMetadata[MODULE_NAME].continuityFlags = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityDismissed)) chatMetadata[MODULE_NAME].continuityDismissed = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityResolved)) chatMetadata[MODULE_NAME].continuityResolved = [];
+    // FIELD REPAIR. A chat whose summarizedUpTo was destroyed by the pre-v5.102.0
+    // delete handler has no such key at all now — JSON.stringify drops undefined —
+    // and every guard downstream tests `typeof === 'number'`, so the damage is
+    // invisible AND self-perpetuating: summarization simply never runs again.
+    // Recompute from the surviving Layer-0 ranges, which is the same rule
+    // recomputeSummarizedUpTo applies, so an affected chat resumes exactly where its
+    // snippets say it should instead of re-reading its whole history. Runs from
+    // getChatStore — the one door every path goes through — and only when the value
+    // is genuinely not a number, so it costs nothing on a healthy chat.
+    if (typeof chatMetadata[MODULE_NAME].summarizedUpTo !== 'number' || !isFinite(chatMetadata[MODULE_NAME].summarizedUpTo)) {
+        const _l0 = (Array.isArray(chatMetadata[MODULE_NAME].layers) && Array.isArray(chatMetadata[MODULE_NAME].layers[0]))
+            ? chatMetadata[MODULE_NAME].layers[0].filter(sn => sn && Array.isArray(sn.turnRange) && typeof sn.turnRange[1] === 'number')
+            : [];
+        chatMetadata[MODULE_NAME].summarizedUpTo = _l0.length > 0 ? Math.max(..._l0.map(sn => sn.turnRange[1])) : -1;
+    }
     // One key space for page and journal. Idempotent, guarded by a stored version.
     _canonicalizeLedgerNotes(chatMetadata[MODULE_NAME]);
     return chatMetadata[MODULE_NAME];
@@ -5018,6 +5033,10 @@ async function summarizeOneBatch(visibleTurns) {
 
         await maybePromoteLayer(0);
         await saveChatStore();
+        // The panel renders positional coordinates, so a promotion that reshuffled a
+        // layer must not leave a stale list on screen. The resolver above makes a
+        // stale click SAFE; this makes it rare.
+        try { updateUI(); } catch (_) { /* panel may be closed */ }
 
         toastr.success(`Summary saved (Layer 0: ${store.layers[0].length} snippets)`, 'Summaryception', { timeOut: 2000 });
         trace('<<< EXITING summarizeOneBatch - SUCCESS');
@@ -7164,6 +7183,44 @@ function renderLedger() {
     }
 }
 
+// A snippet's POSITION is not its identity. The browser renders data-layer/data-idx,
+// but a background promotion splices snippetsPerPromotion entries off the FRONT of
+// Layer 0 (and branch repair filters whole layers), so every rendered index below the
+// splice silently shifts. A click on the row the user is looking at then resolved to a
+// DIFFERENT snippet — and .sc-snippet-delete does layer.splice(idx, 1), so the wrong
+// scene's summary was destroyed while the one on screen stayed. The editor already
+// solved this class with a content check (_locateSnippetForOp); the browser gets the
+// same discipline through one resolver every handler goes through, rather than eight
+// hand-rolled lookups. A short content signature rides on each row: matched at the
+// rendered position when nothing moved, found by signature anywhere in the layer when
+// it did, and REFUSED — never guessed — when it is gone or ambiguous.
+function _snipSig(sn) {
+    const raw = String((sn && sn.text) || '');
+    let h = 5381;
+    for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) & 0xFFFFFFFF;
+    return (h >>> 0).toString(36) + '_' + raw.length;
+}
+// Resolve a rendered row to the snippet it actually depicts. Returns
+// { arr, idx, sn } or null. `sig` may be absent (a row rendered before this
+// existed): then the position is trusted, exactly as it was before.
+function _resolveSnipRow(layerIdx, snippetIdx, sig) {
+    const store = getChatStore();
+    const arr = (Array.isArray(store.layers) && Array.isArray(store.layers[layerIdx])) ? store.layers[layerIdx] : null;
+    if (!arr) return null;
+    const at = arr[snippetIdx];
+    if (!sig) return at ? { arr, idx: snippetIdx, sn: at } : null;
+    if (at && _snipSig(at) === sig) return { arr, idx: snippetIdx, sn: at };
+    const hits = [];
+    for (let k = 0; k < arr.length; k++) if (arr[k] && _snipSig(arr[k]) === sig) hits.push(k);
+    if (hits.length !== 1) return null;   // gone, or duplicated — refuse rather than guess
+    return { arr, idx: hits[0], sn: arr[hits[0]] };
+}
+function _snipRowGone() {
+    try {
+        toastr.warning('That snippet moved while the panel was open (a background promotion or branch repair reshuffled the layer) — the list has been refreshed. Please look again and repeat the action.', 'Summaryception', { timeOut: 7000 });
+    } catch (_) { /* toast is a courtesy */ }
+    try { updateSnippetBrowser(); } catch (_) { /* panel may be closed */ }
+}
 function updateSnippetBrowser() {
     const store = getChatStore();
     let html = '';
@@ -7194,14 +7251,14 @@ function updateSnippetBrowser() {
                 if (i === 0 && sn.turnRange) {
                     const hasDetail = sn.detail && String(sn.detail).trim();
                     const detailText = hasDetail
-                        ? `<span class="sc-detail-text" data-layer="${i}" data-idx="${j}" title="Click to edit detail">📝 ${escapeHtml(String(sn.detail).trim())}</span>`
+                        ? `<span class="sc-detail-text" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}" title="Click to edit detail">📝 ${escapeHtml(String(sn.detail).trim())}</span>`
                         : `<span class="sc-detail-empty">no detail</span>`;
                     const detailRedo = `<button class="sc-detail-redo menu_button fa-solid fa-wand-magic-sparkles" title="${hasDetail ? 'Regenerate' : 'Generate'} detail (re-run the sister on these turns)"></button>`;
                     const detailDel = hasDetail
                         ? `<button class="sc-detail-delete menu_button fa-solid fa-eraser" title="Delete this detail"></button>`
                         : '';
                     const ledgerBtn = `<button class="sc-detail-ledger menu_button fa-solid fa-brain" title="Read this scene into the character ledger"></button>`;
-                    detailRow = `<div class="sc-detail-row" data-layer="${i}" data-idx="${j}">${detailText}${detailRedo}${detailDel}${ledgerBtn}</div>`;
+                    detailRow = `<div class="sc-detail-row" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}">${detailText}${detailRedo}${detailDel}${ledgerBtn}</div>`;
                 }
 
                 // A merge that kept almost nothing of its sources says so, and offers
@@ -7211,13 +7268,13 @@ function updateSnippetBrowser() {
                 if (sn.thinMerge) {
                     const pct = Math.round((sn.thinMerge.ratio || 0) * 100);
                     const restoreBtn = sn.thinSources
-                        ? `<button class="sc-thin-restore menu_button" data-layer="${i}" data-idx="${j}" title="Replace this snippet's text with the original snippets it was merged from">↩ Restore originals</button>`
+                        ? `<button class="sc-thin-restore menu_button" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}" title="Replace this snippet's text with the original snippets it was merged from">↩ Restore originals</button>`
                         : '';
-                    thinRow = `<div class="sc-thin-row" data-layer="${i}" data-idx="${j}">⚠ Lossy merge: ${sn.thinMerge.srcChars} chars of source became ${sn.thinMerge.outChars} (${pct}% kept).${sn.thinSources ? ' The originals were preserved.' : ''} ${restoreBtn}</div>`;
+                    thinRow = `<div class="sc-thin-row" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}">⚠ Lossy merge: ${sn.thinMerge.srcChars} chars of source became ${sn.thinMerge.outChars} (${pct}% kept).${sn.thinSources ? ' The originals were preserved.' : ''} ${restoreBtn}</div>`;
                 }
 
-                html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}">
-                <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" title="Click to edit">${escapeHtml(sn.text)}</span>
+                html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}">
+                <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" data-sig="${_snipSig(sn)}" title="Click to edit">${escapeHtml(sn.text)}</span>
                 <span class="sc-snippet-meta">${rangeStr}${seedStr}</span>
                 ${redoBtn}
                 <button class="sc-snippet-delete menu_button fa-solid fa-xmark" title="Delete this snippet"></button>
@@ -7234,11 +7291,12 @@ function updateSnippetBrowser() {
     // Edit snippet on click
     $('.sc-snippet-text').off('click').on('click', function () {
         const layerIdx = parseInt($(this).data('layer'));
-        const snippetIdx = parseInt($(this).data('idx'));
-        const layer = store.layers[layerIdx];
-        if (!layer || !layer[snippetIdx]) return;
+        let snippetIdx = parseInt($(this).data('idx'));
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        const layer = _row.arr; snippetIdx = _row.idx;
 
-        const sn = layer[snippetIdx];
+        const sn = _row.sn;
         const textEl = $(this);
 
         const textarea = $('<textarea class="sc-snippet-edit"></textarea>')
@@ -7282,8 +7340,9 @@ function updateSnippetBrowser() {
     $('.sc-thin-restore').off('click').on('click', async function () {
         const i = parseInt($(this).data('layer'), 10);
         const j = parseInt($(this).data('idx'), 10);
-        const st = getChatStore();
-        const sn = st.layers?.[i]?.[j];
+        const _row = _resolveSnipRow(i, j, $(this).data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        const sn = _row.sn;
         if (!sn || !sn.thinSources) { toastr.error('Those originals are no longer available.', 'Summaryception'); return; }
         sn.text = sn.thinSources;
         delete sn.thinSources;
@@ -7296,12 +7355,13 @@ function updateSnippetBrowser() {
 
     $('.sc-snippet-redo').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-snippet').data('layer'));
-        const snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
+        let snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
         const store = getChatStore();
-        const layer = store.layers[layerIdx];
-        if (!layer || !layer[snippetIdx]) return;
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        const layer = _row.arr; snippetIdx = _row.idx;
 
-        const sn = layer[snippetIdx];
+        const sn = _row.sn;
 
         if (!sn.turnRange) {
             toastr.warning(
@@ -7379,8 +7439,12 @@ function updateSnippetBrowser() {
     // Delete snippet
     $('.sc-snippet-delete').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-snippet').data('layer'));
-        const snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
-        const layer = store.layers[layerIdx];
+        let snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
+        // THE destructive one: a stale index here splices out a DIFFERENT scene's
+        // summary while the row on screen survives, and nothing tells the user.
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        const layer = _row.arr; snippetIdx = _row.idx;
         if (layer) {
             const removedSn = layer[snippetIdx];
             layer.splice(snippetIdx, 1);
@@ -7416,9 +7480,9 @@ function updateSnippetBrowser() {
     $('.sc-detail-text').off('click').on('click', function () {
         const layerIdx = parseInt($(this).data('layer'));
         const snippetIdx = parseInt($(this).data('idx'));
-        const layer = store.layers[layerIdx];
-        if (!layer || !layer[snippetIdx]) return;
-        const sn = layer[snippetIdx];
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        const sn = _row.sn;
         const commit = async (val) => {
             const v = (val || '').trim();
             if (v !== (sn.detail || '')) {
@@ -7453,10 +7517,11 @@ function updateSnippetBrowser() {
     $('.sc-detail-redo').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-detail-row').data('layer'));
         const snippetIdx = parseInt($(this).closest('.sc-detail-row').data('idx'));
-        const layer = store.layers[layerIdx];
-        if (!layer || !layer[snippetIdx] || !layer[snippetIdx].turnRange) return;
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-detail-row').data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        if (!_row.sn.turnRange) return;
         if (isSummarizing) { toastr.warning('Busy summarizing — try again in a moment.', 'Summaryception'); return; }
-        const sn = layer[snippetIdx];
+        const sn = _row.sn;
         const [rangeStart, rangeEnd] = sn.turnRange;
         const { chat } = SillyTavern.getContext();
         _acquireSummarize();
@@ -7499,9 +7564,10 @@ function updateSnippetBrowser() {
     $('.sc-detail-delete').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-detail-row').data('layer'));
         const snippetIdx = parseInt($(this).closest('.sc-detail-row').data('idx'));
-        const layer = store.layers[layerIdx];
-        if (layer && layer[snippetIdx]) {
-            delete layer[snippetIdx].detail;
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-detail-row').data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        if (_row.sn) {
+            delete _row.sn.detail;
             await saveChatStore();
             updateInjection();
             updateSnippetBrowser();
@@ -7512,7 +7578,10 @@ function updateSnippetBrowser() {
     // Selected ledger: read this one scene into the character ledger
     $('.sc-detail-ledger').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-detail-row').data('layer'));
-        const snippetIdx = parseInt($(this).closest('.sc-detail-row').data('idx'));
+        let snippetIdx = parseInt($(this).closest('.sc-detail-row').data('idx'));
+        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-detail-row').data('sig'));
+        if (!_row) { _snipRowGone(); return; }
+        snippetIdx = _row.idx;   // runLedgerForSnippet takes coordinates, so hand it the TRUE ones
         const btn = $(this);
         btn.prop('disabled', true).removeClass('fa-brain').addClass('fa-spinner fa-spin');
         try {
@@ -7861,10 +7930,22 @@ function extractJsonArray(raw) {
     catch { return null; }
 }
 
+// Sets store.summarizedUpTo AND returns it. The return is not decoration: the
+// snippet-browser delete handler is written as
+// `store.summarizedUpTo = recomputeSummarizedUpTo()` — and while this returned
+// undefined, that assignment overwrote the correct value this function had just
+// computed. Deleting ONE snippet from the Memory panel therefore set the pointer to
+// undefined, and nothing recovered from it: `t.index > undefined` is false, so
+// summarizeOneBatch found ZERO eligible turns forever; `t.index <= undefined` is
+// also false, so the "repair ghosting" branch ghosted nothing either; passageStart
+// computed to NaN; every guard downstream is `typeof === 'number'` and skipped it;
+// and JSON.stringify DROPS an undefined value, so the key vanished from the saved
+// metadata entirely. One click silently ended summarization for that chat, forever.
 function recomputeSummarizedUpTo() {
     const store = getChatStore();
     const l0 = (store.layers && store.layers[0]) ? store.layers[0].filter(sn => sn.turnRange) : [];
     store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;
+    return store.summarizedUpTo;
 }
 
 // Undo = the recorded inverses, replayed LIFO with the same content-CAS as

@@ -25,6 +25,42 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.102.0: void-assignment + positional row identity ──
+    ['recomputeSummarizedUpTo goes back to returning nothing', 'index.js',
+        "    store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;\n    return store.summarizedUpTo;",
+        "    store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;",
+        'KILL SHOT: assigning FROM the helper leaves a number, not undefined'],
+
+    ['the empty case answers -Infinity again (JSON saves it as null)', 'index.js',
+        "    const l0 = (store.layers && store.layers[0]) ? store.layers[0].filter(sn => sn.turnRange) : [];\n    store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;",
+        "    const l0 = (store.layers && store.layers[0]) ? store.layers[0].filter(sn => sn.turnRange) : [];\n    store.summarizedUpTo = Math.max(...l0.map(sn => sn.turnRange[1]));",
+        'a Layer 0 of range-less snippets answers -1, not -Infinity'],
+
+    ['getChatStore stops repairing a damaged pointer', 'index.js',
+        "    if (typeof chatMetadata[MODULE_NAME].summarizedUpTo !== 'number' || !isFinite(chatMetadata[MODULE_NAME].summarizedUpTo)) {",
+        "    if (false) {",
+        'getChatStore repairs a non-numeric summarizedUpTo — chats already damaged recover on load'],
+
+    ['row resolution trusts the position again (deletes the wrong snippet)', 'index.js',
+        "    if (at && _snipSig(at) === sig) return { arr, idx: snippetIdx, sn: at };\n    const hits = [];",
+        "    if (at) return { arr, idx: snippetIdx, sn: at };\n    const hits = [];",
+        'KILL SHOT: after a promotion shifted the layer, the row still resolves to the snippet it DEPICTS'],
+
+    ['an ambiguous search picks the first candidate', 'index.js',
+        "    if (hits.length !== 1) return null;   // gone, or duplicated — refuse rather than guess",
+        "    if (hits.length === 0) return null;",
+        'but when the position misses and the search finds TWO candidates, it refuses rather than guessing'],
+
+    ['the delete handler bypasses the resolver', 'index.js',
+        "        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));\n        if (!_row) { _snipRowGone(); return; }\n        const layer = _row.arr; snippetIdx = _row.idx;\n        if (layer) {",
+        "        const _row = { arr: store.layers[layerIdx], idx: snippetIdx };\n        const layer = _row.arr;\n        if (layer) {",
+        '.sc-snippet-delete resolves through _resolveSnipRow'],
+
+    ['rows stop carrying the signature the resolver needs', 'index.js',
+        ' data-sig="${_snipSig(sn)}"',
+        '',
+        'every rendered row carries the signature the resolver needs'],
+
     // ── v5.101.0: the notes fold must honour the REWIND FLOOR, not the target ──
     // Invisible to ledger_test.js by construction: rewindLedgerFromNotes is correct
     // for whatever turn it is given. The bug was which turn tryAutoRewindLedger gave
