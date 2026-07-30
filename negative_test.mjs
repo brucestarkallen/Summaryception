@@ -25,6 +25,65 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.103.0: coverage-gated ghosting + autonomous auditor ──
+    ['ghosting stops requiring coverage (deleted snippet reopens the memory hole)', 'index.js',
+        "        if (!_turnHasCoverage(store, i)) continue;\n        msg.extra.sc_ghosted = true;",
+        "        msg.extra.sc_ghosted = true;",
+        // The KILL SHOT above it proves the RULE (a pure computation over a store);
+        // it cannot see a change in index.js. The structural assertion is what
+        // catches the guard being removed, so that is the one named.
+        'ghostMessagesUpTo enforces it'],
+
+    ['the delete rescue goes back to Layer 0 only', 'index.js',
+        "            if (removedSn && Array.isArray(removedSn.turnRange)) {",
+        "            if (layerIdx === 0 && removedSn && removedSn.turnRange) {",
+        'the Layer-0-only condition is gone'],
+
+    ['the delete confirmation is removed', 'index.js',
+        "            if (!_okToDelete) return;",
+        "            if (false) return;",
+        'and the delete is confirmed first, with its consequence stated'],
+
+    ['coverage ignores deep layers (a promoted meta-summary stops counting)', 'index.js',
+        "    for (const layer of store.layers) {\n        if (!Array.isArray(layer)) continue;\n        for (const sn of layer) {\n            if (!sn || !Array.isArray(sn.turnRange)) continue;",
+        "    for (const layer of [store.layers[0]]) {\n        if (!Array.isArray(layer)) continue;\n        for (const sn of layer) {\n            if (!sn || !Array.isArray(sn.turnRange)) continue;",
+        'a promoted meta-summary provides coverage on its own'],
+
+    ['the nudge goes back to oldest-first (new findings starve)', 'index.js',
+        "        .sort((a, b) => ((b.createdAt || 0) - (a.createdAt || 0)))",
+        "        .sort((a, b) => ((a.createdAt || 0) - (b.createdAt || 0)))",
+        'KILL SHOT: the newest findings are delivered — six unfixable originals can no longer starve them'],
+
+    ['corrections never retire (eternal directives)', 'index.js',
+        "&& ((f.nudged | 0) < dl))",
+        ")",
+        'a flag delivered up to the limit is retired from injection'],
+
+    ['deliveries are counted per injection rebuild, not per generation', 'index.js',
+        "            for (const f of _selectNudgeFlags(_st.continuityFlags, _cap, _s.continuityNudgeDeliveries)) f.nudged = (f.nudged | 0) + 1;",
+        "            void _cap; void _st;",
+        'deliveries are counted in onGenerationStarted (fires once per turn), not in updateInjection'],
+
+    ['a botched auto-rewrite is written over the snippet again', 'index.js',
+        "            const _v = _fixVerdict(before.length, corrected.length, getSettings());\n            if (!_v.ok) {",
+        "            const _v = { ok: true, ratio: 1, reason: 'ok' };\n            if (!_v.ok) {",
+        'a refused rewrite leaves the snippet untouched and the flag open'],
+
+    ['the fixer guard accepts a one-line gist', 'index.js',
+        "    return { ok: ratio >= minR, ratio, reason: ratio >= minR ? 'ok' : 'lost too much of the snippet' };",
+        "    return { ok: true, ratio, reason: 'ok' };",
+        'KILL SHOT: a one-line gist replacing a full snippet is refused'],
+
+    ['the autonomous guard is disarmed again', 'index.js',
+        "    continuityEnabled: true,       // ON:",
+        "    continuityEnabled: false,      // ON:",
+        'the continuity auditor runs'],
+
+    ['findings stop being delivered', 'index.js',
+        "    continuityNudge: true,         // ON:",
+        "    continuityNudge: false,        // ON:",
+        'its findings are delivered to the storyteller'],
+
     // ── v5.102.0: void-assignment + positional row identity ──
     ['recomputeSummarizedUpTo goes back to returning nothing', 'index.js',
         "    store.summarizedUpTo = l0.length > 0 ? Math.max(...l0.map(sn => sn.turnRange[1])) : -1;\n    return store.summarizedUpTo;",
@@ -51,9 +110,11 @@ const MUTATIONS = [
         "    if (hits.length === 0) return null;",
         'but when the position misses and the search finds TWO candidates, it refuses rather than guessing'],
 
+    // Re-anchored for v5.103.0: the confirmation dialog now sits between the
+    // resolver call and `if (layer)`, so the old three-line anchor no longer exists.
     ['the delete handler bypasses the resolver', 'index.js',
-        "        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));\n        if (!_row) { _snipRowGone(); return; }\n        const layer = _row.arr; snippetIdx = _row.idx;\n        if (layer) {",
-        "        const _row = { arr: store.layers[layerIdx], idx: snippetIdx };\n        const layer = _row.arr;\n        if (layer) {",
+        "        const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));\n        if (!_row) { _snipRowGone(); return; }\n        const layer = _row.arr; snippetIdx = _row.idx;\n        // PRECAUTION.",
+        "        const _row = { arr: store.layers[layerIdx], idx: snippetIdx, sn: (store.layers[layerIdx] || [])[snippetIdx] };\n        const layer = _row.arr;\n        // PRECAUTION.",
         '.sc-snippet-delete resolves through _resolveSnipRow'],
 
     ['rows stop carrying the signature the resolver needs', 'index.js',

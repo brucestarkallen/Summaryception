@@ -33,7 +33,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
     'truncateLedgerToTurn', 'clampStoreToLength',
     'RETRY_CONFIG', 'isRetryableError', '_tpThreads',
-    'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow'];
+    'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow',
+    '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -82,6 +83,7 @@ return {
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
   truncateLedgerToTurn, clampStoreToLength, isRetryableError, RETRY_CONFIG, ConnectionError, _tpThreads,
   recomputeSummarizedUpTo, _snipSig, _resolveSnipRow,
+  _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn,
 };
 `;
 const L = new Function(sandbox)();
@@ -3417,6 +3419,124 @@ section('MC name — resolved automatically, override only to correct');
         ok((body.match(/data-sig="\$\{_snipSig\(sn\)\}"/g) || []).length >= 5,
             'every rendered row carries the signature the resolver needs');
     }
+}
+
+
+// ─── v5.103.0: no turn is ever both hidden and unsummarized ───────────────────
+// summarizedUpTo is a scalar high-water mark; deleting a snippet from the MIDDLE of
+// Layer 0 leaves a hole BELOW it that the scalar cannot express. The delete handler
+// correctly returned those turns to verbatim — and the next summarization pass hid
+// them again, because ghostMessagesUpTo ghosted everything up to a bound derived
+// from that same mark. Not verbatim, not summarized: gone from the model's view,
+// silently, with no trigger that would ever rescue them.
+{
+    section('ghosting requires coverage — a deleted snippet cannot open a memory hole');
+    const store = { layers: [[
+        { text: 's0', turnRange: [0, 3] },
+        { text: 's1', turnRange: [4, 7] },
+        { text: 's2', turnRange: [8, 11] },
+    ]], summarizedUpTo: 11 };
+    L.__setStore(store);
+    ok(L._turnHasCoverage(store, 5) === true, 'a narrated turn has coverage');
+    ok(L._turnHasCoverage(store, 40) === false, 'an unnarrated turn does not');
+    // Delete the MIDDLE snippet — the position that leaves the mark above the hole.
+    store.layers[0].splice(1, 1);
+    store.summarizedUpTo = L.recomputeSummarizedUpTo();
+    ok(store.summarizedUpTo === 11, 'the mark stays at 11: only a head deletion lowers it');
+    for (const i of [4, 5, 6, 7]) {
+        ok(L._turnHasCoverage(store, i) === false, `turn ${i} is now narrated by nothing`);
+    }
+    ok(L._turnHasCoverage(store, 2) === true && L._turnHasCoverage(store, 9) === true,
+        'the surviving snippets still cover their own turns');
+    // KILL SHOT: those turns are BELOW the mark, so the old rule would hide them.
+    const wouldGhostOld = [4, 5, 6, 7].filter(i => i <= store.summarizedUpTo);
+    const wouldGhostNow = [4, 5, 6, 7].filter(i => i <= store.summarizedUpTo && L._turnHasCoverage(store, i));
+    ok(wouldGhostOld.length === 4 && wouldGhostNow.length === 0,
+        'KILL SHOT: below the mark yet uncovered — the old rule hid all four, the coverage rule hides none');
+    // The delete handler must rescue exactly those, at ANY layer depth.
+    ok(JSON.stringify(L._uncoveredTurnsIn(store, 4, 7, 12)) === JSON.stringify([4, 5, 6, 7]),
+        'the orphan rescue finds exactly the turns the deletion stranded');
+    ok(L._uncoveredTurnsIn(store, 0, 3, 12).length === 0, 'and nothing that is still narrated');
+    ok(L._uncoveredTurnsIn(store, 8, 20, 12).length === 0, 'and never past the end of the chat');
+    // A deep-layer snippet is the ONLY thing narrating turns whose L0 sources were
+    // promoted away, so the rescue must not be Layer-0-only.
+    const deepOnly = { layers: [[], [{ text: 'meta', turnRange: [0, 9] }]] };
+    L.__setStore(deepOnly);
+    ok(L._turnHasCoverage(deepOnly, 5) === true, 'a promoted meta-summary provides coverage on its own');
+    ok(/if \(!_turnHasCoverage\(store, i\)\) continue;/.test(SRC_FULL), 'ghostMessagesUpTo enforces it');
+    ok(/_uncoveredTurnsIn\(store, removedSn\.turnRange\[0\]/.test(SRC_FULL), 'the delete handler rescues by coverage, not by depth');
+    ok(!/layerIdx === 0 && removedSn && removedSn\.turnRange/.test(SRC_FULL), 'the Layer-0-only condition is gone');
+    // Anchored on the GUARD, not on the identifier: asserting that `_okToDelete`
+    // merely appears somewhere left the assertion green when the branch that acts on
+    // it was neutered, which the negative test correctly called decorative.
+    ok(/if \(!_okToDelete\) return;/.test(SRC_FULL), 'and the delete is confirmed first, with its consequence stated');
+}
+
+// ─── v5.103.0: the auditor's findings actually REACH the storyteller ──────────
+// The nudge delivered the OLDEST `cap` open flags from an append-ordered array.
+// Source-level flags can never be auto-fixed (applyContinuityFix refuses anything
+// but where==='snippet', deliberately), so they never leave `open` — and after `cap`
+// of them the block was frozen: every later finding was discovered, flagged, and
+// never delivered again. The survivors were then re-injected on every generation
+// forever, re-opening facts the story had long settled.
+{
+    section('continuity nudge — newest first, and it retires');
+    const mk = (id, where, createdAt, nudged) => ({ id, status: 'open', fix: 'fix ' + id, where, createdAt, nudged });
+    const flags = [];
+    for (let i = 1; i <= 6; i++) flags.push(mk(i, 'source', i, 0));      // unfixable, arrived first
+    for (let i = 7; i <= 12; i++) flags.push(mk(i, 'snippet', i, 0));    // newer, fixable
+    let sel = L._selectNudgeFlags(flags, 6, 12).map(f => f.id);
+    ok(sel.length === 6, 'the cap is respected');
+    ok(sel.includes(12) && sel.includes(11),
+        'KILL SHOT: the newest findings are delivered — six unfixable originals can no longer starve them');
+    ok(!sel.includes(1), 'and the oldest no longer holds a slot by seniority alone');
+    // Retirement frees the slot rather than holding it forever.
+    const old = mk(99, 'source', 99, 12);
+    ok(L._selectNudgeFlags([old], 6, 12).length === 0, 'a flag delivered up to the limit is retired from injection');
+    ok(L._selectNudgeFlags([old], 6, 0).length === 1, 'a limit of 0 means never retire');
+    ok(L._selectNudgeFlags([mk(1, 'source', 1, 11)], 6, 12).length === 1, 'one delivery short of the limit still goes out');
+    // Only actionable, open flags.
+    ok(L._selectNudgeFlags([{ status: 'resolved', fix: 'x', createdAt: 1 }], 6, 12).length === 0, 'a resolved flag is never delivered');
+    ok(L._selectNudgeFlags([{ status: 'open', fix: '   ', createdAt: 1 }], 6, 12).length === 0, 'a flag with no usable fix is never delivered');
+    ok(L._selectNudgeFlags(null, 6, 12).length === 0 && L._selectNudgeFlags([null], 6, 12).length === 0, 'junk input yields an empty selection');
+    // The counter must be per-GENERATION, not per injection rebuild.
+    ok(/function onGenerationStarted[\s\S]{0,2000}?_selectNudgeFlags/.test(SRC_FULL),
+        'deliveries are counted in onGenerationStarted (fires once per turn), not in updateInjection');
+    ok(/const open = _selectNudgeFlags\(store\.continuityFlags, cap, s\.continuityNudgeDeliveries\)/.test(SRC_FULL),
+        'and the assembler selects through the same function, so the count matches what was sent');
+}
+
+// ─── v5.103.0: an auto-applied rewrite is sanity-checked ──────────────────────
+// A correction targets one claim; it is not a re-summarization. Nothing checked the
+// fixer's output, and with autoFix ON there is no human in the loop — a gist, a
+// refusal, or a truncated fragment silently replaced a full scene summary, no undo.
+{
+    section('continuity fixer — a botched rewrite is refused, not written');
+    const s = { continuityFixMinRatio: 0.5 };
+    ok(L._fixVerdict(1000, 980, s).ok === true, 'a real correction keeps nearly all of the snippet');
+    ok(L._fixVerdict(1000, 40, s).ok === false, 'KILL SHOT: a one-line gist replacing a full snippet is refused');
+    ok(L._fixVerdict(1000, 0, s).ok === false, 'empty output is refused');
+    ok(L._fixVerdict(1000, 499, s).ok === false && L._fixVerdict(1000, 500, s).ok === true, 'the ratio boundary is exact');
+    ok(L._fixVerdict(150, 20, s).ok === true, 'a short snippet is not judged by ratio — there is no volume to measure');
+    ok(L._fixVerdict(150, 0, s).ok === false, 'but empty is refused at any size');
+    ok(L._fixVerdict(1000, 400, {}).ok === false, 'the default ratio (0.5) applies when unset');
+    // Same correction: the verdict must actually be COMPUTED from the two lengths.
+    // Testing for `if (!_v.ok)` alone passed when _v was replaced by a literal.
+    ok(/const _v = _fixVerdict\(before\.length, corrected\.length, getSettings\(\)\);/.test(SRC_FULL)
+        && /if \(!_v\.ok\) \{/.test(SRC_FULL) && /flag stays open/.test(SRC_FULL),
+        'a refused rewrite leaves the snippet untouched and the flag open');
+}
+
+// ─── v5.103.0: the autonomous path is ON by default ──────────────────────────
+{
+    section('autonomy defaults — the guard is armed out of the box');
+    const dflt = SRC_FULL.slice(SRC_FULL.indexOf('const defaultSettings'), SRC_FULL.indexOf('// ─── Prompt Presets'));
+    ok(/continuityEnabled: true/.test(dflt), 'the continuity auditor runs');
+    ok(/continuityNudge: true/.test(dflt), 'its findings are delivered to the storyteller');
+    ok(/continuityAutoFix: true/.test(dflt), 'and snippet-level fixes are applied automatically');
+    ok(/continuityNudgeDeliveries: 12/.test(dflt), 'deliveries are bounded so new findings always get a slot');
+    ok(/continuityFixMinRatio: 0\.5/.test(dflt), 'and an auto-rewrite must keep at least half the snippet');
+    ok(/ledgerAuditEnabled: true/.test(dflt) && /ledgerAuditEveryTurns: 12/.test(dflt), 'the ledger auditor was already armed');
 }
 
 console.log('\n────────────────────────────────────────');

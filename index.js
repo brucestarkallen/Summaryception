@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.102.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.103.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -61,14 +61,16 @@ const defaultSettings = Object.freeze({
     // ── Continuity Auditor: a focused pass that checks each snippet against BOTH its
     //    source passage (drift) and the established record (contradictions), and files
     //    concise flags into a visible work-queue you or the copilot resolve. ──
-    continuityEnabled: false,      // opt-in (adds a background LLM pass per snippet)
-    continuityNudge: false,        // global "nudge the story" toggle: inject unresolved fixes as OOC corrections so the Storyteller self-corrects
+    continuityEnabled: true,       // ON: the continuity auditor is the autonomous guard against contradictions. Costs one background LLM pass per snippet created.
+    continuityNudge: true,         // ON: findings are DELIVERED to the storyteller as OOC corrections. Without this the auditor only fills a panel nobody reads.
     continuityNudgeMax: 6,         // cap how many unresolved fixes are injected at once
+    continuityNudgeDeliveries: 12, // retire a correction from INJECTION after this many generations delivered (0 = never retire; it stays in the panel either way)
+    continuityFixMinRatio: 0.5,    // an auto-applied correction that keeps less than this fraction of the snippet is refused as a botched rewrite, not written
     continuitySystemPrompt:
         `Role: continuity auditor for an ongoing collaborative fiction. You receive the exact recent PASSAGE, the compact SNIPPET written from it, and the established RECORD (character ledger, notepad, earlier summaries; the notepad is the story's STARTING canon — written at the start and deliberately never updated: its foundational facts remain binding, but its situational details describe how the story BEGAN, and the story having moved past them is natural progression, never a CONTINUITY finding). Your ONLY job is to catch genuine continuity problems of two kinds: (1) DRIFT — the SNIPPET distorts, misattributes, or drops something materially important from the PASSAGE; (2) CONTINUITY — the PASSAGE or SNIPPET contradicts the established RECORD: a character in the wrong place, someone knowing or referencing something they never witnessed, a broken timeline or sequence, an inconsistent relationship or stat, or a confused/renamed entity. Report ONLY real contradictions or material distortions — never style, pacing, speculation, or trivial omissions, and never processing directives. Do NOT invent facts; base every finding strictly on the given text. If everything is consistent, output exactly: NONE. Otherwise output ONLY a compact JSON array, each element {"issue":"<what contradicts what>","fix":"<the correction>","kind":"drift"|"continuity","where":"snippet"|"source"}. Set "where":"snippet" when the SNIPPET is the wrong one (it misrepresents a correct SOURCE, or states something the SOURCE does not) — fixable by rewriting the snippet to match the source. Set "where":"source" when the SOURCE passage itself is wrong (it contradicts the RECORD and the snippet only faithfully repeats it) — that needs a message edit; a snippet rewrite would just make the snippet disagree with its source. No preamble, no markdown, no commentary.`,
     continuityUserPrompt:
         `<player_name>{{player_name}}</player_name>\n<record>{{context_str}}</record>\n<passage>{{story_txt}}</passage>\n<snippet>{{snippet}}</snippet>\n\n<snippet> is the compact memory line recorded for <passage>. <record> is what the story has already established elsewhere.\n\nCheck for exactly two things:\n1) DRIFT — does <snippet> distort, misattribute, or omit something materially important that IS in <passage>?\n2) CONTINUITY — does anything in <passage> or <snippet> CONTRADICT <record> — wrong location/presence, knowledge a character could not have, broken timeline, inconsistent relationship/stat, confused identity?\n\nFlag ONLY genuine problems, grounded in the text. Ignore style, pacing, and trivial detail. Do not invent.\n\nFor each problem set "where": "snippet" if the SNIPPET is the wrong one (it misrepresents a correct <passage> — fixable by rewriting the snippet), or "source" if <passage> itself is wrong (it contradicts <record> and the snippet only repeats it — needs a message edit, not a snippet rewrite).\n\nIf all consistent, output exactly:\nNONE\n\nOtherwise output ONLY a JSON array, e.g.:\n[{"issue":"Snippet says Alexia boarded the train, but the passage says she stayed at the academy","fix":"Alexia stayed at the academy; she did not board the train","kind":"drift","where":"snippet"},{"issue":"The passage itself puts Alexia on the train, but the record establishes she is at the academy and never left","fix":"Alexia is at the academy, not on the train","kind":"continuity","where":"source"}]`,
-    continuityAutoFix: false,       // when on, apply snippet-level fixes automatically (oldest -> newest) as issues are found, instead of leaving them as flags to review
+    continuityAutoFix: true,        // ON: snippet-level fixes are applied automatically (oldest -> newest) as issues are found. Safe since v5.103.0: a rewrite that loses more than continuityFixMinRatio of the snippet is refused, not written.
     continuityFixSystemPrompt:
         `Role: you correct a single memory-snippet to remove a continuity error. You get the current SNIPPET and a CORRECTION (the established truth). Rewrite the snippet so it is fully consistent with the correction, changing ONLY what the correction requires and preserving everything else — length, tone, and all other facts. Do not add commentary or new events. Output ONLY the corrected snippet text — no preamble, no quotes, no labels. If the snippet already matches the correction, output it unchanged.`,
     continuityFixUserPrompt:
@@ -1074,6 +1076,34 @@ async function unghostAllMessages() {
     log(`Unghosted ${valid.length} messages in ${runs} range call(s) (only Summaryception-hidden ones)`);
 }
 
+// Pure: is turn `i` narrated by a snippet that still exists, in ANY layer? This is
+// the same question repairIfBranched asks in its orphan rescue, and it is THE
+// precondition for hiding a turn from the model: the summary is what stands in for
+// the prose once the prose is gone. Range-less snippets (imported, or from before
+// range propagation) cover nothing detectably — they can only ever make this answer
+// "no", which is the safe direction: an already-hidden turn is untouched, and a turn
+// that is still visible stays visible.
+function _turnHasCoverage(store, i) {
+    if (!store || !Array.isArray(store.layers)) return false;
+    for (const layer of store.layers) {
+        if (!Array.isArray(layer)) continue;
+        for (const sn of layer) {
+            if (!sn || !Array.isArray(sn.turnRange)) continue;
+            const a = sn.turnRange[0], b = sn.turnRange[1];
+            if (typeof a === 'number' && typeof b === 'number' && i >= a && i <= b) return true;
+        }
+    }
+    return false;
+}
+// Turns in [a,b] that NO surviving snippet narrates. Used by the delete handler to
+// return exactly the orphaned turns to verbatim — at any layer depth.
+function _uncoveredTurnsIn(store, a, b, chatLen) {
+    const out = [];
+    if (typeof a !== 'number' || typeof b !== 'number') return out;
+    const hi = Math.min(b, (chatLen | 0) - 1);
+    for (let i = Math.max(0, a); i <= hi; i++) if (!_turnHasCoverage(store, i)) out.push(i);
+    return out;
+}
 async function ghostMessagesUpTo(endIndex) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
@@ -1095,6 +1125,15 @@ async function ghostMessagesUpTo(endIndex) {
         if (!msg.extra) msg.extra = {};
         if (msg.extra.sc_ghosted) continue;                       // already ours
         if (msg.is_hidden) continue;                              // already hidden by the user
+        // COVERAGE IS THE LICENCE TO HIDE. `endIndex` is derived from summarizedUpTo,
+        // a scalar high-water mark — and deleting a snippet from the MIDDLE of Layer 0
+        // leaves a hole BELOW that mark which the scalar cannot express. Those turns
+        // were correctly returned to verbatim by the delete handler, and then the very
+        // next summarization pass hid them again here: not verbatim, not summarized,
+        // just gone from the model's view, silently and permanently. Nothing triggers
+        // branch repair on that state, so nothing ever rescued them. A turn is hidden
+        // only once something still narrates it.
+        if (!_turnHasCoverage(store, i)) continue;
         msg.extra.sc_ghosted = true;
         if (!store.ghostedIndices.includes(i)) store.ghostedIndices.push(i);
         toHide.push(i);
@@ -1970,6 +2009,54 @@ function _continuitySig(flag) {
 
 // Add new flags for a snippet's turnRange, skipping ones already open (by sig) and any
 // the user dismissed. Returns how many were added.
+// Pure: WHICH corrections go to the storyteller this turn, and in what order.
+//
+// This used to be `open.filter(...).slice(0, cap)` over an array that
+// mergeContinuityFlags APPENDS to — so it delivered the OLDEST `cap` open flags,
+// forever. Two consequences, both fatal to autonomous operation:
+//
+//  1. STARVATION. A source-level flag ("the SOURCE passage is wrong") can never be
+//     auto-fixed — applyContinuityFix refuses anything but `where === 'snippet'`, on
+//     purpose, because rewriting the snippet to match a wrong source just re-flags
+//     forever. So source flags never leave `open`. After `cap` of them the nudge
+//     block was frozen: every later finding was discovered, flagged, and never
+//     reached the storyteller again. The auditor kept working and stopped mattering.
+//  2. ETERNAL DIRECTIVES. The surviving `cap` were re-injected on every single
+//     generation for the rest of the story — telling the storyteller to correct
+//     something it corrected two hundred turns ago. That is not neutral: re-opening
+//     a settled fact is itself a way to CAUSE the contradictions this exists to
+//     prevent.
+//
+// Newest-first, so a fresh finding always gets a slot; retired past
+// `deliveryLimit` deliveries, so a slot always frees up. A retired flag is retired
+// from INJECTION only — it stays in the panel, with its count, so nothing is ever
+// silently dropped.
+function _selectNudgeFlags(flags, cap, deliveryLimit) {
+    if (!Array.isArray(flags)) return [];
+    const lim = Math.max(1, cap | 0);
+    const dl = (typeof deliveryLimit === 'number' && deliveryLimit > 0) ? deliveryLimit : Infinity;
+    return flags
+        .filter(f => f && f.status === 'open' && typeof f.fix === 'string' && f.fix.trim() && ((f.nudged | 0) < dl))
+        .slice()
+        .sort((a, b) => ((b.createdAt || 0) - (a.createdAt || 0)))
+        .slice(0, lim);
+}
+
+// Pure: is an auto-applied correction a plausible correction, or a botched rewrite?
+// A correction targets one claim in a snippet; it is not a re-summarization, so it
+// should keep almost all of the text. Nothing checked this, and with autoFix on, a
+// model returning a one-line gist, a refusal, or a truncated fragment silently
+// REPLACED a full scene summary with no undo. Short snippets are not judged by
+// ratio (there is no volume to measure); empty output is refused at any size.
+function _fixVerdict(beforeLen, afterLen, s) {
+    const b = Math.max(0, beforeLen | 0), a = Math.max(0, afterLen | 0);
+    if (a === 0) return { ok: false, ratio: 0, reason: 'empty' };
+    if (b < 200) return { ok: true, ratio: b > 0 ? (a / b) : 1, reason: 'too short to judge' };
+    const minR = (typeof s?.continuityFixMinRatio === 'number' && s.continuityFixMinRatio > 0) ? s.continuityFixMinRatio : 0.5;
+    const ratio = a / b;
+    return { ok: ratio >= minR, ratio, reason: ratio >= minR ? 'ok' : 'lost too much of the snippet' };
+}
+
 function mergeContinuityFlags(store, turnRange, newFlags) {
     if (!store || !Array.isArray(newFlags)) return 0;
     if (!Array.isArray(store.continuityFlags)) store.continuityFlags = [];
@@ -4647,7 +4734,20 @@ async function applyContinuityFix(id) {
             log('applyContinuityFix: snippet changed or moved mid-rewrite — result discarded, flag stays open.');
             return false;
         }
-        if (corrected && corrected !== before) { sn.text = corrected; changed = true; }
+        // A correction is not a re-summarization: it targets one claim and should keep
+        // nearly all of the text. With autoFix on there is no human between the model
+        // and the store, so a gist, a refusal, or a truncated fragment would silently
+        // replace a full scene summary. Refuse it and leave the flag OPEN — an
+        // unapplied correction is recoverable; a destroyed snippet is not.
+        if (corrected && corrected !== before) {
+            const _v = _fixVerdict(before.length, corrected.length, getSettings());
+            if (!_v.ok) {
+                log(`applyContinuityFix: refused a rewrite that kept only ${(_v.ratio * 100).toFixed(0)}% of the snippet (${_v.reason}) — snippet untouched, flag stays open.`);
+                try { toastr.warning(`A continuity correction came back as ${(_v.ratio * 100).toFixed(0)}% of the original snippet, so it was NOT applied — the snippet is unchanged and the flag stays open for review.`, 'Summaryception', { timeOut: 8000 }); } catch (_) {}
+                return false;
+            }
+            sn.text = corrected; changed = true;
+        }
     } catch (e) { log('applyContinuityFix: rewrite failed (non-fatal):', e); return false; }
     const i = list.findIndex(f => f && f.id === flag.id);
     if (i >= 0) list.splice(i, 1);
@@ -4932,7 +5032,10 @@ async function summarizeOneBatch(visibleTurns) {
 
     if (eligibleTurns.length === 0) {
         log('All visible turns are already summarized — repairing ghosting...');
-        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo);
+        // Same law as ghostMessagesUpTo: `<= summarizedUpTo` is not "is summarized",
+        // it is "is below the high-water mark". A turn inside a hole left by a deleted
+        // snippet satisfies it and is narrated by nothing.
+        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo && _turnHasCoverage(store, t.index));
         for (const t of turnsToGhost) {
             await ghostMessage(t.index);
         }
@@ -5070,7 +5173,7 @@ async function summarizeOneBatchFromTurns(visibleTurns) {
         // All "visible" turns are actually already summarized but not ghosted.
         // Ghost them now to fix the desync.
         log('All visible turns are already summarized — repairing ghosting...');
-        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo);
+        const turnsToGhost = visibleTurns.filter(t => t.index <= store.summarizedUpTo && _turnHasCoverage(store, t.index));
         for (const t of turnsToGhost) {
             await ghostMessage(t.index);
         }
@@ -6271,10 +6374,10 @@ function assembleSummaryBlock() {
     // Off by default; capped by continuityNudgeMax.
     let continuityPart = '';
     if (s.continuityNudge && Array.isArray(store.continuityFlags)) {
-        const open = store.continuityFlags.filter(f => f && f.status === 'open' && f.fix && String(f.fix).trim());
+        const cap = (typeof s.continuityNudgeMax === 'number' && s.continuityNudgeMax > 0) ? s.continuityNudgeMax : 6;
+        const open = _selectNudgeFlags(store.continuityFlags, cap, s.continuityNudgeDeliveries);
         if (open.length > 0) {
-            const cap = (typeof s.continuityNudgeMax === 'number' && s.continuityNudgeMax > 0) ? s.continuityNudgeMax : 6;
-            const lines = open.slice(0, cap).map(f => '- ' + String(f.fix).trim());
+            const lines = open.map(f => '- ' + String(f.fix).trim());
             continuityPart = '\n\n<continuity_corrections>\nOut-of-character — a human is reconciling the record; keep the story consistent with these established facts and do not contradict them:\n' + lines.join('\n') + '\n</continuity_corrections>\n';
         }
     }
@@ -6686,6 +6789,19 @@ function onGenerationStarted() {
     // a branch/chat switch left it stale or cleared. This removes the need to
     // toggle enabled/pause or refresh the page after branching.
     updateInjection(true);
+    // Count a correction as DELIVERED here and nowhere else: this fires exactly once
+    // per model turn, whereas updateInjection rebuilds the block on a dozen unrelated
+    // events and would inflate the count into nonsense. Not saved explicitly — the
+    // ledger and summarizer passes save the store constantly, and losing a count to a
+    // crash only buys a correction one extra delivery.
+    try {
+        const _s = getSettings();
+        if (_s.continuityNudge) {
+            const _st = getChatStore();
+            const _cap = (typeof _s.continuityNudgeMax === 'number' && _s.continuityNudgeMax > 0) ? _s.continuityNudgeMax : 6;
+            for (const f of _selectNudgeFlags(_st.continuityFlags, _cap, _s.continuityNudgeDeliveries)) f.nudged = (f.nudged | 0) + 1;
+        }
+    } catch (_) { /* counting must never break a generation */ }
 }
 
 // ─── Slash Commands ──────────────────────────────────────────────────
@@ -7027,11 +7143,23 @@ function renderContinuity() {
             const isSnippet = f.where === 'snippet';
             const badge = `<span class="sc-cf-badge ${isSnippet ? 'sc-cf-snippet' : 'sc-cf-source'}">${isSnippet ? 'snippet-fixable' : 'source · message edit'}</span>`;
             const tr = Array.isArray(f.turnRange) ? `turns ${f.turnRange[0]}–${f.turnRange[1]}` : '';
+            // Delivery state, so retirement is never a mystery. An autonomous system
+            // that quietly stops acting on a finding is worse than one that never
+            // acted: the user cannot tell working from broken. Say which it is.
+            const _dl = (typeof getSettings().continuityNudgeDeliveries === 'number' && getSettings().continuityNudgeDeliveries > 0)
+                ? getSettings().continuityNudgeDeliveries : 0;
+            const _n = f.nudged | 0;
+            const _retired = _dl > 0 && _n >= _dl;
+            const deliv = !getSettings().continuityNudge
+                ? '<span class="sc-muted" title="Turn on &quot;nudge the story&quot; to have corrections delivered to the storyteller">not delivered (nudge off)</span>'
+                : (_retired
+                    ? `<span class="sc-muted" title="Delivered ${_n} times without being resolved, so it no longer occupies an injection slot — new findings get through instead. Still listed here, and Apply still works.">retired from injection after ${_n} deliveries</span>`
+                    : `<span class="sc-muted">delivered ${_n}${_dl > 0 ? '/' + _dl : ''}</span>`);
             const applyBtn = isSnippet
                 ? `<button class="menu_button sc-cf-apply" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-wand-magic-sparkles"></i> Apply</button>`
                 : `<button class="menu_button sc-cf-copilot" title="The source message is wrong — fix it via the copilot or manually; auto-fix never edits messages" disabled><i class="fa-solid fa-robot"></i> Copilot / message</button>`;
             html += `<div class="sc-cf-card">`
-                + `<div class="sc-cf-head">${badge}<span class="sc-cf-turns">${tr}</span></div>`
+                + `<div class="sc-cf-head">${badge}<span class="sc-cf-turns">${tr}</span> ${deliv}</div>`
                 + `<div class="sc-cf-issue">${escapeHtml(f.issue || '')}</div>`
                 + `<div class="sc-cf-fix"><span class="sc-cf-fixlabel">Fix:</span> ${escapeHtml(f.fix || '')}</div>`
                 + `<div class="sc-cf-actions">${applyBtn}<button class="menu_button sc-cf-dismiss" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-xmark"></i> Dismiss</button></div>`
@@ -7445,6 +7573,47 @@ function updateSnippetBrowser() {
         const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));
         if (!_row) { _snipRowGone(); return; }
         const layer = _row.arr; snippetIdx = _row.idx;
+        // PRECAUTION. This is irreversible and there is no undo for it, so the
+        // consequence is stated before it happens — and the consequence is not the
+        // same in every position, which is exactly why one generic "are you sure"
+        // would be useless. summarizedUpTo is the MAX of the surviving Layer-0 ranges,
+        // so only a snippet at the head lowers it; deleting one from the middle or the
+        // start leaves the mark above the hole, and the pipeline's forward march never
+        // returns to it. Those turns stay verbatim — correct, visible, and honest, but
+        // permanent, and the user deserves to know which of the two they are choosing.
+        {
+            const _pre = _row.sn;
+            const _rng = (_pre && Array.isArray(_pre.turnRange)) ? _pre.turnRange : null;
+            const _newMark = (() => {
+                const rest = (store.layers[0] || []).filter((x, k) => !(layerIdx === 0 && k === snippetIdx) && x && x.turnRange);
+                return rest.length ? Math.max(...rest.map(x => x.turnRange[1])) : -1;
+            })();
+            const _willReSummarize = !!_rng && _rng[0] > _newMark;
+            const _what = !_rng
+                ? 'This snippet records no turn range, so no turns change hands.'
+                : (_willReSummarize
+                    ? `Turns ${_rng[0]}\u2013${_rng[1]} return to verbatim and the pipeline WILL summarize them again on the next pass.`
+                    : `Turns ${_rng[0]}\u2013${_rng[1]} return to verbatim and STAY that way \u2014 they sit below the summarized mark (${_newMark}), which the forward pass never revisits. They keep being sent to the model in full, every turn. Use "Redo" instead if you only want a better summary of them.`);
+            const _okToDelete = await new Promise((resolve) => {
+                try {
+                    const ctx = SillyTavern.getContext();
+                    if (ctx && typeof ctx.callGenericPopup === 'function' && ctx.POPUP_TYPE) {
+                        ctx.callGenericPopup(
+                            `<b>Delete this summary?</b><br><br>${escapeHtml(_what)}<br><br>This cannot be undone.`,
+                            ctx.POPUP_TYPE.CONFIRM, '', { okButton: 'Delete', cancelButton: 'Keep it' },
+                        ).then((r) => resolve(!!r)).catch(() => resolve(false));
+                        return;
+                    }
+                } catch (_) { /* fall through to the native confirm */ }
+                try { resolve(typeof confirm === 'function' ? confirm('Delete this summary?\n\n' + _what + '\n\nThis cannot be undone.') : true); }
+                catch (_) { resolve(true); }
+            });
+            if (!_okToDelete) return;
+            // The layer may have been reshuffled while the dialog was open.
+            const _again = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));
+            if (!_again) { _snipRowGone(); return; }
+            snippetIdx = _again.idx;
+        }
         if (layer) {
             const removedSn = layer[snippetIdx];
             layer.splice(snippetIdx, 1);
@@ -7457,11 +7626,19 @@ function updateSnippetBrowser() {
             // A deleted Layer-0 snippet leaves its turns hidden AND unsummarized —
             // a silent context hole. Return them to verbatim so the pipeline can
             // re-summarize them (or the user simply reads them again).
+            // ANY depth, not just Layer 0. A promoted meta-summary is the ONLY thing
+            // narrating turns whose Layer-0 sources were merged away long ago, so
+            // deleting one left those turns hidden with nothing standing in for them —
+            // the same silent hole, entered through the other door. Rescue exactly the
+            // turns the deletion orphaned, judged by real coverage rather than by depth,
+            // which is the rule repairIfBranched already applies.
             let freed = 0;
-            if (layerIdx === 0 && removedSn && removedSn.turnRange) {
+            if (removedSn && Array.isArray(removedSn.turnRange)) {
                 const { chat } = SillyTavern.getContext();
+                const _chatLen = Array.isArray(chat) ? chat.length : 0;
+                const _orphans = _uncoveredTurnsIn(store, removedSn.turnRange[0], removedSn.turnRange[1], _chatLen);
                 const _freedIdx = [];
-                for (let i = removedSn.turnRange[0]; i <= removedSn.turnRange[1] && i < (chat ? chat.length : 0); i++) {
+                for (const i of _orphans) {
                     const m = chat[i];
                     if (m?.extra?.sc_ghosted) { delete m.extra.sc_ghosted; _freedIdx.push(i); freed++; }
                 }
