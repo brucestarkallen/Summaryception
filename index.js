@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.100.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.101.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -3823,18 +3823,44 @@ async function tryAutoRewindLedger(targetTurn, label, maxCkptTurn) {
             toastr.info(`Ledger cleared for this ${label} — re-deriving from the remaining turns.`, 'Summaryception', { timeOut: 4500 });
             return true;
         }
-        // Fold first: if the notes reach back this far, the rewind is exact and free.
-        // Everything below (checkpoints, synthesis, staged rebuild) is now only the
+        // TWO different turns, and conflating them broke every edit and every swipe.
+        // `targetTurn` is where the ledger must END UP; `maxCkptTurn` is the floor the
+        // restore point must PREDATE, because everything from there on was derived
+        // from text that just changed. Branch/trim callers pass no floor, so the two
+        // are equal and this reads exactly as before. The edit/swipe caller passes a
+        // REAL floor (minIdx - 1) — and the fold below used to ignore it, folding to
+        // `targetTurn` instead. On a swipe of the newest reply that is the head turn
+        // itself: the note the scribe wrote from the DISCARDED swipe satisfies
+        // `t <= targetTurn`, so it survived the filter, the refold reproduced the
+        // identical page, and this returned TRUE — short-circuiting before the floor
+        // was ever read, and announcing "rewound … nothing to re-read" over a ledger
+        // that still described the variant the user swiped away. The live pass could
+        // not repair it either: ledgerLiveIdx already covers that turn, so
+        // _computeLiveLedgerRange returns null and no pass is ever queued. Swiping
+        // left to an older variant had the same non-effect in reverse.
+        const _ckptCeil = (typeof maxCkptTurn === 'number' && isFinite(maxCkptTurn)) ? Math.min(targetTurn, maxCkptTurn) : targetTurn;
+        // Fold to the FLOOR: if the notes reach back that far, the rewind is exact and
+        // free, and the owed tail is re-derived from whatever the messages say NOW.
+        // Everything below (checkpoints, synthesis, staged rebuild) is only the
         // fallback for history recorded before notes existed.
-        if (rewindLedgerFromNotes(targetTurn)) {
+        if (rewindLedgerFromNotes(_ckptCeil)) {
             _ledgerQueue = [];
             _ledgerGen++;
+            // rewindLedgerFromNotes clears ledgerRebuild, so the resume marker is set
+            // after it, exactly as the checkpoint-restore path below does.
+            const _queued = (_ckptCeil < targetTurn) ? queueLedgerReplay(_ckptCeil, targetTurn) : 0;
+            const _store0 = getChatStore();
+            if (_queued === 0) _store0.ledgerLiveIdx = targetTurn;   // nothing to re-read: the fold IS the final state
+            _store0.ledgerRebuild = _queued > 0 ? { target: targetTurn } : null;   // persisted: an app-kill mid-replay resumes at reopen
             await saveChatStore();
             try { updateInjection(true); renderLedger(); } catch (_) {}
-            toastr.success(`Ledger rewound to turn ${targetTurn} (${label}) — folded from its own history, instantly. Nothing to re-read.`, 'Summaryception', { timeOut: 4000 });
+            toastr.success(
+                _queued > 0
+                    ? `Ledger rewound to turn ${_ckptCeil} (${label}) — folded from its own history, instantly. Re-reading ${targetTurn - _ckptCeil} turn(s) from the current text in ${_queued} background pass${_queued === 1 ? '' : 'es'}.`
+                    : `Ledger rewound to turn ${targetTurn} (${label}) — folded from its own history, instantly. Nothing to re-read.`,
+                'Summaryception', { timeOut: 4000 });
             return true;
         }
-        const _ckptCeil = (typeof maxCkptTurn === 'number' && isFinite(maxCkptTurn)) ? Math.min(targetTurn, maxCkptTurn) : targetTurn;
         let ckpt = _pickCheckpoint(listLedgerCheckpoints(), _ckptCeil);
         if (!ckpt) {
             // No snapshot at/below the target. Re-derivation from history is the only

@@ -52,10 +52,16 @@ export async function sendSummarizerRequest(s, sysPrompt, prompt) {
     if (globalThis.__live > 1) globalThis.__overlap = (globalThis.__overlap || []).concat([kind]);
     try {
         await new Promise((r) => setTimeout(r, (globalThis.__latency || 250)));   // model latency (test-controlled)
-        return __reply(kind);
+        return __reply(kind, prompt);
     } finally { globalThis.__live--; }
 }
-function __reply(kind) {
+function __reply(kind, prompt) {
+    // Swipe probe: answer from what the passage SAYS, so the assertion is about
+    // which variant the pipeline read — not about a canned reply.
+    if (kind === 'ledger-scribe' && globalThis.__swipeProbe) {
+        const v = /SWIPE-B/.test(String(prompt || '')) ? 'B' : (/SWIPE-A/.test(String(prompt || '')) ? 'A' : '?');
+        return JSON.stringify([{ name: 'Claire Argent', state: 'variant ' + v + ' on screen' }]);
+    }
     if (kind === 'ledger-scribe') {
         // Two characters; Claire's state carries a claim the story never showed.
         return JSON.stringify([
@@ -674,6 +680,92 @@ try {
         ctx.executeSlashCommandsWithOptions = origSlash;
         ctx.extensionSettings.summaryception.disableGhosting = false;
     }
+
+    console.log('== 20. SWIPE: the ledger follows the variant actually on screen ==');
+    {
+        // A swipe replaces a message's text wholesale. Everything the ledger learned
+        // from that turn was derived from the text that just went away, so it must be
+        // re-derived from what is on screen NOW — in BOTH directions: swiping right to
+        // a new generation, and swiping left back to an older one.
+        //
+        // Through v5.100.0 this silently did nothing. onMessageSwiped ->
+        // noteLedgerContentChange -> tryAutoRewindLedger(head, 'edit', minIdx - 1)
+        // was wired correctly, but tryAutoRewindLedger tried the notes fold FIRST
+        // with targetTurn (the head) instead of the floor. On a swipe of the newest
+        // reply those are the same turn, so the note written from the DISCARDED
+        // variant satisfied `t <= targetTurn`, survived the filter, and the refold
+        // reproduced the identical page — then returned true and short-circuited
+        // before the floor was ever read, announcing "rewound ... nothing to re-read".
+        // The live pass could not repair it either: ledgerLiveIdx already covered that
+        // turn, so _computeLiveLedgerRange returns null and nothing is ever queued.
+        globalThis.__swipeProbe = true;
+        globalThis.__latency = 100;
+        s.enabled = true; s.ledgerEnabled = true; s.ledgerLiveUpdate = true;
+        s.ledgerAutoRewind = true; s.ledgerEditRewindDepth = 10;
+        s.sisterEnabled = false; s.continuityEnabled = false; s.ledgerAuditEveryTurns = 0;
+        s.verbatimTurns = 99;   // keep the summarizer out of this scene entirely
+        s.ledgerLiveEveryTurns = 1;   // cadence: ingest every turn, no carry-over from earlier scenes
+
+        // NOT the module-level `chat` alias: earlier scenes REASSIGN ctx.chat, so that
+        // alias is detached by the time this scene runs and the extension would read a
+        // different array than the test mutates.
+        ctx.chat = [
+            mkMsg('Player', 'I ask her what happened at the hearing.', true),
+            mkMsg('Narrator', 'Claire Argent looked at the floor. SWIPE-A: she slapped him.'),
+        ];
+        const sc = ctx.chat;
+        const st = store();
+        st.layers = [[]]; st.summarizedUpTo = -1;
+        st.ledger = {}; st.ledgerNotes = []; st.ledgerNotesFrom = 0;
+        st.ledgerLiveIdx = -1; st.ledgerRebuild = null; st.ledgerStaging = null; st.ledgerStagingNotes = null;
+        st.ledgerEra = (st.ledgerEra | 0) + 1;   // retire earlier scenes' checkpoints
+        st._ckptLast = -1;
+
+        const head = sc.length - 1;
+        await fire('MESSAGE_RECEIVED', head);
+        await sleep(1500);
+        ok(/variant A/.test((store().ledger['Claire Argent'] || {}).state || ''),
+            'precondition: the live pass ingested the variant on screen (A)');
+        ok(store().ledgerLiveIdx === head, 'precondition: the pointer covers the head turn');
+
+        // ── Swipe RIGHT: a different generation replaces the text. ──
+        const callsBeforeB = calls.length;
+        sc[head].mes = 'Claire Argent looked at the floor. SWIPE-B: she walked away without a word.';
+        await fire('MESSAGE_SWIPED', head);
+        await sleep(4000);   // 2s debounce + rewind + one replay pass
+        const afterB = (store().ledger['Claire Argent'] || {}).state || '';
+        ok(calls.length > callsBeforeB, 'the swipe actually queued a re-read (it used to queue nothing)');
+        ok(/variant B/.test(afterB), 'KILL SHOT: the ledger now describes the variant on screen, not the discarded one');
+        ok(!/variant A/.test(afterB), 'and no trace of the swiped-away variant survives in the page');
+        {
+            const notes = (store().ledgerNotes || []).filter((n) => n.t === head);
+            ok(notes.length > 0 && notes.every((n) => !/variant A/.test(String(n.state || ''))),
+                'the JOURNAL is corrected too — a later fold cannot resurrect the discarded variant');
+        }
+
+        // ── Swipe LEFT: back to the earlier variant. Same law, other direction. ──
+        const callsBeforeA = calls.length;
+        sc[head].mes = 'Claire Argent looked at the floor. SWIPE-A: she slapped him.';
+        await fire('MESSAGE_SWIPED', head);
+        await sleep(4000);
+        const backToA = (store().ledger['Claire Argent'] || {}).state || '';
+        ok(calls.length > callsBeforeA, 'swiping BACK re-reads as well — the direction is irrelevant');
+        ok(/variant A/.test(backToA) && !/variant B/.test(backToA),
+            'swiping left restores the ledger to the variant now on screen');
+
+        // ── An edit far behind the pointer is still treated as canon, not re-derived. ──
+        s.ledgerEditRewindDepth = 1;
+        const callsBeforeDeep = calls.length;
+        sc.unshift(mkMsg('Player', 'x', true), mkMsg('Narrator', 'y'));
+        store().ledgerLiveIdx = sc.length - 1;
+        await fire('MESSAGE_SWIPED', 0);
+        await sleep(3000);
+        ok(calls.length === callsBeforeDeep, 'a deep-history swipe is NOT re-derived — the depth policy still holds');
+
+        globalThis.__swipeProbe = false;
+        s.ledgerEditRewindDepth = 10;
+    }
+
 } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* temp */ }
 }

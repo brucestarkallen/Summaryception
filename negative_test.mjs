@@ -19,8 +19,28 @@ import { spawnSync } from 'node:child_process';
 const SRC = path.dirname(fileURLToPath(import.meta.url));
 const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 
-/** [label, file, currentText, bugText, assertionThatMustFail] */
+/** [label, file, currentText, bugText, assertionThatMustFail, gateFile?] */
+// gateFile defaults to ledger_test.js. Some bugs live in a CALLER's ARGUMENT, not
+// in any function's body — the pure-function suite runs them all green because
+// each function is individually correct. Those are provable only end to end, so
+// their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.101.0: the notes fold must honour the REWIND FLOOR, not the target ──
+    // Invisible to ledger_test.js by construction: rewindLedgerFromNotes is correct
+    // for whatever turn it is given. The bug was which turn tryAutoRewindLedger gave
+    // it, so only the pipeline can see it.
+    ['the notes fold rewinds to the TARGET again (swipes and edits stop re-deriving)', 'index.js',
+        "        if (rewindLedgerFromNotes(_ckptCeil)) {",
+        "        if (rewindLedgerFromNotes(targetTurn)) {",
+        'KILL SHOT: the ledger now describes the variant on screen, not the discarded one',
+        'e2e_test.mjs'],
+
+    ['the owed tail is never replayed after the fold', 'index.js',
+        "            const _queued = (_ckptCeil < targetTurn) ? queueLedgerReplay(_ckptCeil, targetTurn) : 0;",
+        "            const _queued = 0;",
+        'the swipe actually queued a re-read (it used to queue nothing)',
+        'e2e_test.mjs'],
+
     // ── v5.99.0 round 3: transplant threads round-trip ──
     ['the export comma-joins the threads array again', 'index.js',
         "        L.push('THREADS:');\n        for (const _t of _tpThreads(e.threads)) L.push('- ' + _t);",
@@ -323,13 +343,13 @@ function scratchCopy() {
     }
 }
 
-function run([label, file, cur, bug, want]) {
+function run([label, file, cur, bug, want, gate]) {
     scratchCopy();
     const p = path.join(SCRATCH, file);
     const s = fs.readFileSync(p, 'utf8');
     if (!s.includes(cur)) return [false, label, 'mutation anchor not found \u2014 the code moved; update this file'];
     fs.writeFileSync(p, s.split(cur).join(bug));
-    const r = spawnSync('node', ['ledger_test.js'], { cwd: SCRATCH, encoding: 'utf8' });
+    const r = spawnSync('node', [gate || 'ledger_test.js'], { cwd: SCRATCH, encoding: 'utf8' });
     const out = (r.stdout || '') + (r.stderr || '');
     if (r.status === 0) return [false, label, 'THE GATE PASSED WITH THE BUG REINTRODUCED \u2014 the assertion is decorative'];
     if (!out.includes(want)) {
