@@ -25,6 +25,37 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.114.0: the context-cost meter mirrors the injection ──
+    ['the meter rebuilds a section itself (free to drift from the injection)', 'index.js',
+        "    let parts = {};\n    try { parts = _assembleSummaryParts(); } catch (_) { parts = {}; }",
+        "    let parts = {};\n    try { parts = { notes: '', pinned: buildPinnedBlock(), characters: buildCharacterBlock(), summary: '', details: '', flashback: '', continuity: '' }; } catch (_) { parts = {}; }",
+        'the meter reads the SAME builder the injection does'],
+
+    ['the injection stops walking the shared section order', 'index.js',
+        "    for (const [key] of SC_SECTION_ORDER) body += p[key];",
+        "    body = p.notes + p.pinned + p.characters + p.summary + p.details + p.flashback + p.continuity;",
+        'a new section needs no second edit'],
+
+    ['a section drops out of the shared order (silently unpriced AND uninjected)', 'index.js',
+        "    ['details',    'Detail notes'],",
+        "",
+        'every section the builder produces is in SC_SECTION_ORDER \u2014 none is built and thrown away'],
+
+    ['an estimate is passed off as a real token count', 'index.js',
+        "    return { tokens: Math.ceil(t.length / 4), exact: false };",
+        "    return { tokens: Math.ceil(t.length / 4), exact: true };",
+        'an estimate is FLAGGED as an estimate, never passed off as a count'],
+
+    ['the meter runs on every injection update (tokenizes a dozen times a turn)', 'index.js',
+        "        log(`Injection updated: ${(summaryBlock || '').length} chars @ pos ${pos} depth ${dep}`);",
+        "        refreshInjectionBudget();\n        log(`Injection updated: ${(summaryBlock || '').length} chars @ pos ${pos} depth ${dep}`);",
+        'the meter does NOT run on every injection update'],
+
+    ['a new channel-shaped flag is silently left out of the predicate', 'index.js',
+        "let _autoRecallBusy = false;",
+        "let _autoRecallBusy = false;\nlet _somethingElseActive = false;",
+        'every *Active/*Busy flag is either in the channel predicate or exempted by name'],
+
     // ── v5.113.0: the memory block sits at the top of the chat ──
     ['the depth reverts to 4 (block parked mid-conversation again)', 'index.js',
         "    injectionDepth: 9999,   // messages up from newest; only used when position = 1. 9999 is",

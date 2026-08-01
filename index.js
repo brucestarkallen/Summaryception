@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.113.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.114.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -6527,7 +6527,12 @@ function buildFlashbackBlock() {
     }
 }
 
-function assembleSummaryBlock() {
+// The panel must mirror the injection BY CONSTRUCTION. A token meter that
+// rebuilds these sections itself is a second implementation, and the two disagree
+// the first time either changes — so there is exactly one builder, and both the
+// injection and the meter read it. Section order and the umbrella line live in
+// assembleSummaryBlock below; this returns the pieces, unjoined.
+function _assembleSummaryParts() {
     const s = getSettings();
     const store = getChatStore();
 
@@ -6590,17 +6595,158 @@ function assembleSummaryBlock() {
     // Stable canon first (notepad → pinned → active-cast character state), then the
     // narrative (summary gist → recent-detail specifics). Grouping "who these people
     // are" ahead of "what happened" frames the scene for the storyteller.
-    const body = notesPart + pinnedPart + charPart + summaryPart + detailPart + flashPart + continuityPart;
+    return {
+        notes: notesPart,
+        pinned: pinnedPart,
+        characters: charPart,
+        summary: summaryPart,
+        details: detailPart,
+        flashback: flashPart,
+        continuity: continuityPart,
+    };
+}
+
+// The ORDER lives here, in one place, and the meter walks the same list.
+const SC_SECTION_ORDER = [
+    ['notes',      'Notepad'],
+    ['pinned',     'Pinned memories'],
+    ['characters', 'Character ledger'],
+    ['summary',    'Summary snippets'],
+    ['details',    'Detail notes'],
+    ['flashback',  'Verbatim flashbacks'],
+    ['continuity', 'Continuity corrections'],
+];
+
+function _summaryUmbrella() {
+    return '\n\n' + _noteLabel() + ' \u2014 my running reference for our story:\n';
+}
+
+function assembleSummaryBlock() {
+    const p = _assembleSummaryParts();
+    let body = '';
+    for (const [key] of SC_SECTION_ORDER) body += p[key];
     if (!body.trim()) return '';
     // One umbrella line establishes the SOURCE (the player's own note) once, so
     // the section headers underneath can stay short — and so the voice works for
     // any player, not one hardcoded name.
-    return '\n\n' + _noteLabel() + ' \u2014 my running reference for our story:\n' + body;
+    return _summaryUmbrella() + body;
+}
+
+// ─── Token budget: what this extension actually costs, per section ──────────
+// Everything Summaryception puts in front of the model, measured with ST's own
+// tokenizer (the one your current backend uses), broken down so you can see which
+// section is eating the context — not one opaque total.
+
+// ST exposes getTokenCountAsync on the context; older builds only have the
+// deprecated sync getTokenCount. Both are used if present. The chars/4 estimate
+// is a LAST resort and says so in the UI rather than quietly pretending to be a
+// real count — a wrong number here would send you optimising the wrong section.
+async function _countTokens(text) {
+    const t = String(text || '');
+    if (!t) return { tokens: 0, exact: true };
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.getTokenCountAsync === 'function') {
+            const n = await ctx.getTokenCountAsync(t);
+            if (Number.isFinite(n)) return { tokens: n, exact: true };
+        }
+        if (typeof ctx.getTokenCount === 'function') {
+            const n = ctx.getTokenCount(t);
+            if (Number.isFinite(n)) return { tokens: n, exact: true };
+        }
+    } catch (_) { /* fall through to the estimate */ }
+    return { tokens: Math.ceil(t.length / 4), exact: false };
+}
+
+// Every surface this extension injects into, measured together. The main block
+// walks SC_SECTION_ORDER — the SAME list assembleSummaryBlock joins — so a
+// section added there appears here with no second edit and cannot be forgotten.
+async function computeInjectionBudget() {
+    const s = getSettings();
+    const rows = [];
+    let exact = true;
+    const add = async (label, text, note) => {
+        const t = String(text || '');
+        if (!t) return;
+        const c = await _countTokens(t);
+        if (!c.exact) exact = false;
+        rows.push({ label, chars: t.length, tokens: c.tokens, note: note || '' });
+    };
+
+    let parts = {};
+    try { parts = _assembleSummaryParts(); } catch (_) { parts = {}; }
+    let anyBody = '';
+    for (const [key] of SC_SECTION_ORDER) anyBody += (parts[key] || '');
+
+    if (anyBody.trim()) await add('Header line', _summaryUmbrella());
+    for (const [key, label] of SC_SECTION_ORDER) await add(label, parts[key]);
+
+    // Ephemeral, and only present on the turn a recall fires — so it is listed
+    // separately rather than folded into the standing cost.
+    try {
+        if (_lastRecallBlock) await add('Recalled scenes', _lastRecallBlock, 'ephemeral \u2014 only on the turn it fires');
+    } catch (_) { /* none pending */ }
+
+    // The Author's-Note mirror is written into ST's author's note, not our slot,
+    // but the model still pays for it, so it belongs in the total.
+    try {
+        if (s.anMirror) {
+            const { chatMetadata } = SillyTavern.getContext();
+            const an = String((chatMetadata && chatMetadata.note_prompt) || '');
+            const at = an.indexOf(SC_AN_START);
+            if (at !== -1) await add("Author's-Note mirror", an.slice(at), 'in ST\u2019s author\u2019s note');
+        }
+    } catch (_) { /* mirror off or unavailable */ }
+
+    const totalTokens = rows.reduce((a, r) => a + r.tokens, 0);
+    const totalChars = rows.reduce((a, r) => a + r.chars, 0);
+    return { rows, totalTokens, totalChars, exact, at: Date.now() };
+}
+
+function _renderInjectionBudget(b) {
+    const $t = $('#sc_budget_table');
+    if (!$t.length) return;
+    if (!b || !b.rows.length) {
+        $t.html('<div class="sc-hint">Nothing is being injected in this chat yet.</div>');
+        $('#sc_budget_total').text('0 tokens');
+        return;
+    }
+    const pct = (n) => b.totalTokens > 0 ? Math.round((n / b.totalTokens) * 100) : 0;
+    const rows = b.rows.map(r =>
+        '<div class="sc-budget-row">'
+        + '<span class="sc-budget-name">' + escapeHtml(r.label) + (r.note ? ' <small>(' + escapeHtml(r.note) + ')</small>' : '') + '</span>'
+        + '<span class="sc-budget-num">' + r.tokens.toLocaleString() + ' tok</span>'
+        + '<span class="sc-budget-pct">' + pct(r.tokens) + '%</span>'
+        + '<span class="sc-budget-bar"><i style="width:' + Math.max(1, pct(r.tokens)) + '%"></i></span>'
+        + '</div>').join('');
+    $t.html(rows);
+    $('#sc_budget_total').text(b.totalTokens.toLocaleString() + ' tokens \u00b7 ' + b.totalChars.toLocaleString() + ' chars'
+        + (b.exact ? '' : ' (estimated \u2014 no tokenizer available)'));
+}
+
+// Same discipline as _openCatchupDialog / _acquireSummarize: the guard and the
+// set live in one synchronous helper, because assigning the flag across an await
+// in the same function is exactly what require-atomic-updates (correctly) flags.
+let _budgetBusy = false;
+function _acquireBudget() { if (_budgetBusy) return false; _budgetBusy = true; return true; }
+function _releaseBudget() { _budgetBusy = false; }
+
+async function refreshInjectionBudget() {
+    if (!$('#sc_budget_table').length) return;   // panel closed — nothing to draw into
+    if (!_acquireBudget()) return;               // tokenizing a large block twice at once is pure waste
+    try {
+        $('#sc_budget_total').text('measuring\u2026');
+        _renderInjectionBudget(await computeInjectionBudget());
+    } catch (e) {
+        log('budget: could not measure:', e);
+        try { $('#sc_budget_total').text('could not measure \u2014 see console'); } catch (_) {}
+    } finally { _releaseBudget(); }
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
 
 let _lastInjected = '';
+let _lastRecallBlock = '';   // the ephemeral recall text currently in the slot, for the token meter
 
 // SillyTavern's ceiling. Above it the injection is not “deep”, it is GONE.
 const ST_MAX_INJECTION_DEPTH = 10000;
@@ -8680,6 +8826,7 @@ function clearRecall(){
     try{ const {setExtensionPrompt}=SillyTavern.getContext(); const s=getSettings();
         const slot=_recallSlot||{pos:s.recallPosition ?? defaultSettings.recallPosition,depth:s.recallDepth ?? defaultSettings.recallDepth,role:s.recallRole ?? defaultSettings.recallRole};
         setExtensionPrompt(MODULE_NAME+'_recall','',slot.pos,slot.depth,false,slot.role);
+        _lastRecallBlock = '';
     }catch(e){}
     _recallRemaining=0;
     _recallSlot=null;
@@ -8728,6 +8875,7 @@ async function runRecall(query, opts = {}){
     const {setExtensionPrompt}=SillyTavern.getContext();
     _recallSlot={pos:s.recallPosition ?? defaultSettings.recallPosition,depth:s.recallDepth ?? defaultSettings.recallDepth,role:s.recallRole ?? defaultSettings.recallRole};
     setExtensionPrompt(MODULE_NAME+'_recall',block,_recallSlot.pos,_recallSlot.depth,false,_recallSlot.role);
+    _lastRecallBlock = block;   // so the token meter can price what is actually in front of the model
     _recallRemaining=Math.max(1,s.recallPersist ?? defaultSettings.recallPersist);
     if(opts.silent){ log('Auto-recall injected: '+merged.length+' range(s), '+used+' chars'); } else toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
 }
@@ -8850,6 +8998,19 @@ function bindUIEvents() {
         saveSettings();
         updateInjection(true);
     });
+    // ── Context Cost meter ──
+    // Measured on demand only: tokenizing the whole block on every injection
+    // update would run it a dozen times a turn on a phone for a number nobody is
+    // looking at. Opening the card is the ask; the button is the re-ask.
+    $(document).on('click', '#sc_budget_refresh', function () { refreshInjectionBudget(); });
+    $(document).on('toggle', '#sc_budget_card', function () { if (this.open) refreshInjectionBudget(); });
+    $(document).on('click', '#sc_budget_card > summary', function () {
+        // <details> toggle does not bubble in every browser ST runs in; the click
+        // fires before the state flips, so read the state we are moving INTO.
+        const el = document.getElementById('sc_budget_card');
+        if (el && !el.open) setTimeout(() => refreshInjectionBudget(), 0);
+    });
+
     $(document).on('input', '#sc_injection_depth', function () {
         // A number input accepts anything typed, including empty and 99999. Store
         // what the injection will actually use, so the panel never shows a value

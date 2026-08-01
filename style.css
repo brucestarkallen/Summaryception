@@ -768,3 +768,22 @@ body.sc-ghost-visual-off .mes[is_system="true"] .avatar {
 body.sc-ghost-visual-off .mes[is_system="true"] .mes_ghost {
     display: none !important;
 }
+
+
+/* ─── Context Cost meter ─────────────────────────────────────────────── */
+.sc-budget { width: 100%; display: flex; flex-direction: column; gap: 4px; }
+.sc-budget-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 2.6em;
+    grid-template-areas: "name num pct" "bar bar bar";
+    align-items: center;
+    gap: 2px 8px;
+}
+.sc-budget-name { grid-area: name; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-budget-name small { opacity: 0.6; }
+.sc-budget-num  { grid-area: num; font-variant-numeric: tabular-nums; opacity: 0.85; }
+.sc-budget-pct  { grid-area: pct; text-align: right; font-variant-numeric: tabular-nums; opacity: 0.6; }
+.sc-budget-bar  { grid-area: bar; height: 3px; border-radius: 2px; background: rgba(128,128,128,0.22); overflow: hidden; }
+.sc-budget-bar i { display: block; height: 100%; background: currentColor; opacity: 0.55; }
+.sc-budget-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.sc-budget-foot .sc-val { font-variant-numeric: tabular-nums; }

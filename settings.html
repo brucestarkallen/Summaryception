@@ -753,6 +753,21 @@
                         <button class="menu_button sc-prompt-reset" data-key="ledgerUserPrompt" data-target="#sc_ledger_user_prompt">↺ Reset to Default</button>
                     </div>
                     </details>
+                    <details class="sc-collapse" id="sc_budget_card">
+                        <summary class="sc-section-title">📊 Context Cost — what this chat is spending</summary>
+
+                    <div class="sc-row">
+                        <small class="sc-hint">Everything Summaryception puts in front of the model right now, measured with your backend's own tokenizer — broken down so you can see which section is eating the context, not one opaque total.</small>
+                    </div>
+                    <div class="sc-row">
+                        <div id="sc_budget_table" class="sc-budget"><div class="sc-hint">Open this card or tap Refresh to measure.</div></div>
+                    </div>
+                    <div class="sc-row sc-budget-foot">
+                        <span id="sc_budget_total" class="sc-val">—</span>
+                        <button id="sc_budget_refresh" class="menu_button">↺ Refresh</button>
+                    </div>
+                    </details>
+
                     <details class="sc-collapse">
                         <summary class="sc-section-title">📍 Injection Placement</summary>
 

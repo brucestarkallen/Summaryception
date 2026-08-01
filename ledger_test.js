@@ -29,6 +29,7 @@ function extractTopLevel(name) {
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
 const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
     'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe', '_noteLabel',
+    '_assembleSummaryParts', 'SC_SECTION_ORDER', '_summaryUmbrella', 'assembleSummaryBlock', 'buildPinnedBlock', 'getPins', '_pinNeedle', '_countTokens', 'computeInjectionBudget',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
     'truncateLedgerToTurn', 'clampStoreToLength',
@@ -94,6 +95,7 @@ return {
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
   _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, _renameEvidence, _renameLedgerKeySpace, renameLedgerCharacter, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas, _noteLabel,
+  _assembleSummaryParts, SC_SECTION_ORDER, _summaryUmbrella, assembleSummaryBlock, computeInjectionBudget, _countTokens,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
@@ -3736,12 +3738,30 @@ section('exclusive LLM channel — the lock enforces it, not the callers');
     if (_isRefs.length) console.log('    offending isSummarizing reads: ' + _isRefs.map(l => l.trim().slice(0, 70)).join(' | '));
     ok(_isRefs.length === 0, 'isSummarizing is read ONLY by _llmChannelBusy() — no hand-rolled subset survives');
 
-    // 4. THE PREDICATE IS COMPLETE: every module-level channel flag is in it.
+    // 4. THE PREDICATE IS COMPLETE. The rule is not "every *Busy flag is in the
+    //    predicate" — it is that every flag guarding a callSummarizer path is. A
+    //    flag guarding something else must be EXEMPTED BY NAME, with a reason, so
+    //    a new pass can never be silently left out: an unlisted flag fails here
+    //    until someone classifies it.
+    const _EXEMPT = {
+        _budgetBusy: 'guards the local tokenizer in refreshInjectionBudget — no model call, so it neither takes nor waits on the channel',
+    };
     const _flags = (SRC_FULL.match(/^let (_\w*(?:Active|Busy))\b/gm) || [])
         .map(l => l.replace(/^let /, ''));
     const _pred = SRC_FULL.slice(SRC_FULL.indexOf('function _llmChannelBusy()'));
     const _predBody = _pred.slice(0, _pred.indexOf('\n}'));
-    for (const f of _flags) ok(_predBody.includes(f), 'channel predicate covers ' + f);
+    const _unclassified = _flags.filter(f => !_predBody.includes(f) && !Object.prototype.hasOwnProperty.call(_EXEMPT, f));
+    if (_unclassified.length) console.log('    unclassified channel-shaped flags: ' + _unclassified.join(', '));
+    ok(_unclassified.length === 0, 'every *Active/*Busy flag is either in the channel predicate or exempted by name');
+
+    // An exemption is a claim, and the claim is checkable: the function an exempt
+    // flag guards must not reach a model call.
+    {
+        const _rb = SRC_CODE.indexOf('async function refreshInjectionBudget');
+        const _rbBody = _rb > 0 ? SRC_CODE.slice(_rb, SRC_CODE.indexOf('\n}', SRC_CODE.indexOf('finally { _releaseBudget(); }', _rb))) : '';
+        ok(_rb > 0, 'the exempt flag\u2019s function exists');
+        ok(!_rbBody.includes('callSummarizer'), 'exempt flag _budgetBusy guards no model call');
+    }
 
     // 5. THE CO-WRITER IS A MEMBER. It sends the entire memory dump — the largest
     //    call here — and used to hold no flag at all, so every other pass saw an
@@ -3924,6 +3944,118 @@ section('injection depth — top of chat, and never above ST\u2019s ceiling');
     ok(/<input type="number" id="sc_injection_depth" min="0" max="9999"/.test(H),
         'the settings control reaches 9999 (a 0-9999 range slider is unusable on a phone)');
     ok(!/id="sc_injection_depth"[^>]*type="range"/.test(H), 'it is not a range slider capped at 20 any more');
+}
+
+
+// ─── v5.114.0: the token meter measures the injection, not a copy of it ──────
+// A meter that rebuilds the sections itself is a second implementation, and the
+// two disagree the first time either changes. There is ONE builder; the
+// injection joins its parts and the meter walks the same list.
+section('context-cost meter — mirrors the injection by construction');
+{
+    ok(/function _assembleSummaryParts\(\)/.test(SRC_FULL), 'one parts builder exists');
+    ok(/const SC_SECTION_ORDER = \[/.test(SRC_FULL), 'the section order lives in one place');
+
+    const _ai = SRC_FULL.indexOf('function assembleSummaryBlock() {');
+    const _aBody = SRC_FULL.slice(_ai, SRC_FULL.indexOf('\n}', _ai));
+    ok(/for \(const \[key\] of SC_SECTION_ORDER\) body \+= p\[key\];/.test(_aBody),
+        'the injection joins the parts by walking that order \u2014 a new section needs no second edit');
+    ok(!/notesPart \+ pinnedPart \+ charPart/.test(_aBody), 'and no hardcoded concatenation survives beside it');
+
+    const _ci = SRC_FULL.indexOf('async function computeInjectionBudget()');
+    const _cBody = SRC_FULL.slice(_ci, SRC_FULL.indexOf('\nfunction _renderInjectionBudget', _ci));
+    ok(_ci > 0, 'the meter exists');
+    ok(_cBody.includes('_assembleSummaryParts()'), 'the meter reads the SAME builder the injection does');
+    ok(_cBody.includes('of SC_SECTION_ORDER'), 'and walks the same order \u2014 it cannot miss a section the injection sends');
+    ok(!/buildCharacterBlock\(\)|buildPinnedBlock\(\)|buildFlashbackBlock\(\)/.test(_cBody),
+        'the meter never rebuilds a section itself \u2014 that would be a second implementation, free to drift');
+
+    // Every surface this extension puts in front of the model is priced.
+    ok(_cBody.includes('_summaryUmbrella()'), 'the header line is counted, not silently free');
+    ok(_cBody.includes('_lastRecallBlock'), 'the ephemeral recall block is counted');
+    ok(_cBody.includes('SC_AN_START'), "the Author's-Note mirror is counted \u2014 the model pays for it even though ST owns that slot");
+    ok(/setExtensionPrompt\(MODULE_NAME\+'_recall',block/.test(SRC_FULL) && /_lastRecallBlock = block;/.test(SRC_FULL),
+        'the recall text is recorded where it is injected, so the meter prices what is actually in the slot');
+    ok(/_lastRecallBlock = '';/.test(SRC_FULL), 'and cleared when the slot is cleared');
+
+    // A guessed number sends you optimising the wrong section, so it says so.
+    const _ti = SRC_FULL.indexOf('async function _countTokens(text)');
+    const _tBody = SRC_FULL.slice(_ti, SRC_FULL.indexOf('\n}', _ti));
+    ok(_tBody.includes('getTokenCountAsync'), "ST's real tokenizer is used first");
+    ok(_tBody.includes('getTokenCount('), 'with the deprecated sync counter as a fallback for older ST');
+    ok(/exact: false/.test(_tBody), 'and an estimate is FLAGGED as an estimate, never passed off as a count');
+    ok(/\(estimated \\u2014 no tokenizer available\)|estimated \u2014 no tokenizer available/.test(SRC_FULL), 'the UI says so too');
+
+    // Measured on demand: tokenizing the whole block on every injection update
+    // would run a dozen times a turn on a phone for a number nobody is reading.
+    // Proximity is not containment: the file has dozens of updateInjection() calls
+    // and a regex window round-tripped through them produced a false positive.
+    // Read the function's OWN body.
+    {
+        const _ui = SRC_FULL.indexOf('function updateInjection(force = false) {');
+        const _uiBody = SRC_FULL.slice(_ui, SRC_FULL.indexOf('\n}', SRC_FULL.indexOf("log(`Injection updated:", _ui)));
+        ok(_ui > 0 && _uiBody.length > 100, 'updateInjection body located');
+        ok(!_uiBody.includes('refreshInjectionBudget'), 'the meter does NOT run on every injection update');
+    }
+    ok(SRC_FULL.includes("$(document).on('click', '#sc_budget_refresh'"), 'a refresh button exists');
+    ok(H.includes('id="sc_budget_table"') && H.includes('id="sc_budget_total"') && H.includes('id="sc_budget_refresh"'),
+        'the card markup carries every id the code writes into');
+    ok(/escapeHtml\(r\.label\)/.test(SRC_FULL), 'labels are escaped on the way into the panel');
+
+    // ── BEHAVIOURAL: the arithmetic the meter does must reproduce the injection
+    //    exactly. Source contracts prove the meter READS the right builder; this
+    //    proves the numbers it reports are the real block's numbers.
+    const _S = {
+        injectNotepad: true, injectSummary: true, injectDetails: true, injectPinned: true, injectLedger: true,
+        sisterEnabled: true, ledgerEnabled: true, flashbackEnabled: false, continuityNudge: false,
+        ledgerActiveWindow: 12, ledgerMaxActive: 6, ledgerMaxCharsPerChar: 1000, ledgerRosterMax: 6,
+        injectionTemplate: 'Our story so far.\n{{summary}}',
+        sisterInjectTemplate: '\n\n<details>\nSpecifics:\n{{details}}\n</details>\n',
+        ledgerInjectTemplate: '\n\n<characters>\nWho:\n{{characters}}\n</characters>\n',
+    };
+    const _store = {
+        notepad: 'The city of Vhalen fell in winter.',
+        layers: [[{ text: 'Claire confronted Jovan.', turnRange: [0, 3], detail: 'She kept the letter.' },
+                  { text: 'Jovan left at dawn.', turnRange: [4, 7] }], [], []],
+        ledger: { Claire: { core: 'guarded, clipped under pressure', state: 'furious in the rain', arc: 'trust fraying', threads: ['owes an answer'], updatedAt: 9 },
+                  Jovan:  { core: 'blunt', state: 'gone', arc: '', threads: [], updatedAt: 8 } },
+    };
+    const _chat = [{ is_user: true, name: 'LO', mes: 'Claire, wait.', extra: {} },
+                   { is_user: false, name: 'Claire', mes: 'Jovan already left.', extra: {} }];
+    L.__setSettings(_S); L.__setStore(_store); L.__setChat(_chat);
+
+    const _parts = L._assembleSummaryParts();
+    const _block = L.assembleSummaryBlock();
+    let _body = '';
+    for (const [k] of L.SC_SECTION_ORDER) _body += _parts[k];
+    const _rebuilt = _body.trim() ? L._summaryUmbrella() + _body : '';
+    eq(_rebuilt, _block, 'the parts, joined in SC_SECTION_ORDER, reproduce the injected block BYTE FOR BYTE');
+
+    let _sum = _block ? L._summaryUmbrella().length : 0;
+    for (const [k] of L.SC_SECTION_ORDER) _sum += _parts[k].length;
+    eq(_sum, _block.length, 'and their lengths sum to the block\u2019s length \u2014 the meter cannot over- or under-report');
+    ok(_block.includes('<characters>'), 'precondition: the ledger section is actually in this block');
+
+    // A shared order keeps the meter and the injection in step even when a section
+    // is dropped from it — they simply both drop it. So byte-identity cannot catch
+    // a section going MISSING; this can. Every part the builder produces must be
+    // in the order list, or it is computed on every turn and silently thrown away.
+    const _builtKeys = Object.keys(_parts).sort();
+    const _orderKeys = L.SC_SECTION_ORDER.map(([k]) => k).sort();
+    const _orphaned = _builtKeys.filter(k => !_orderKeys.includes(k));
+    const _phantom = _orderKeys.filter(k => !_builtKeys.includes(k));
+    if (_orphaned.length) console.log('    parts built but never injected: ' + _orphaned.join(', '));
+    if (_phantom.length) console.log('    order names a part the builder does not produce: ' + _phantom.join(', '));
+    ok(_orphaned.length === 0, 'every section the builder produces is in SC_SECTION_ORDER \u2014 none is built and thrown away');
+    ok(_phantom.length === 0, 'and the order names no section the builder does not produce');
+
+    // A section switched off must vanish from BOTH, or the meter prices something
+    // the model never sees.
+    L.__setSettings(Object.assign({}, _S, { injectLedger: false }));
+    const _off = L._assembleSummaryParts();
+    eq(_off.characters, '', 'ledger injection off \u2014 the part is empty, so the meter lists nothing for it');
+    ok(!L.assembleSummaryBlock().includes('<characters>'), 'and the block really does drop it');
+    L.__setSettings(_S);
 }
 
 console.log('\n────────────────────────────────────────');
