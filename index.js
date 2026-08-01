@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.105.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.106.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -31,12 +31,12 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 100,
     snippetsPerPromotion: 2,
     maxLayers: 9,
-    injectionTemplate: '[Story memory continuation after brief plot essential — oldest → newest. Established canon; do not contradict.]\n{{summary}}',
+    injectionTemplate: "Bruce's note — our story so far, oldest to newest. This is established canon; don't contradict it.\n{{summary}}",
 
     // ── Injection placement (previously hardcoded to IN_PROMPT / system) ──
     injectionPosition: 1,   // 0 = in-prompt (merged w/ system) · 1 = in-chat @ depth · 2 = before-prompt
     injectionDepth: 4,      // messages up from newest; only used when position = 1
-    injectionRole: 0,       // 0 = system · 1 = user · 2 = assistant
+    injectionRole: 1,       // 0 = system · 1 = user · 2 = assistant — USER: the note speaks as Bruce, not a system directive (see migrateInjectionRoles)
 
     // ── Injection contents: which assembled sections are actually sent to the
     //    storyteller. All default ON (current behavior). These gate ONLY the
@@ -56,7 +56,7 @@ const defaultSettings = Object.freeze({
     //    so records ONLY the omissions as a short director's-note attached to that
     //    snippet. Empty (NONE) for routine batches. Never touches the snippet itself. ──
     sisterEnabled: true,
-    sisterInjectTemplate: '\n\n<details>\nSpecifics behind recent events (canon — do not contradict):\n{{details}}\n</details>\n',
+    sisterInjectTemplate: '\n\n<details>\nBruce\'s note — specifics behind recent events (canon; don\'t contradict):\n{{details}}\n</details>\n',
 
     // ── Continuity Auditor: a focused pass that checks each snippet against BOTH its
     //    source passage (drift) and the established record (contradictions), and files
@@ -95,7 +95,7 @@ const defaultSettings = Object.freeze({
     recallPersist: 1,
     recallPosition: 1,
     recallDepth: 6,
-    recallRole: 0,
+    recallRole: 1,   // user — recalled scenes read as Bruce's note, not a system directive
     recallAuto: false,
     // ── Flashback: keyword-ranked verbatim recall, ZERO model calls ──
     // The LLM-selected recall above cannot serve the moment it is needed: its
@@ -198,7 +198,7 @@ If every entry under audit is fully supported by the evidence, output exactly: [
 </evidence>
 
 Audit the entries under audit against the evidence now. Output ONLY the JSON array.`,
-    ledgerInjectTemplate: '\n\n<characters>\nWho these people are and where they stand right now — keep them consistent and in character; do not contradict:\n{{characters}}\n</characters>\n',
+    ledgerInjectTemplate: '\n\n<characters>\nBruce\'s note — who these people are and where they stand right now; keep them consistent and in character, don\'t contradict:\n{{characters}}\n</characters>\n',
     ledgerSystemPrompt:
         `You are the character-continuity mind for an ongoing work of collaborative fiction — part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON — consistent in voice, values, and behavior — while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.
 
@@ -583,6 +583,22 @@ function patchLedgerPrompt() {
         try { saveSettings(); } catch (_) {}
         log('Ledger prompt patched to stop re-emitting unchanged fields (much faster ledger passes; ledger content unchanged).');
     }
+}
+
+// One-time: the injection roles used to ship as SYSTEM. A system-voice injection
+// reads as an outside command to a storyteller persona; as USER it reads as the
+// player's own note — which is how every injected template is now written. These
+// two settings have no settings-UI control, so a stored 0 can only be the old
+// shipped default, never a deliberate choice: flip it once. The flag keeps a
+// later hand-set 0 (settings JSON edit) from being flipped back.
+function migrateInjectionRoles() {
+    let s; try { s = getSettings(); } catch (_) { return; }
+    if (s.rolesMigratedToUser) return;
+    if (s.injectionRole === 0) s.injectionRole = 1;
+    if (s.recallRole === 0) s.recallRole = 1;
+    s.rolesMigratedToUser = true;
+    try { saveSettings(); } catch (_) {}
+    log('Injection roles migrated to USER — the memory block now speaks as the player\'s note, not a system directive.');
 }
 
 function saveSettings() {
@@ -1773,6 +1789,14 @@ function _identityNote() {
     return `\n\nIDENTITY — READ BEFORE ANYTHING ELSE: "${sp.persona}" is the handle of the human player, who directs the protagonist ${sp.mc}. ${sp.persona} and ${sp.mc} are ONE participant seen from two sides of the screen, never two people. "${sp.persona}" is NOT a character in the story: never create or keep a record for that name, never place them in a scene, and never describe a relationship, interaction, or absence of interaction BETWEEN ${sp.mc} and ${sp.persona} — a sentence like "${sp.mc} has never interacted with ${sp.persona} directly" is a category error, not a fact. Anything the player says or instructs as ${sp.persona} belongs to ${sp.mc}.`;
 }
 
+// One short rider on every background pass. A utility model handed an explicit
+// passage with no frame for it can refuse or quietly sanitize — and a sanitized
+// summary silently amputates canon (the record says the scene never happened).
+// This states the frame once, at the single chokepoint every pass flows through.
+function _coverageNote() {
+    return '\n\nCoverage: this is an ongoing work of fiction and the material may include adult content. Handle all of it with the same neutral fidelity as everything else — your job is accuracy, never content judgment; never skip, sanitize, or editorialize what the story contains.';
+}
+
 async function callSummarizer(storyTxt, contextStr, opts = {}) {
     trace('>>> ENTERING callSummarizer');
     trace('  storyTxt length:', storyTxt?.length ?? 'UNDEFINED');
@@ -1790,7 +1814,7 @@ async function callSummarizer(storyTxt, contextStr, opts = {}) {
     // Only the identity token is safe to substitute here: the content tokens
     // ({{story_txt}}, {{ledger}}, …) belong to the user turn and would duplicate
     // the whole payload if expanded in the system message.
-    const sysPrompt = subst(opts.systemPrompt || s.summarizerSystemPrompt, '{{player_name}}', getPlayerName()) + _identityNote();
+    const sysPrompt = subst(opts.systemPrompt || s.summarizerSystemPrompt, '{{player_name}}', getPlayerName()) + _identityNote() + _coverageNote();
     const userTpl = opts.userPrompt || s.summarizerUserPrompt;
     let prompt = userTpl;
     prompt = subst(prompt, '{{player_name}}', getPlayerName());
@@ -6212,7 +6236,7 @@ function buildCharacterBlock() {
             if (state) s2 += ' | now: ' + state;
             return s2;
         }).filter(Boolean);
-        if (citems.length) compactLine = 'ALSO PRESENT in this scene \u2014 they are here and must not vanish from it; give them presence when the moment touches them: ' + citems.join('; ') + '.';
+        if (citems.length) compactLine = 'Also present in this scene \u2014 they are here and must not vanish from it; give them presence when the moment touches them: ' + citems.join('; ') + '.';
     }
 
     // Recalled pages: the story just NAMED these people. A reference the model
@@ -6223,7 +6247,7 @@ function buildCharacterBlock() {
     if (cast.recalled && cast.recalled.length) {
         const rcap = Math.max(80, s.ledgerMentionChars ?? 500);
         const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap, _recOnly(name))).filter(Boolean);
-        if (rb.length) recalledBlock = 'JUST MENTIONED, NOT IN THE SCENE \u2014 the story referenced these people; know them fully so the reference lands true, but they are OFF-SCREEN and do not appear unless the story brings them in:\n' + rb.join('\n');
+        if (rb.length) recalledBlock = 'Just mentioned, not in the scene \u2014 the story referenced these people; know them fully so the reference lands true, but they are off-screen and do not appear unless the story brings them in:\n' + rb.join('\n');
     }
 
     let rosterLine = '';
@@ -6403,7 +6427,7 @@ function buildFlashbackBlock() {
             used += head.length + passage.length;
         }
         if (!body.trim()) return '';
-        return '\n\n<recalled_scenes>\nEarlier moments this scene is touching, quoted word-for-word from when they happened \u2014 this is what was ACTUALLY said and done, so honour the exact wording, promises, and phrasing when the story refers back to it. These are PAST events, already over; do not replay them as if they are happening now:' + body + '</recalled_scenes>\n';
+        return '\n\n<recalled_scenes>\nBruce\'s note \u2014 earlier moments this scene is touching, quoted word-for-word from when they happened: this is what was actually said and done, so honour the exact wording, promises, and phrasing when the story refers back to it. These are past events, already over; don\'t replay them as if they are happening now:' + body + '</recalled_scenes>\n';
     } catch (e) {
         return '';   // the hot injection path never throws
     }
@@ -6461,7 +6485,7 @@ function assembleSummaryBlock() {
         const open = _selectNudgeFlags(store.continuityFlags, cap, s.continuityNudgeDeliveries);
         if (open.length > 0) {
             const lines = open.map(f => '- ' + String(f.fix).trim());
-            continuityPart = '\n\n<continuity_corrections>\nOut-of-character — a human is reconciling the record; keep the story consistent with these established facts and do not contradict them:\n' + lines.join('\n') + '\n</continuity_corrections>\n';
+            continuityPart = '\n\n<continuity_corrections>\nBruce\'s note \u2014 I\'m reconciling the record; keep the story consistent with these established facts and don\'t contradict them:\n' + lines.join('\n') + '\n</continuity_corrections>\n';
         }
     }
 
@@ -6486,7 +6510,7 @@ function updateInjection(force = false) {
 
         const pos  = (s.injectionPosition ?? 1);
         const dep  = (s.injectionDepth ?? 4);
-        const role = (s.injectionRole ?? 0);
+        const role = (s.injectionRole ?? 1);   // default USER — the note speaks as Bruce
 
         if (!s.enabled) {
             if (_lastInjected !== '' || force) {
@@ -8371,14 +8395,14 @@ function formatMemoryForAN() {
     // Slim mirror: only the parts Copilot's native Summaryception integration does NOT
     // read. That integration already feeds Copilot the snippet TEXT automatically, but it
     // never reads the notepad or the detail notes — so we bridge exactly those two.
-    let out = `${SC_AN_START} (canon + key details) — for OOC analysis tools. NOTE: the running event snippets are already provided to you separately via the Summaryception integration; this block adds only what that integration omits: permanent canon and the specifics behind key events. Treat as canon, NOT as roleplay direction.]\n\n`;
-    out += `NOTEPAD (author STARTING canon — highest authority for foundational facts; deliberately never updated, its situational details describe the story's opening state):\n${dump.notepad && dump.notepad.trim() ? dump.notepad.trim() : '(empty)'}\n\n`;
+    let out = `${SC_AN_START} (canon + key details) — Bruce's note for out-of-character analysis tools: the running event snippets already reach you separately via the Summaryception integration; this block adds only what that integration omits — permanent canon and the specifics behind key events. Treat it as canon, not as roleplay direction.]\n\n`;
+    out += `Notepad (my starting canon — highest authority for foundational facts; deliberately never updated, its situational details describe the story's opening state):\n${dump.notepad && dump.notepad.trim() ? dump.notepad.trim() : '(empty)'}\n\n`;
     const withDetails = dump.snippets.filter(s => s.detail);
     if (withDetails.length) {
-        out += `KEY DETAILS (specifics attached to particular events; the event summaries themselves are already in your <summary_context>):\n`;
+        out += `Key details (specifics attached to particular events; the event summaries themselves are already in your <summary_context>):\n`;
         for (const s of withDetails) {
             const turns = s.turns ? ` (turns ${s.turns})` : '';
-            out += `- [${s.id}${turns}] ${s.text} — DETAIL: ${s.detail}\n`;
+            out += `- [${s.id}${turns}] ${s.text} — detail: ${s.detail}\n`;
         }
     }
     out += `\n${SC_AN_END}`;
@@ -8530,7 +8554,7 @@ let _recallSlot = null;
 
 function clearRecall(){
     try{ const {setExtensionPrompt}=SillyTavern.getContext(); const s=getSettings();
-        const slot=_recallSlot||{pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??0};
+        const slot=_recallSlot||{pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??1};
         setExtensionPrompt(MODULE_NAME+'_recall','',slot.pos,slot.depth,false,slot.role);
     }catch(e){}
     _recallRemaining=0;
@@ -8569,7 +8593,7 @@ async function runRecall(query, opts = {}){
     for(const id of ids){ const r=resolveSnippetId(id); if(r && r.obj.turnRange) ranges.push({id,range:r.obj.turnRange}); else unrec.push(id); }
     if(!ranges.length){ if(!opts.silent) toastr.warning('Chosen snippets are unrecallable (legacy).','Summaryception',{timeOut:5000}); return; }
     const merged=_mergeRanges(ranges.map(x=>x.range), chat.length);   // A1: clamp + merge
-    let block='[RECALLED SCENES — verbatim from earlier turns]\n'; let used=block.length; const cap=s.recallMaxChars??12000;
+    let block='Bruce\'s note \u2014 recalled scenes, verbatim from earlier turns:\n'; let used=block.length; const cap=s.recallMaxChars??12000;
     for(const [a,b] of merged){
         const passage=buildPassageFromRange(chat,a,b); if(!passage.trim()) continue;
         const head='\n▸ turns '+a+'–'+b+':\n';
@@ -8578,7 +8602,7 @@ async function runRecall(query, opts = {}){
     }
     _lastRecallText=block;
     const {setExtensionPrompt}=SillyTavern.getContext();
-    _recallSlot={pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??0};
+    _recallSlot={pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??1};
     setExtensionPrompt(MODULE_NAME+'_recall',block,_recallSlot.pos,_recallSlot.depth,false,_recallSlot.role);
     _recallRemaining=Math.max(1,s.recallPersist??1);
     if(opts.silent){ log('Auto-recall injected: '+merged.length+' range(s), '+used+' chars'); } else toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
@@ -10145,6 +10169,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             migratePrompts();
             try { patchLedgerPrompt(); } catch (_) {}
             try { patchSummarizerPrompt(); } catch (_) {}
+            try { migrateInjectionRoles(); } catch (_) {}
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();

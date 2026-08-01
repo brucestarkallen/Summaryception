@@ -290,7 +290,7 @@ section('buildCharacterBlock — active-cast detection & caps (end-to-end inject
     // vanishing entirely once the cap was reached.
     ok((capped.match(/Nature:/g) || []).length === 1, 'maxActive=1 gives exactly one FULL entry');
     ok(hasStella && hasAlexia, 'but BOTH on-screen characters still reach the storyteller — nobody in the room is erased by the cap');
-    ok(capped.includes('ALSO PRESENT in this scene'), 'the overflow character arrives under the compact framing');
+    ok(capped.includes('Also present in this scene'), 'the overflow character arrives under the compact framing');
 
     // disabled → empty
     L.__setSettings(Object.assign({}, defaultSettings, { ledgerEnabled: false }));
@@ -1498,7 +1498,7 @@ section('anti-bias: the cap bounds cost, not existence');
     const pinned = L.computeLedgerCast(led, s, msgs[0], ['Claire'], 0, msgs);
     ok(pinned.shown.map(x => x.name).includes('Claire'), 'a pinned character on screen takes a FULL slot ahead of the recency race');
 }
-ok(SRC_FULL.includes("ALSO PRESENT in this scene"), 'the compact tier reaches the storyteller with its own framing');
+ok(SRC_FULL.includes("Also present in this scene"), 'the compact tier reaches the storyteller with its own framing');
 ok(SRC_FULL.includes('res.compact = active;   // on screen but past the cap'), 'overflow becomes compact, never nothing');
 ok(SRC_FULL.includes('function _characterWeight(entry, pinned)'), 'importance is DERIVED from the story, not hand-annotated');
 ok(/res\.shown = active\.slice\(\)\.sort\(\(a, b\) => \(b\.w - a\.w\)/.test(SRC_FULL), 'full slots go by the story\'s investment first, then presence, then recency');
@@ -2760,10 +2760,10 @@ section('mention recall — end-to-end injection framing');
         { mes: 'Jovan wondered what Silas would write home.\n[IST: Jovan | calm]\n[ACW: Silas Blackwood | his desk | grey]' },
     ]);
     const block = L.buildCharacterBlock();
-    ok(block.includes('JUST MENTIONED, NOT IN THE SCENE'), 'recalled section carries the explicit off-screen framing');
+    ok(block.includes('Just mentioned, not in the scene'), 'recalled section carries the explicit off-screen framing');
     ok(block.includes('Silas Blackwood') && block.includes('proud, wounded'), "the mentioned character's FULL page is injected, not a bare line");
-    const framingAt = block.indexOf('JUST MENTIONED');
-    const alsoPresentAt = block.indexOf('ALSO PRESENT');
+    const framingAt = block.indexOf('Just mentioned');
+    const alsoPresentAt = block.indexOf('Also present');
     ok(alsoPresentAt === -1 || block.slice(alsoPresentAt, framingAt === -1 ? undefined : framingAt).indexOf('Silas') === -1, 'and never as present');
     const rosterAt = block.indexOf('Other people in this world');
     ok(framingAt !== -1 && (rosterAt === -1 || framingAt < rosterAt), 'recalled section sits above the roster');
@@ -2829,7 +2829,7 @@ section('flashback — end-to-end injection');
     ok(block.includes('<recalled_scenes>'), 'flashback block emitted when an old scene matches');
     ok(block.includes('I want it to mean something'), 'the ORIGINAL words are quoted verbatim, not the summary');
     ok(block.includes('Duskday, Seedfall 1, 1024 AM'), 'the flashback carries its in-story date');
-    ok(block.includes('PAST events, already over'), 'framed as past so it is never replayed as the present scene');
+    ok(block.includes('past events, already over'), 'framed as past so it is never replayed as the present scene');
     ok(!block.includes('Honami arranged the lunch table'), 'irrelevant scenes are not injected');
 
     // Silence when nothing is relevant — a wrong memory is worse than none.

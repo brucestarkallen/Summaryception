@@ -144,7 +144,9 @@ try {
 console.log('== v5.82.0: notepad starting-canon doctrine ==');
 {
     const SRCW = readFileSync(new URL('./index.js', import.meta.url), 'utf8');
-    const n = (SRCW.match(/STARTING canon/g) || []).length;
+    // Case-insensitive: the AN transplant (the one consumer whose text also reaches
+    // the roleplay AI) now carries the same doctrine in Bruce's-note voice — lowercase.
+    const n = (SRCW.match(/starting canon/gi) || []).length;
     ok(n === 6, `all six notepad consumers (auditor, editor sys+template, continuity record, transplant, brief dump) carry the starting-canon doctrine (found ${n}, need 6)`);
     ok(SRCW.includes('never a CONTINUITY finding'), 'the continuity auditor is told outgrown opening-state is progression, not a finding');
     const MDW = readFileSync(new URL('./MEMORY_AUDITOR.md', import.meta.url), 'utf8');
