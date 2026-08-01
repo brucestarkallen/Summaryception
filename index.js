@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.106.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.107.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -31,7 +31,7 @@ const defaultSettings = Object.freeze({
     snippetsPerLayer: 100,
     snippetsPerPromotion: 2,
     maxLayers: 9,
-    injectionTemplate: "Bruce's note — our story so far, oldest to newest. This is established canon; don't contradict it.\n{{summary}}",
+    injectionTemplate: "Our story so far, oldest to newest. This is established canon; don't contradict it.\n{{summary}}",
 
     // ── Injection placement (previously hardcoded to IN_PROMPT / system) ──
     injectionPosition: 1,   // 0 = in-prompt (merged w/ system) · 1 = in-chat @ depth · 2 = before-prompt
@@ -56,7 +56,7 @@ const defaultSettings = Object.freeze({
     //    so records ONLY the omissions as a short director's-note attached to that
     //    snippet. Empty (NONE) for routine batches. Never touches the snippet itself. ──
     sisterEnabled: true,
-    sisterInjectTemplate: '\n\n<details>\nBruce\'s note — specifics behind recent events (canon; don\'t contradict):\n{{details}}\n</details>\n',
+    sisterInjectTemplate: '\n\n<details>\nSpecifics behind recent events (canon; don\'t contradict):\n{{details}}\n</details>\n',
 
     // ── Continuity Auditor: a focused pass that checks each snippet against BOTH its
     //    source passage (drift) and the established record (contradictions), and files
@@ -198,7 +198,7 @@ If every entry under audit is fully supported by the evidence, output exactly: [
 </evidence>
 
 Audit the entries under audit against the evidence now. Output ONLY the JSON array.`,
-    ledgerInjectTemplate: '\n\n<characters>\nBruce\'s note — who these people are and where they stand right now; keep them consistent and in character, don\'t contradict:\n{{characters}}\n</characters>\n',
+    ledgerInjectTemplate: '\n\n<characters>\nWho these people are and where they stand right now; keep them consistent and in character, don\'t contradict:\n{{characters}}\n</characters>\n',
     ledgerSystemPrompt:
         `You are the character-continuity mind for an ongoing work of collaborative fiction — part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON — consistent in voice, values, and behavior — while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.
 
@@ -503,6 +503,22 @@ const PRIOR_PROMPT_DEFAULTS = {
     summarizerUserPrompt: ["<player_name>{{player_name}}</player_name>\n<prior_context>{{context_str}}</prior_context>\n<passage>{{story_txt}}</passage>\n\nWrite ONE line recording only what is NEW in <passage> relative to <prior_context>.\n\nHARD EXCLUSIONS \u2014 do not record:\n- Anything already stated in <prior_context>, even indirectly. If a fact, location, relationship, spec, stat, or character trait appears in <prior_context>, it is ESTABLISHED. Never restate it.\n- CRITICAL: If <prior_context> already references an event, arrival, match, deployment, or location that <passage> now depicts in full scene form, treat the scene itself as established. Record ONLY the specific new details the prior reference did not contain.\n- Atmosphere, weather, particulate haze, lighting, crowd noise, body language without narrative consequence.\n- Repeated reactions (\"X froze,\" \"Y watched\") unless they trigger a new action.\n- Ongoing states (repeated locations, reactor levels, recurring postures) \u2014 state these ONCE, then never again.\n\nRECORD (in priority order):\n1. {{player_name}}'s decisions, declarations, and actions.\n2. Other named characters' actions that change state, advance plot, or reveal information. In social or group scenes, each named character who approaches, addresses, or acts toward {{player_name}} or the focal character is a SEPARATE record \u2014 never collapse multiple participants into \"others\" or a single summary. Capture who did what, individually.\n3. New facts: identities, numbers, titles, troop counts, match results, tactical details, scale shifts (crowd size, social attraction, popularity, odds, distances). When multiple characters contribute personal knowledge about a previously unmentioned character or entity, treat the combined profile as high-priority canon \u2014 preserve the character's identity, key achievements, and each contributor's unique connection to them.\n4. Plans and strategy: the problem, the proposed solution, who proposed it. Include stated intentions, conditional promises, and \"if-then\" commitments.\n5. Character self-declarations and diagnostic reads: when a named character explicitly states their own motivation, principle, boundary, self-assessment, method, capability, or knowledge source in dialogue \u2014 OR delivers a strategic assessment of another character's transformation, capability, or position \u2014 record the substance (paraphrased, not quoted).\n6. Information asymmetries: when the text explicitly flags that one character knows or witnessed something another character doesn't know they know, record who saw/knows what.\n7. Temporal markers: if the passage states a specific day, date, month, season, or time-of-day transition (morning/afternoon/evening/night, Day 4, Tuesday, Mar 15, late March, etc.), you MUST prefix the ENTIRE line with the earliest such marker in compact form (e.g., \"[Sept 1, 08:24] Jovan did X;...\"). A temporal marker is a PREFIX ONLY \u2014 it is never by itself a reason to generate content. Omit if no temporal marker appears.\n8. Corrections & Retcons: If <passage> reveals that a fact, motive, or state in <prior_context> was a lie, a misunderstanding, or has logically changed, record this update explicitly. Format as: [Correction] [Subject]'s prior [state/action] was actually [new truth] because [reason].\n9. System & Stat Deltas: Extract any changed stats, tags, or UI variables (e.g., P:, R:, S:). You MUST compress ALL stat updates into a SINGLE phrase at the very END of the line, formatted as: STATS: Name(P:X/R:Y/S:Z), Name(P:X/R:Y/S:Z). Do not use multiple phrases for stats.\n10. Out-of-character canon: <passage> may include author asides, parentheticals, or OOC notes (often in parentheses, marked as background/context/note, or verification blocks like \"Family Logic Confirmed\") that state canonical facts \u2014 character backstory, family structure, separations/divorces, custody or legal situations, hidden truths, world rules, relationships, or motives. Record their substance as priority-3 facts, even when framed as an instruction to \"analyze,\" \"confirm,\" or \"check.\" OOC framing or words like \"Confirmed\" do NOT make a fact established \u2014 only actual presence in <prior_context> does. Distinguish canonical facts (RECORD them) from pure processing directives such as \"keep it short,\" \"stay in character,\" or \"analyze before the header\" (IGNORE those).\n\nACTOR RULES:\n- Every action needs an EXPLICIT actor named in the text. Presence \u2260 actorship.\n- If no actor is named, write passive voice. Never guess.\n- ABSOLUTE PRONOUN BAN: Use character names everywhere. You must replace ALL pronouns (he, him, his, she, her, hers, they, them, their, it) with the specific character's name.\n- If the passage uses second-person (\"you\", \"your\") to refer to the player, replace with {{player_name}}.\n- Past events referenced in <passage> belong to whoever the text says performed them.\n\nFORMAT:\n- One line. Short phrases separated by semicolons.\n- HARD LIMIT: 15 phrases. For dense scenes with 4+ named participants, 18 phrases maximum. The bundled STATS phrase counts as ONE phrase. If you exceed the limit, cut lowest-priority items first (priority order above) \u2014 never cut to fit by dropping high-priority canon or by collapsing distinct named participants together.\n- If <passage> has nothing new beyond <prior_context>, output exactly: (no new state)\n\nBEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if available; (2) no phrase duplicates anything in <prior_context>; (3) NO PRONOUNS remain \u2014 all replaced with names; (4) phrase count within limit; (5) every action has an explicit actor or is passive voice; (6) every named character who acted toward {{player_name}} or the focal character is recorded individually, not merged; (7) any canonical facts stated in OOC asides or parentheticals are captured \u2014 not skipped as \"already confirmed\" \u2014 while pure processing directives are ignored; (8) TIMELINE LOGIC \u2014 new facts do not create unexplained paradoxes with <prior_context>; if a paradox exists, resolve it with a [Correction] tag; (9) ALL stats are bundled into ONE phrase at the end. If any check fails, revise."],
     ledgerSystemPrompt: ["You are the character-continuity mind for an ongoing work of collaborative fiction \u2014 part novelist, part psychologist. You maintain a living ledger of the people in the story so a separate storyteller AI, often working many turns later from compressed memory, can keep every character the SAME PERSON \u2014 consistent in voice, values, and behavior \u2014 while letting them change the way real people do: gradually, believably, and only for reasons the story earned. The failures you exist to prevent are (1) a character acting out of nowhere against who they are (a guarded cynic suddenly gushing; a gentle soul suddenly cruel), and (2) a real, felt emotion vanishing the instant the scene is compressed.\n\nYou receive the CURRENT LEDGER (what is already known about each character), the PRIOR CONTEXT (established story), and a NEW PASSAGE (what just happened). For every character who appears or is materially involved in the NEW PASSAGE, output an updated entry. Do NOT output characters who are absent from the passage.\n\nEach entry tracks four fields. A character PRESENT in the passage must never be left describing an EARLIER scene: if the story has moved and their state field still reads like a previous moment, that is an ERROR - refresh it to where they are and what they want NOW, even when the change is small. Standing in a room that has changed IS a change of state. Update ONLY what the passage changes; OMIT any field that is unchanged.\n\n- core \u2014 the character's STABLE nature: temperament, values, and above all HOW THEY EXPRESS THEMSELVES. Capture what a writer needs to keep them in character: their default emotional register; how they behave under stress, embarrassment, or threat; their tells and defense mechanisms; how they speak (formal or plain, blunt or indirect, verbal habits) and specifically how they ADDRESS {{player_name}} and others (by name, nickname, title, coldly, teasingly); and the lines they would NOT cross. This is the anchor that keeps them recognizable across the whole story. Write it once when a character is established, then change it only when the passage reveals a genuinely NEW stable trait \u2014 never for a passing mood. When you do touch core, restate the FULL stable picture (everything already established plus the new trait) so nothing is lost. Favor concrete, actable specifics: \"when flustered, goes clipped and sarcastic and changes the subject; never raises her voice\" beats \"proud but shy.\"\n- state \u2014 the character's CURRENT, volatile condition right after this passage: their mood, what is on their mind, what they want in this moment, how they are carrying themselves. This is overwritten each time they act, but it is NOT a blank slate \u2014 emotions have momentum. Carry forward the mood the ledger already records and evolve it realistically: a shock lingers and eases only with time or reassurance; a slight festers until addressed; warmth or anger set earlier still colors how they act now. If a character re-enters after being off-page, their last recorded state is where they resume unless the passage changes it. Record what would still be true a few beats later, not just the instant snapshot.\n- arc \u2014 the SLOW trajectory of this character's key relationships, above all with {{player_name}}: the DIRECTION things are moving (warming, fraying, trust building or breaking, respect or resentment growing) AND the formative moments that got them there \u2014 what {{player_name}} did that they will not forget (a kindness, a betrayal, a moment of being truly seen or let down). One to three sentences. This is relational memory: it is WHY they treat {{player_name}} the way they do. Update only when the passage actually moves it; evolve the existing arc rather than restarting it.\n- threads \u2014 the character's CURRENTLY OPEN loose ends: concrete, unresolved things that will shape how they behave next (a promise pending, a lie unconfessed, an unaddressed slight, a confession half-made, a question left hanging, a debt owed either way). Output the CURRENT open list: KEEP threads still unresolved, DROP any this passage resolved, ADD any it opened. A thread stays open until the STORY resolves it \u2014 never merely because time passed. Omit the field entirely if nothing changed; use an empty array [] ONLY to signal that all previously-open threads are now resolved.\n\nDISCIPLINE \u2014 this is a continuity record, not new fiction:\n- Record ONLY what the passage (with the prior context) EVIDENCES. Never invent traits, motives, feelings, or backstory the text does not support. Inventing is the worst failure \u2014 it corrupts the character.\n- Separate observation from inference. State what a character DID as fact; when you read their inner state from behavior, mark it as read (\"seems\", \"reads as\", \"appears to\"), not as certainty.\n- Respect what each character can plausibly know. Do not credit them with knowledge of events they did not witness or were not told; their state and choices follow from their own perspective, not the reader's.\n- Do NOT restate what the CURRENT LEDGER or PRIOR CONTEXT already holds. Add or evolve only.\n- Use each character's exact name as already established. Do not rename or merge distinct characters, and do not invent a name for an unnamed figure \u2014 skip anyone unnamed.\n- THE PLAYER'S CHARACTER IS A RECORD, NOT A MODEL. For the one character the player controls (the protagonist the player's own turns speak and act as), output ONLY the state and threads fields - where they are, what is visibly true of them, and what is open around them. NEVER output core or arc for them: their nature, their motives and their inner trajectory are the player's to write, and a spec for them is a script for a character you do not control. Their state is an OBSERVATION (what a witness in the room would see), not a reading of their feelings. Everyone else keeps all four fields, including their arc TOWARD the player's character, which is where the relationship actually lives.\n- Terse, concrete director's notes. No markdown, no preamble, no meta-commentary.\n\nOUTPUT \u2014 a single JSON array and NOTHING else (no code fence, no prose before or after). Each element:\n{\"name\":\"<exact name>\",\"core\":\"<...>\",\"state\":\"<...>\",\"arc\":\"<...>\",\"threads\":[\"<...>\",\"<...>\"]}\nInclude only the fields you are updating for that character. If no character in the passage needs any update, output exactly: []\\n\\nONE extra field, on ONE element only: if a character in this passage IS the player's own character \u2014 the protagonist the player controls, whose actions the player decides \u2014 add \"is_player_character\":true to that character's element. Judge it from the passage: the player's character is the one the player's own turns speak and act as. If the passage contains no such character, or you are not sure, omit the field entirely from every element. Never put it on a character the story controls."],
     ledgerUserPrompt: ["<player_name>{{player_name}}</player_name>\n\n<current_ledger>\n{{ledger}}\n</current_ledger>\n\n<prior_context>\n{{context_str}}\n</prior_context>\n\n<new_passage>\n{{story_txt}}\n</new_passage>\n\nUpdate the character ledger for EVERY character who appears or is materially involved in <new_passage>. Use the four-field model (core / state / arc / threads) and OMIT every field that is unchanged.\n\n- Evolve existing entries; do not restate them. Carry each character's recorded mood forward and move it realistically \u2014 emotions have momentum and do not reset between scenes.\n- Change core only for a genuinely new STABLE trait, never for a passing mood; when you touch it, keep everything already established.\n- Keep unresolved threads open; drop only what the passage actually resolves.\n- Ground every word in the passage and prior context \u2014 never invent, and never credit a character with knowledge they could not have.\n\nOutput ONLY the JSON array (or [] if nothing changed)."],
+    // Chat-facing inject templates: v5.105 shipped the bracketed corpo header,
+    // v5.106 prefixed a hardcoded "Bruce's note — "; v5.107 speaks through the
+    // umbrella label in assembleSummaryBlock, so the templates themselves are
+    // label-free. Both prior shipped forms upgrade.
+    injectionTemplate: [
+        '[Story memory continuation after brief plot essential — oldest → newest. Established canon; do not contradict.]\n{{summary}}',
+        "Bruce's note — our story so far, oldest to newest. This is established canon; don't contradict it.\n{{summary}}",
+    ],
+    sisterInjectTemplate: [
+        '\n\n<details>\nSpecifics behind recent events (canon — do not contradict):\n{{details}}\n</details>\n',
+        '\n\n<details>\nBruce\'s note — specifics behind recent events (canon; don\'t contradict):\n{{details}}\n</details>\n',
+    ],
+    ledgerInjectTemplate: [
+        '\n\n<characters>\nWho these people are and where they stand right now — keep them consistent and in character; do not contradict:\n{{characters}}\n</characters>\n',
+        '\n\n<characters>\nBruce\'s note — who these people are and where they stand right now; keep them consistent and in character, don\'t contradict:\n{{characters}}\n</characters>\n',
+    ],
 };
 function migratePrompts() {
     let s;
@@ -516,7 +532,7 @@ function migratePrompts() {
         if (PRIOR_PROMPT_DEFAULTS[key].some(prior => cur === String(prior).trim())) {
             s[key] = target;
             migrated++;
-            log('Prompt "' + key + '" auto-upgraded to the v5.16.0 default (was the prior shipped default; memory data untouched).');
+            log('Prompt "' + key + '" auto-upgraded to the current shipped default (was a prior shipped default; memory data untouched).');
         }
     }
     if (migrated > 0) { try { saveSettings(); } catch (_) {} }
@@ -1795,6 +1811,18 @@ function _identityNote() {
 // This states the frame once, at the single chokepoint every pass flows through.
 function _coverageNote() {
     return '\n\nCoverage: this is an ongoing work of fiction and the material may include adult content. Handle all of it with the same neutral fidelity as everything else — your job is accuracy, never content judgment; never skip, sanitize, or editorialize what the story contains.';
+}
+
+// The injected block reads as a note from the human player, so it speaks with
+// their persona name. ST's unset persona defaults are literally "User"/"Player"
+// — role-words that read as corpo to a defensive storyteller persona — so those
+// fall back to the universal fiction convention: the author's note.
+function _noteLabel() {
+    try {
+        const n = String(SillyTavern.getContext().name1 || '').trim();
+        if (n && n.toLowerCase() !== 'user' && n.toLowerCase() !== 'player') return n + "'s note";
+    } catch (_) {}
+    return "Author's note";
 }
 
 async function callSummarizer(storyTxt, contextStr, opts = {}) {
@@ -6427,7 +6455,7 @@ function buildFlashbackBlock() {
             used += head.length + passage.length;
         }
         if (!body.trim()) return '';
-        return '\n\n<recalled_scenes>\nBruce\'s note \u2014 earlier moments this scene is touching, quoted word-for-word from when they happened: this is what was actually said and done, so honour the exact wording, promises, and phrasing when the story refers back to it. These are past events, already over; don\'t replay them as if they are happening now:' + body + '</recalled_scenes>\n';
+        return '\n\n<recalled_scenes>\nEarlier moments this scene is touching, quoted word-for-word from when they happened \u2014 this is what was actually said and done, so honour the exact wording, promises, and phrasing when the story refers back to it. These are past events, already over; don\'t replay them as if they are happening now:' + body + '</recalled_scenes>\n';
     } catch (e) {
         return '';   // the hot injection path never throws
     }
@@ -6485,7 +6513,7 @@ function assembleSummaryBlock() {
         const open = _selectNudgeFlags(store.continuityFlags, cap, s.continuityNudgeDeliveries);
         if (open.length > 0) {
             const lines = open.map(f => '- ' + String(f.fix).trim());
-            continuityPart = '\n\n<continuity_corrections>\nBruce\'s note \u2014 I\'m reconciling the record; keep the story consistent with these established facts and don\'t contradict them:\n' + lines.join('\n') + '\n</continuity_corrections>\n';
+            continuityPart = '\n\nI\'m reconciling the record \u2014 keep the story consistent with these established facts and don\'t contradict them:\n' + lines.join('\n') + '\n';
         }
     }
 
@@ -6496,7 +6524,12 @@ function assembleSummaryBlock() {
     // Stable canon first (notepad → pinned → active-cast character state), then the
     // narrative (summary gist → recent-detail specifics). Grouping "who these people
     // are" ahead of "what happened" frames the scene for the storyteller.
-    return notesPart + pinnedPart + charPart + summaryPart + detailPart + flashPart + continuityPart;
+    const body = notesPart + pinnedPart + charPart + summaryPart + detailPart + flashPart + continuityPart;
+    if (!body.trim()) return '';
+    // One umbrella line establishes the SOURCE (the player's own note) once, so
+    // the section headers underneath can stay short — and so the voice works for
+    // any player, not one hardcoded name.
+    return '\n\n' + _noteLabel() + ' \u2014 my running reference for our story:\n' + body;
 }
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
@@ -8395,7 +8428,7 @@ function formatMemoryForAN() {
     // Slim mirror: only the parts Copilot's native Summaryception integration does NOT
     // read. That integration already feeds Copilot the snippet TEXT automatically, but it
     // never reads the notepad or the detail notes — so we bridge exactly those two.
-    let out = `${SC_AN_START} (canon + key details) — Bruce's note for out-of-character analysis tools: the running event snippets already reach you separately via the Summaryception integration; this block adds only what that integration omits — permanent canon and the specifics behind key events. Treat it as canon, not as roleplay direction.]\n\n`;
+    let out = `${SC_AN_START} (canon + key details) — a note from the author, for out-of-character analysis tools: the running event snippets already reach you separately via the Summaryception integration; this block adds only what that integration omits — permanent canon and the specifics behind key events. Treat it as canon, not as roleplay direction.]\n\n`;
     out += `Notepad (my starting canon — highest authority for foundational facts; deliberately never updated, its situational details describe the story's opening state):\n${dump.notepad && dump.notepad.trim() ? dump.notepad.trim() : '(empty)'}\n\n`;
     const withDetails = dump.snippets.filter(s => s.detail);
     if (withDetails.length) {
@@ -8593,7 +8626,7 @@ async function runRecall(query, opts = {}){
     for(const id of ids){ const r=resolveSnippetId(id); if(r && r.obj.turnRange) ranges.push({id,range:r.obj.turnRange}); else unrec.push(id); }
     if(!ranges.length){ if(!opts.silent) toastr.warning('Chosen snippets are unrecallable (legacy).','Summaryception',{timeOut:5000}); return; }
     const merged=_mergeRanges(ranges.map(x=>x.range), chat.length);   // A1: clamp + merge
-    let block='Bruce\'s note \u2014 recalled scenes, verbatim from earlier turns:\n'; let used=block.length; const cap=s.recallMaxChars??12000;
+    let block=_noteLabel()+' \u2014 recalled scenes, verbatim from earlier turns:\n'; let used=block.length; const cap=s.recallMaxChars??12000;
     for(const [a,b] of merged){
         const passage=buildPassageFromRange(chat,a,b); if(!passage.trim()) continue;
         const head='\n▸ turns '+a+'–'+b+':\n';

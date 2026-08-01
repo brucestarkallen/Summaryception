@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
 const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
-    'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
+    'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe', '_noteLabel',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
     'truncateLedgerToTurn', 'clampStoreToLength',
@@ -74,7 +74,7 @@ return {
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
   _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, _renameEvidence, _renameLedgerKeySpace, renameLedgerCharacter, formatLedgerEntry,
-  buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas,
+  buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas, _noteLabel,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
@@ -2951,6 +2951,23 @@ section('persona/MC identity — the record stops inventing a second person');
     // The system prompt — where the arc/core RULES live — must carry the name too.
     ok(/const sysPrompt = subst\(opts\.systemPrompt \|\| s\.summarizerSystemPrompt, '\{\{player_name\}\}', getPlayerName\(\)\)/.test(SRC_FULL), 'the SYSTEM prompt is substituted, not just the user prompt');
     ok(SRC_FULL.includes('_identityNote()'), 'and the identity note rides on every pass');
+    ok(SRC_FULL.includes('_coverageNote()'), 'and the fiction-coverage note rides on every pass — a utility model with no frame for explicit material refuses or sanitizes, and a sanitized summary silently amputates canon');
+    ok(SRC_FULL.includes('+ _identityNote() + _coverageNote()'), 'both ride at the single callSummarizer chokepoint, so all eight passes get them');
+
+    // The injection voice belongs to WHOEVER the player is — never a hardcoded
+    // name, and never the role-words "User"/"Player" (ST's unset defaults),
+    // which read as corpo to a defensive storyteller persona.
+    L.__setCtxExtra({ name1: 'Jovan' });
+    ok(L._noteLabel() === "Jovan's note", 'the note speaks with the player\'s own persona name');
+    for (const unset of ['User', 'user', 'USER', 'Player', 'player', '', '   ']) {
+        L.__setCtxExtra({ name1: unset });
+        ok(L._noteLabel() === "Author's note", `unset/role-word persona "${unset}" falls back to the author's note, never a role-word`);
+    }
+    L.__setCtxExtra({});
+    ok(SRC_FULL.includes("_noteLabel() + ' \\u2014 my running reference for our story:"), 'one umbrella line establishes the source once — section headers stay short, and no name is baked into a stored template');
+    ok(!SRC_FULL.includes('<continuity_corrections>'), 'the snake_case machine tag is gone — the record fixes ride as plain first-person prose under the umbrella');
+    ok(SRC_FULL.includes("injectionTemplate: [\n        '[Story memory continuation") && SRC_FULL.includes("sisterInjectTemplate: [\n") && SRC_FULL.includes("ledgerInjectTemplate: [\n"), 'both prior shipped forms of all three chat-facing templates are in PRIOR_PROMPT_DEFAULTS, so existing installs auto-upgrade');
+    ok(!/"Bruce's note — our story so far/.test(SRC_FULL.split('PRIOR_PROMPT_DEFAULTS')[0]), 'no hardcoded player name remains in the shipped defaults');
     ok(/never describe a relationship, interaction, or absence of interaction BETWEEN/.test(SRC_FULL), 'the note forbids exactly the "never interacted with" category error');
 
     // Folding a phantom persona entry into the protagonist.
