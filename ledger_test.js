@@ -39,7 +39,26 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
 
 const body = names.map(extractTopLevel).join('\n\n');
 
-const sandbox = `
+// v5.109.0: the extracted functions now read defaults from ONE place
+// (defaultSettings) instead of copying the literals inline, so the sandbox must
+// supply the REAL object from index.js — a stub here would prove nothing.
+const _dsI = src.indexOf('const defaultSettings');
+let _dsB = src.indexOf('{', _dsI), _dsD = 0, _dsJ = _dsB;
+for (;; _dsJ++) {
+    if (src[_dsJ] === '{') _dsD++;
+    else if (src[_dsJ] === '}') _dsD--;
+    if (_dsD === 0) break;
+}
+// The declaration is `Object.freeze({...})`, so brace-matching stops one char
+// short of the closing paren — walk to the real statement terminator.
+let _dsEnd = _dsJ + 1;
+while (_dsEnd < src.length && src[_dsEnd] !== ';') _dsEnd++;
+const DEFAULTS_SRC = src.slice(_dsI, _dsEnd + 1) + '\n';
+if (!/^const defaultSettings/.test(DEFAULTS_SRC) || !/\)\s*;\s*$/.test(DEFAULTS_SRC.trim() + '')) {
+    throw new Error('could not extract defaultSettings cleanly');
+}
+
+const sandbox = DEFAULTS_SRC + `
 let __settings = {};
 let __store = { ledger: {} };
 let __chat = [];
@@ -3734,6 +3753,49 @@ section('exclusive LLM channel — the lock enforces it, not the callers');
     //    reported "Nothing is running." over a running queue.
     ok(SRC_FULL.includes('if (!_llmChannelBusy() && !currentAbortController) {'),
         'the Stop button asks the channel, not one flag');
+}
+
+
+// ─── v5.109.0: a default has exactly ONE home ────────────────────────────────
+// An inline `?? 600` is a COPY of a default, and copies drift: ledgerMaxCharsPerChar
+// was raised to 1000 while three call sites kept falling back to the old 600, and
+// verbatimTurns read `?? 10` in one place and `?? 9` in another against a real
+// default of 9. These are live, not decorative: getSettings() fills only MISSING
+// keys (Object.hasOwn), so a key present but set to undefined — exactly what the
+// v5.102.0 void-assignment bug produced — reaches the fallback and gets the stale
+// number silently.
+section('settings defaults — single-sourced, no inline copies');
+{
+    const _dI = SRC_FULL.indexOf('const defaultSettings');
+    let _dB = SRC_FULL.indexOf('{', _dI), _dD = 0, _dJ = _dB;
+    for (;; _dJ++) {
+        if (SRC_FULL[_dJ] === '{') _dD++;
+        else if (SRC_FULL[_dJ] === '}') _dD--;
+        if (_dD === 0) break;
+    }
+    const _declared = {};
+    for (const m of SRC_FULL.slice(_dB, _dJ + 1).matchAll(/^ {4}([A-Za-z_$][\w$]*)\s*:\s*(-?\d+(?:\.\d+)?)\s*,/gm)) {
+        _declared[m[1]] = m[2];
+    }
+    ok(Object.keys(_declared).length > 20, 'the numeric defaults were actually parsed (' + Object.keys(_declared).length + ')');
+
+    const _after = SRC_FULL.slice(_dJ + 1);
+    const _copies = [];
+    for (const m of _after.matchAll(/\bs\.([A-Za-z_$][\w$]*)\s*\?\?\s*(-?\d+(?:\.\d+)?)/g)) {
+        if (Object.prototype.hasOwnProperty.call(_declared, m[1])) _copies.push(m[1] + ' ?? ' + m[2]);
+    }
+    if (_copies.length) console.log('    inline copies of a default found: ' + _copies.join(', '));
+    ok(_copies.length === 0, 'no call site copies a numeric default inline — every fallback names defaultSettings');
+
+    // And the single source is actually reachable where it is used.
+    ok(/^const defaultSettings = Object\.freeze\(\{/m.test(SRC_FULL), 'defaultSettings is one frozen module-level object');
+    ok((SRC_FULL.match(/\?\? defaultSettings\./g) || []).length >= 55,
+        'the fallbacks read through that object (' + (SRC_FULL.match(/\?\? defaultSettings\./g) || []).length + ' sites)');
+
+    // The two that had already drifted, pinned by value so a future edit that
+    // re-hardcodes them fails here rather than in someone's chat.
+    eq(_declared.verbatimTurns, '9', 'verbatimTurns default is 9 (one site read 10)');
+    eq(_declared.ledgerMaxCharsPerChar, '1000', 'ledgerMaxCharsPerChar default is 1000 (three sites read 600)');
 }
 
 console.log('\n────────────────────────────────────────');

@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.108.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.109.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1245,7 +1245,7 @@ async function repairIfBranched() {
         const isOurGhost = m.extra?.sc_ghosted === true;
         if (!m.is_user && (!m.is_system || isOurGhost)) asstTurns.push(i);
     }
-    const keep = Math.max(0, asstTurns.length - (s.verbatimTurns ?? 10));
+    const keep = Math.max(0, asstTurns.length - (s.verbatimTurns ?? defaultSettings.verbatimTurns));
     const verbatimStartIdx = asstTurns.length > 0
         ? (keep < asstTurns.length ? asstTurns[keep] : chatLength)
         : chatLength;
@@ -2530,7 +2530,7 @@ async function auditLedgerEntries(opts = {}) {
         // storyteller this very turn.
         let injected = [];
         try {
-            const windowSize = Math.max(1, s.ledgerActiveWindow ?? 12);
+            const windowSize = Math.max(1, s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
             const _msgs = chat.slice(-windowSize).map(m => ((m && typeof m.mes === 'string') ? m.mes : '').toLowerCase());
             const recentLower = _msgs.join('\n');
             const cast = computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick, _msgs);
@@ -2541,12 +2541,12 @@ async function auditLedgerEntries(opts = {}) {
         try {
             if (s.ledgerRegressionWatch !== false) snapped = _arcRegressionCandidates(store.ledgerNotes, Object.keys(ledger), s.ledgerRegressionJump);
         } catch (_) { snapped = []; }
-        const targets = _ledgerAuditTargets(ledger, injected, s.ledgerAuditMaxPerRun ?? 4, snapped);
+        const targets = _ledgerAuditTargets(ledger, injected, s.ledgerAuditMaxPerRun ?? defaultSettings.ledgerAuditMaxPerRun, snapped);
         if (targets.length === 0) return false;
 
         // Ambiguity is a property of the whole cast, not of this run's subset: Claire
         // is ambiguous with Jovan even when Jovan is not being audited.
-        const evidence = buildLedgerAuditEvidence(chat, targets, s.ledgerAuditEvidenceMsgs ?? 6, s.ledgerAuditEvidenceChars ?? 9000, _ambiguousTokens(Object.keys(ledger)));
+        const evidence = buildLedgerAuditEvidence(chat, targets, s.ledgerAuditEvidenceMsgs ?? defaultSettings.ledgerAuditEvidenceMsgs, s.ledgerAuditEvidenceChars ?? defaultSettings.ledgerAuditEvidenceChars, _ambiguousTokens(Object.keys(ledger)));
         if (!evidence.trim()) {
             if (manual) toastr.info('No on-screen evidence found for those characters yet — nothing to audit against.', 'Summaryception', { timeOut: 4000 });
             return false;
@@ -2562,7 +2562,7 @@ async function auditLedgerEntries(opts = {}) {
         // history is the only witness, and the notes journal has held it all along.
         try {
             if (s.ledgerRegressionWatch !== false) {
-                const hist = _arcHistoryPacket(store.ledgerNotes, targets, s.ledgerRegressionMaxVersions ?? 6);
+                const hist = _arcHistoryPacket(store.ledgerNotes, targets, s.ledgerRegressionMaxVersions ?? defaultSettings.ledgerRegressionMaxVersions);
                 if (hist) contextStr += '\n\n<relationship_history>\nHow these characters\' relationships read over time, oldest first. This is what the story ESTABLISHED; the current entry must carry it forward unless the evidence shows a rupture:\n' + hist + '\n</relationship_history>';
             }
         } catch (_) { /* history is an enhancement; the audit runs without it */ }
@@ -3692,7 +3692,7 @@ function maybeQueueLiveLedger() {
     const s = getSettings();
     if (!s.ledgerEnabled || s.ledgerLiveUpdate === false) return;
     _turnsSinceLive++;
-    if (_turnsSinceLive < Math.max(1, s.ledgerLiveEveryTurns ?? 1)) return;
+    if (_turnsSinceLive < Math.max(1, s.ledgerLiveEveryTurns ?? defaultSettings.ledgerLiveEveryTurns)) return;
     const r = queueLiveLedgerUpdate();
     if (r === true) { _turnsSinceLive = 0; _clearLiveRetry(); }
     else if (r === 'busy') _armLiveRetry();
@@ -5023,7 +5023,7 @@ function noteLedgerContentChange(idx) {
         if (!s.ledgerEnabled) return;
         const st = getChatStore();
         const live = (typeof st.ledgerLiveIdx === 'number') ? st.ledgerLiveIdx : -1;
-        const decision = _editRewindDecision(idx, live, (s.ledgerEditRewindDepth ?? 10));
+        const decision = _editRewindDecision(idx, live, (s.ledgerEditRewindDepth ?? defaultSettings.ledgerEditRewindDepth));
         if (decision === 'ignore') return;
         if (decision === 'deep') {
             if (!_deepEditToastShown) {
@@ -5771,7 +5771,7 @@ async function maybePromoteLayer(layerIndex) {
     // ride along on the record, and the user is told which snippet to look at.
     if (shrink.thin) {
         merged.thinMerge = { ratio: Math.round(shrink.ratio * 1000) / 1000, srcChars: storyTxt.length, outChars: metaSummary.length, at: Date.now() };
-        const stash = _stashSources(toMerge.map(sn => sn.text), s.shrinkStashChars ?? 4000);
+        const stash = _stashSources(toMerge.map(sn => sn.text), s.shrinkStashChars ?? defaultSettings.shrinkStashChars);
         if (stash) merged.thinSources = stash;
         log(`Promotion shrink guard: ACCEPTED a thin merge (${(shrink.ratio * 100).toFixed(1)}% of sources); originals stashed on the snippet.`);
         try {
@@ -6132,7 +6132,7 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
     // and stay frozen doing whatever he was doing twenty turns earlier. Ranking by
     // last appearance inverts it: present -> injected -> written -> updated.
     active.sort((a, b) => (b.seen - a.seen) || (b.u - a.u));
-    const maxActive = Math.max(1, s.ledgerMaxActive ?? 6);
+    const maxActive = Math.max(1, s.ledgerMaxActive ?? defaultSettings.ledgerMaxActive);
     // WHO MATTERS is not something the user should have to hand-annotate — asking for
     // pins was pushing the system's job onto them. The ledger already holds the
     // answer and was ignoring it: importance is what the STORY has invested in a
@@ -6166,7 +6166,7 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
     // this tier is naturally empty there — no behavior change for plain chats.
     res.recalled = [];
     if (s.ledgerMentionRecall !== false) {
-        const mentionWin = Math.max(1, s.ledgerMentionWindow ?? 3);
+        const mentionWin = Math.max(1, s.ledgerMentionWindow ?? defaultSettings.ledgerMentionWindow);
         const tail = (Array.isArray(msgsEff) ? msgsEff.slice(-mentionWin) : []).join('\n');
         if (tail.trim()) {
             const onNames = new Set(res.shown.concat(res.compact).map(a => a.name));
@@ -6179,12 +6179,12 @@ function computeLedgerCast(ledger, s, recentLower, pins, rosterTick, recentMsgs)
                 if (aliases.some(a => wordPresentInText(tail, a))) cand.push({ name, entry, u: entry.updatedAt || 0 });
             }
             for (const c of cand) c.w = _characterWeight(c.entry, pinLower.has(c.name.toLowerCase()));
-            res.recalled = cand.sort((a, b) => (b.w - a.w) || (b.u - a.u)).slice(0, Math.max(0, s.ledgerMentionMax ?? 3));
+            res.recalled = cand.sort((a, b) => (b.w - a.w) || (b.u - a.u)).slice(0, Math.max(0, s.ledgerMentionMax ?? defaultSettings.ledgerMentionMax));
         }
     }
     const shownNames = new Set(res.shown.concat(res.compact, res.recalled).map(a => a.name));
     if (s.ledgerInjectRoster !== false) {
-        const rosterCap = Math.max(0, s.ledgerRosterMax ?? 12);
+        const rosterCap = Math.max(0, s.ledgerRosterMax ?? defaultSettings.ledgerRosterMax);
         const offscreen = names
             .filter(n => !shownNames.has(n))
             .map(n => ({ name: n, entry: ledger[n], u: (ledger[n] && ledger[n].updatedAt) || 0 }))
@@ -6229,7 +6229,7 @@ function buildCharacterBlock() {
     let recentMsgs = [];
     try {
         const { chat } = SillyTavern.getContext();
-        const windowSize = Math.max(1, s.ledgerActiveWindow ?? 12);
+        const windowSize = Math.max(1, s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
         recentMsgs = (chat || []).slice(-windowSize).map(m => ((m && typeof m.mes === 'string') ? m.mes : '').toLowerCase());
         recentLower = (chat || [])
             .slice(-windowSize)
@@ -6240,7 +6240,7 @@ function buildCharacterBlock() {
     if (!recentLower.trim()) return '';
 
     const cast = computeLedgerCast(ledger, s, recentLower, getLedgerPins(), _rosterTick, recentMsgs);
-    const capChars = Math.max(80, s.ledgerMaxCharsPerChar ?? 600);
+    const capChars = Math.max(80, s.ledgerMaxCharsPerChar ?? defaultSettings.ledgerMaxCharsPerChar);
     // Every storyteller-facing surface asks the same question of the same name.
     const _recOnly = (name) => (s.ledgerMcRecordOnly !== false) && isMcLedgerKey(name);
     const shown = cast.shown;
@@ -6284,7 +6284,7 @@ function buildCharacterBlock() {
     // permission to put them in the room.
     let recalledBlock = '';
     if (cast.recalled && cast.recalled.length) {
-        const rcap = Math.max(80, s.ledgerMentionChars ?? 500);
+        const rcap = Math.max(80, s.ledgerMentionChars ?? defaultSettings.ledgerMentionChars);
         const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap, _recOnly(name))).filter(Boolean);
         if (rb.length) recalledBlock = 'Just mentioned, not in the scene \u2014 the story referenced these people; know them fully so the reference lands true, but they are off-screen and do not appear unless the story brings them in:\n' + rb.join('\n');
     }
@@ -6415,7 +6415,7 @@ function buildFlashbackBlock() {
         // THE QUERY is the live edge of the story — your message and the reply it
         // answers — read through the same meta-strip the rest of the pipeline uses,
         // so status blocks and watchlist agendas never drive the search.
-        const qWin = Math.max(1, s.flashbackQueryWindow ?? 2);
+        const qWin = Math.max(1, s.flashbackQueryWindow ?? defaultSettings.flashbackQueryWindow);
         const qText = chat.slice(-qWin).map(m => stripMetaBlocks(String((m && m.mes) || '').trim())).join('\n');
         const qTokens = _fbTokens(qText);
         if (qTokens.length < 2) return '';
@@ -6428,7 +6428,7 @@ function buildFlashbackBlock() {
         // Never quote what is already verbatim in context — the recent window is
         // right there, and re-injecting it is pure waste.
         const asst = getAssistantTurns(chat);
-        const keep = Math.max(0, asst.length - (s.verbatimTurns ?? 9));
+        const keep = Math.max(0, asst.length - (s.verbatimTurns ?? defaultSettings.verbatimTurns));
         const verbatimFrom = (keep < asst.length && asst[keep]) ? asst[keep].index : chat.length;
 
         const parsed = [];
@@ -6443,13 +6443,13 @@ function buildFlashbackBlock() {
         if (!parsed.length) return '';
 
         const floor = (typeof s.flashbackMinScore === 'number') ? s.flashbackMinScore : 2.5;
-        const ranked = _fbScore(qTokens, parsed, nameTokens, s.flashbackNameBoost ?? 3)
+        const ranked = _fbScore(qTokens, parsed, nameTokens, s.flashbackNameBoost ?? defaultSettings.flashbackNameBoost)
             .filter(r => r.score >= floor)
             .sort((x, y) => y.score - x.score)
-            .slice(0, Math.max(0, s.flashbackMax ?? 2));
+            .slice(0, Math.max(0, s.flashbackMax ?? defaultSettings.flashbackMax));
         if (!ranked.length) return '';
 
-        const cap = Math.max(200, s.flashbackMaxChars ?? 2500);
+        const cap = Math.max(200, s.flashbackMaxChars ?? defaultSettings.flashbackMaxChars);
         let body = '';
         let used = 0;
         for (const r of ranked) {
@@ -6552,9 +6552,9 @@ function updateInjection(force = false) {
         const { setExtensionPrompt } = SillyTavern.getContext();
         const s = getSettings();
 
-        const pos  = (s.injectionPosition ?? 1);
-        const dep  = (s.injectionDepth ?? 4);
-        const role = (s.injectionRole ?? 1);   // default USER — the note speaks as Bruce
+        const pos  = (s.injectionPosition ?? defaultSettings.injectionPosition);
+        const dep  = (s.injectionDepth ?? defaultSettings.injectionDepth);
+        const role = (s.injectionRole ?? defaultSettings.injectionRole);   // default USER — the note speaks as Bruce
 
         if (!s.enabled) {
             if (_lastInjected !== '' || force) {
@@ -7098,9 +7098,9 @@ function updateUI() {
         $('#sc_max_layers').val(s.maxLayers);
         $('#sc_max_layers_val').text(s.maxLayers);
         $('#sc_injection_template').val(s.injectionTemplate);
-        $('#sc_injection_position').val(String(s.injectionPosition ?? 1));
-        $('#sc_injection_depth').val(s.injectionDepth ?? 4);
-        $('#sc_injection_depth_val').text(s.injectionDepth ?? 4);
+        $('#sc_injection_position').val(String(s.injectionPosition ?? defaultSettings.injectionPosition));
+        $('#sc_injection_depth').val(s.injectionDepth ?? defaultSettings.injectionDepth);
+        $('#sc_injection_depth_val').text(s.injectionDepth ?? defaultSettings.injectionDepth);
         $('#sc_inject_notepad').prop('checked', s.injectNotepad !== false);
         $('#sc_inject_pinned').prop('checked', s.injectPinned !== false);
         $('#sc_inject_ledger').prop('checked', s.injectLedger !== false);
@@ -7121,48 +7121,48 @@ function updateUI() {
         $('#sc_continuity_enabled').prop('checked', s.continuityEnabled === true);
         $('#sc_continuity_autofix').prop('checked', s.continuityAutoFix === true);
         $('#sc_continuity_nudge').prop('checked', s.continuityNudge === true);
-        $('#sc_continuity_nudge_max').val(s.continuityNudgeMax ?? 6);
-        $('#sc_continuity_nudge_max_val').text(s.continuityNudgeMax ?? 6);
+        $('#sc_continuity_nudge_max').val(s.continuityNudgeMax ?? defaultSettings.continuityNudgeMax);
+        $('#sc_continuity_nudge_max_val').text(s.continuityNudgeMax ?? defaultSettings.continuityNudgeMax);
         if (s.continuitySystemPrompt !== undefined) $('#sc_continuity_system_prompt').val(s.continuitySystemPrompt);
         if (s.continuityUserPrompt !== undefined) $('#sc_continuity_user_prompt').val(s.continuityUserPrompt);
         if (s.continuityFixSystemPrompt !== undefined) $('#sc_continuity_fix_system_prompt').val(s.continuityFixSystemPrompt);
         if (s.continuityFixUserPrompt !== undefined) $('#sc_continuity_fix_user_prompt').val(s.continuityFixUserPrompt);
         $('#sc_ledger_system_prompt').val(s.ledgerSystemPrompt);
         $('#sc_ledger_user_prompt').val(s.ledgerUserPrompt);
-        $('#sc_ledger_active_window').val(s.ledgerActiveWindow ?? 12);
-        $('#sc_ledger_active_window_val').text(s.ledgerActiveWindow ?? 12);
-        $('#sc_ledger_max_active').val(s.ledgerMaxActive ?? 6);
-        $('#sc_ledger_max_active_val').text(s.ledgerMaxActive ?? 6);
-        $('#sc_ledger_max_chars').val(s.ledgerMaxCharsPerChar ?? 600);
+        $('#sc_ledger_active_window').val(s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
+        $('#sc_ledger_active_window_val').text(s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
+        $('#sc_ledger_max_active').val(s.ledgerMaxActive ?? defaultSettings.ledgerMaxActive);
+        $('#sc_ledger_max_active_val').text(s.ledgerMaxActive ?? defaultSettings.ledgerMaxActive);
+        $('#sc_ledger_max_chars').val(s.ledgerMaxCharsPerChar ?? defaultSettings.ledgerMaxCharsPerChar);
         $('#sc_ledger_live').prop('checked', s.ledgerLiveUpdate !== false);
-        $('#sc_ledger_live_every').val(s.ledgerLiveEveryTurns ?? 1);
-        $('#sc_ledger_live_every_val').text(s.ledgerLiveEveryTurns ?? 1);
+        $('#sc_ledger_live_every').val(s.ledgerLiveEveryTurns ?? defaultSettings.ledgerLiveEveryTurns);
+        $('#sc_ledger_live_every_val').text(s.ledgerLiveEveryTurns ?? defaultSettings.ledgerLiveEveryTurns);
         $('#sc_ledger_mc_record').prop('checked', s.ledgerMcRecordOnly !== false);
         $('#sc_ledger_roster').prop('checked', s.ledgerInjectRoster !== false);
-        $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? 12);
-        $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? 12);
+        $('#sc_ledger_roster_max').val(s.ledgerRosterMax ?? defaultSettings.ledgerRosterMax);
+        $('#sc_ledger_roster_max_val').text(s.ledgerRosterMax ?? defaultSettings.ledgerRosterMax);
         $('#sc_ledger_roster_rotate').prop('checked', s.ledgerRosterRotate !== false);
         $('#sc_ledger_presence_markers').prop('checked', s.ledgerPresenceMarkers !== false);
         $('#sc_ledger_presence_on').val(s.ledgerPresenceOnPattern ?? defaultSettings.ledgerPresenceOnPattern);
         $('#sc_ledger_presence_off').val(s.ledgerPresenceOffPattern ?? defaultSettings.ledgerPresenceOffPattern);
         $('#sc_ledger_regression_watch').prop('checked', s.ledgerRegressionWatch !== false);
         $('#sc_ledger_mention_recall').prop('checked', s.ledgerMentionRecall !== false);
-        $('#sc_ledger_mention_max').val(s.ledgerMentionMax ?? 3);
-        $('#sc_ledger_mention_max_val').text(s.ledgerMentionMax ?? 3);
-        $('#sc_ledger_mention_window').val(s.ledgerMentionWindow ?? 3);
-        $('#sc_ledger_mention_window_val').text(s.ledgerMentionWindow ?? 3);
+        $('#sc_ledger_mention_max').val(s.ledgerMentionMax ?? defaultSettings.ledgerMentionMax);
+        $('#sc_ledger_mention_max_val').text(s.ledgerMentionMax ?? defaultSettings.ledgerMentionMax);
+        $('#sc_ledger_mention_window').val(s.ledgerMentionWindow ?? defaultSettings.ledgerMentionWindow);
+        $('#sc_ledger_mention_window_val').text(s.ledgerMentionWindow ?? defaultSettings.ledgerMentionWindow);
         $('#sc_ledger_auto_rewind').prop('checked', s.ledgerAutoRewind !== false);
-        $('#sc_ledger_max_chars_val').text(s.ledgerMaxCharsPerChar ?? 600);
+        $('#sc_ledger_max_chars_val').text(s.ledgerMaxCharsPerChar ?? defaultSettings.ledgerMaxCharsPerChar);
         $('#sc_editor_system_prompt').val(s.editorSystemPrompt);
         $('#sc_editor_user_prompt').val(s.editorUserPrompt);
-        $('#sc_recall_k').val(s.recallMaxSnippets??4);
-        $('#sc_recall_persist').val(s.recallPersist??1);
+        $('#sc_recall_k').val(s.recallMaxSnippets ?? defaultSettings.recallMaxSnippets);
+        $('#sc_recall_persist').val(s.recallPersist ?? defaultSettings.recallPersist);
         $('#sc_recall_auto').prop('checked', s.recallAuto===true);
         $('#sc_shrink_guard').prop('checked', s.shrinkGuard !== false);
         $('#sc_flashback_enabled').prop('checked', s.flashbackEnabled !== false);
-        $('#sc_flashback_max').val(s.flashbackMax ?? 2);
-        $('#sc_flashback_chars').val(s.flashbackMaxChars ?? 2500);
-        $('#sc_flashback_score').val(s.flashbackMinScore ?? 2.5);
+        $('#sc_flashback_max').val(s.flashbackMax ?? defaultSettings.flashbackMax);
+        $('#sc_flashback_chars').val(s.flashbackMaxChars ?? defaultSettings.flashbackMaxChars);
+        $('#sc_flashback_score').val(s.flashbackMinScore ?? defaultSettings.flashbackMinScore);
         $('#sc_flashback_date').val(s.flashbackDatePattern ?? defaultSettings.flashbackDatePattern);
         renderPins();
         // ── Prompt preset migration & sync ──
@@ -7366,7 +7366,7 @@ function renderLedger() {
         let _panelMsgs = [];
         try {
             const { chat } = SillyTavern.getContext();
-            const windowSize = Math.max(1, s.ledgerActiveWindow ?? 12);
+            const windowSize = Math.max(1, s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
             _panelMsgs = (chat || []).slice(-windowSize).map(m => ((m && typeof m.mes === 'string') ? m.mes : '').toLowerCase());
             recentLower = _panelMsgs.join('\n');
         } catch (_) { /* no chat loaded */ }
@@ -8556,7 +8556,7 @@ async function addPin(label) {
         for(let i=(chat?.length||0)-1;i>=0;i--){ const m=chat[i]; if(m && m.mes && m.mes.trim() && !m.is_system){ excerpt=m.mes.trim(); break; } }
     }
     if(!excerpt){ toastr.warning('Nothing to pin.','Summaryception'); return; }
-    const cap=s.pinMaxChars??1500; if(excerpt.length>cap) excerpt=excerpt.slice(0,cap)+'…';
+    const cap=s.pinMaxChars ?? defaultSettings.pinMaxChars; if(excerpt.length>cap) excerpt=excerpt.slice(0,cap)+'…';
     const _src = _findPinSource({ excerpt }, chat);
     // Found: quote text, gated on liveness. Not found: the selection was never chat
     // text — a FREE pin (null), injected unconditionally. Only creation can tell
@@ -8582,7 +8582,7 @@ function renderPins() {
 function buildPinnedBlock() {
     const s=getSettings(); const pins=getPins(); if(pins.length===0) return '';
     const { chat }=SillyTavern.getContext();
-    const cap=s.pinsMaxTotalChars??6000; let used=0; const parts=[];
+    const cap=s.pinsMaxTotalChars ?? defaultSettings.pinsMaxTotalChars; let used=0; const parts=[];
     for(let i=pins.length-1;i>=0;i--){ const p=pins[i];   // newest kept first under cap
         if(!_pinAlive(p, chat)) continue;   // source text not in THIS branch — a quote from an abandoned timeline must not narrate this one
         if(used+p.excerpt.length>cap){ log('Pins over cap — oldest pins truncated from injection.'); break; }
@@ -8609,7 +8609,7 @@ let _recallSlot = null;
 
 function clearRecall(){
     try{ const {setExtensionPrompt}=SillyTavern.getContext(); const s=getSettings();
-        const slot=_recallSlot||{pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??1};
+        const slot=_recallSlot||{pos:s.recallPosition ?? defaultSettings.recallPosition,depth:s.recallDepth ?? defaultSettings.recallDepth,role:s.recallRole ?? defaultSettings.recallRole};
         setExtensionPrompt(MODULE_NAME+'_recall','',slot.pos,slot.depth,false,slot.role);
     }catch(e){}
     _recallRemaining=0;
@@ -8632,7 +8632,7 @@ async function runRecall(query, opts = {}){
     const s=getSettings(); const { chat }=SillyTavern.getContext();
     const dump=buildMemoryDump();
     if(!dump.snippets.length){ if(!opts.silent) toastr.info('No memory snippets to recall from yet.','Summaryception'); return; }
-    const k=s.recallMaxSnippets??4;
+    const k=s.recallMaxSnippets ?? defaultSettings.recallMaxSnippets;
     const catalog=JSON.stringify(dump.snippets.map(x=>({id:x.id,text:x.text,detail:x.detail?String(x.detail).split('\n')[0]:undefined})));
     const sys=(s.recallSystemPrompt||'').replace('{{k}}',String(k));
     const user='QUERY: '+query+'\n\nCATALOG:\n'+catalog+'\n\nReturn ONLY the JSON array of ids.';
@@ -8648,7 +8648,7 @@ async function runRecall(query, opts = {}){
     for(const id of ids){ const r=resolveSnippetId(id); if(r && r.obj.turnRange) ranges.push({id,range:r.obj.turnRange}); else unrec.push(id); }
     if(!ranges.length){ if(!opts.silent) toastr.warning('Chosen snippets are unrecallable (legacy).','Summaryception',{timeOut:5000}); return; }
     const merged=_mergeRanges(ranges.map(x=>x.range), chat.length);   // A1: clamp + merge
-    let block=_noteLabel()+' \u2014 recalled scenes, verbatim from earlier turns:\n'; let used=block.length; const cap=s.recallMaxChars??12000;
+    let block=_noteLabel()+' \u2014 recalled scenes, verbatim from earlier turns:\n'; let used=block.length; const cap=s.recallMaxChars ?? defaultSettings.recallMaxChars;
     for(const [a,b] of merged){
         const passage=buildPassageFromRange(chat,a,b); if(!passage.trim()) continue;
         const head='\n▸ turns '+a+'–'+b+':\n';
@@ -8657,9 +8657,9 @@ async function runRecall(query, opts = {}){
     }
     _lastRecallText=block;
     const {setExtensionPrompt}=SillyTavern.getContext();
-    _recallSlot={pos:s.recallPosition??1,depth:s.recallDepth??6,role:s.recallRole??1};
+    _recallSlot={pos:s.recallPosition ?? defaultSettings.recallPosition,depth:s.recallDepth ?? defaultSettings.recallDepth,role:s.recallRole ?? defaultSettings.recallRole};
     setExtensionPrompt(MODULE_NAME+'_recall',block,_recallSlot.pos,_recallSlot.depth,false,_recallSlot.role);
-    _recallRemaining=Math.max(1,s.recallPersist??1);
+    _recallRemaining=Math.max(1,s.recallPersist ?? defaultSettings.recallPersist);
     if(opts.silent){ log('Auto-recall injected: '+merged.length+' range(s), '+used+' chars'); } else toastr.success('Recalled '+merged.length+' scene range(s), '+used+' chars ('+ids.join(', ')+')'+(unrec.length?(' — unrecallable: '+unrec.join(',')):''),'Summaryception',{timeOut:6000});
 }
 
