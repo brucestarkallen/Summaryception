@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.112.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.113.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -35,7 +35,14 @@ const defaultSettings = Object.freeze({
 
     // ── Injection placement (previously hardcoded to IN_PROMPT / system) ──
     injectionPosition: 1,   // 0 = in-prompt (merged w/ system) · 1 = in-chat @ depth · 2 = before-prompt
-    injectionDepth: 4,      // messages up from newest; only used when position = 1
+    injectionDepth: 9999,   // messages up from newest; only used when position = 1. 9999 is
+                            // deliberately larger than any real chat: ST walks depths 0..
+                            // MAX_INJECTION_DEPTH (10000) and splices into a newest-first
+                            // array, and splice CLAMPS an over-large index to the end — which
+                            // is the OLDEST slot, i.e. the top of the chat right after the
+                            // system instructions. So the memory block sits at a STABLE
+                            // position instead of sliding one message further from the top
+                            // every turn, and it is never buried mid-conversation.
     injectionRole: 1,       // 0 = system · 1 = user · 2 = assistant — USER: the note speaks as Bruce, not a system directive (see migrateInjectionRoles)
 
     // ── Injection contents: which assembled sections are actually sent to the
@@ -615,6 +622,21 @@ function migrateInjectionRoles() {
     s.rolesMigratedToUser = true;
     try { saveSettings(); } catch (_) {}
     log('Injection roles migrated to USER — the memory block now speaks as the player\'s note, not a system directive.');
+}
+
+// One-time: the depth used to ship as 4, which parks the memory block four
+// messages up from the newest — mid-conversation, in a slot that means something
+// different every single turn. getSettings() only fills MISSING keys, so raising
+// the shipped default would never reach an install that already has one. A stored
+// 4 is upgraded to the new default once; the flag means a later deliberate 4 (now
+// a real choice, since the control reaches 9999) is never overwritten again.
+function migrateInjectionDepth() {
+    let s; try { s = getSettings(); } catch (_) { return; }
+    if (s.depthMigratedToTop) return;
+    if (s.injectionDepth === 4) s.injectionDepth = defaultSettings.injectionDepth;
+    s.depthMigratedToTop = true;
+    try { saveSettings(); } catch (_) {}
+    log('Injection depth migrated to the top of the chat — the memory block now sits just after the system instructions, at a stable position.');
 }
 
 function saveSettings() {
@@ -6580,13 +6602,26 @@ function assembleSummaryBlock() {
 
 let _lastInjected = '';
 
+// SillyTavern's ceiling. Above it the injection is not “deep”, it is GONE.
+const ST_MAX_INJECTION_DEPTH = 10000;
+function _injectionDepth(s) {
+    const n = Math.floor(Number(s && s.injectionDepth));
+    if (!Number.isFinite(n) || n < 0) return defaultSettings.injectionDepth;
+    return Math.min(n, ST_MAX_INJECTION_DEPTH - 1);
+}
+
 function updateInjection(force = false) {
     try {
         const { setExtensionPrompt } = SillyTavern.getContext();
         const s = getSettings();
 
         const pos  = (s.injectionPosition ?? defaultSettings.injectionPosition);
-        const dep  = (s.injectionDepth ?? defaultSettings.injectionDepth);
+        // ST loops i = 0..MAX_INJECTION_DEPTH (10000) and only emits prompts whose
+        // depth it actually visits, so a stored depth ABOVE that ceiling is never
+        // reached and the entire memory block vanishes with no error. One reader,
+        // one clamp: a corrupt or over-typed value can never silently un-inject
+        // everything this extension exists to inject.
+        const dep  = _injectionDepth(s);
         const role = (s.injectionRole ?? defaultSettings.injectionRole);   // default USER — the note speaks as Bruce
 
         if (!s.enabled) {
@@ -7132,8 +7167,9 @@ function updateUI() {
         $('#sc_max_layers_val').text(s.maxLayers);
         $('#sc_injection_template').val(s.injectionTemplate);
         $('#sc_injection_position').val(String(s.injectionPosition ?? defaultSettings.injectionPosition));
-        $('#sc_injection_depth').val(s.injectionDepth ?? defaultSettings.injectionDepth);
-        $('#sc_injection_depth_val').text(s.injectionDepth ?? defaultSettings.injectionDepth);
+        const _dep = _injectionDepth(s);
+        $('#sc_injection_depth').val(_dep);
+        $('#sc_injection_depth_val').text(_dep >= 999 ? _dep + ' \u2014 top of chat' : String(_dep));
         $('#sc_inject_notepad').prop('checked', s.injectNotepad !== false);
         $('#sc_inject_pinned').prop('checked', s.injectPinned !== false);
         $('#sc_inject_ledger').prop('checked', s.injectLedger !== false);
@@ -8815,9 +8851,13 @@ function bindUIEvents() {
         updateInjection(true);
     });
     $(document).on('input', '#sc_injection_depth', function () {
-        const val = parseInt($(this).val(), 10);
+        // A number input accepts anything typed, including empty and 99999. Store
+        // what the injection will actually use, so the panel never shows a value
+        // the block is not really at.
+        const raw = parseInt($(this).val(), 10);
+        const val = _injectionDepth({ injectionDepth: raw });
         getSettings().injectionDepth = val;
-        $('#sc_injection_depth_val').text(val);
+        $('#sc_injection_depth_val').text(val >= 999 ? val + ' \u2014 top of chat' : String(val));
         saveSettings();
         updateInjection(true);
     });
@@ -10266,6 +10306,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { patchLedgerPrompt(); } catch (_) {}
             try { patchSummarizerPrompt(); } catch (_) {}
             try { migrateInjectionRoles(); } catch (_) {}
+            try { migrateInjectionDepth(); } catch (_) {}
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();

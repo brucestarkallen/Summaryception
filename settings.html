@@ -772,11 +772,11 @@
                     <div class="sc-row">
                         <label for="sc_injection_depth">
                             <span>Injection Depth</span>
-                            <small class="sc-hint">How many messages up from the newest the block sits. Only used for in-chat.</small>
+                            <small class="sc-hint">How many messages up from the newest the block sits (in-chat only). <b>9999 = top of the chat</b>, right after your system instructions — a stable spot that doesn't drift a message further down every turn. A small number parks it mid-conversation instead. Max 9999.</small>
                         </label>
                         <div class="sc-slider-row">
-                            <input type="range" id="sc_injection_depth" min="0" max="20" step="1" />
-                            <span id="sc_injection_depth_val" class="sc-val">4</span>
+                            <input type="number" id="sc_injection_depth" min="0" max="9999" step="1" class="text_pole" />
+                            <span id="sc_injection_depth_val" class="sc-val">9999</span>
                         </div>
                     </div>
                     </details>

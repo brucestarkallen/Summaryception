@@ -3880,6 +3880,52 @@ section('promotion — bounded, and never merges nothing');
     eq(good.maxLayers, 4, 'and a legitimate depth');
 }
 
+
+// ─── v5.113.0: the memory block sits at the top of the chat ──────────────────
+// Verified against SillyTavern's own source, not assumed: MAX_INJECTION_DEPTH is
+// 10000, both the chat-completion and text-completion paths loop i = 0..maxDepth
+// and splice into a NEWEST-FIRST array, and Array.splice CLAMPS an over-large
+// index to the end (only negatives wrap). So a depth larger than the chat lands
+// in the oldest slot — the top, right after the system instructions.
+section('injection depth — top of chat, and never above ST\u2019s ceiling');
+{
+    const _iI = SRC_FULL.indexOf('function _injectionDepth(s) {');
+    const _iBody = SRC_FULL.slice(_iI, SRC_FULL.indexOf('\n}', _iI) + 2);
+    ok(_iI > 0, '_injectionDepth exists');
+    const _dep = new Function('defaultSettings',
+        'const ST_MAX_INJECTION_DEPTH = 10000;\n' + _iBody + '\nreturn _injectionDepth;')({ injectionDepth: 9999 });
+
+    eq(_dep({ injectionDepth: 9999 }), 9999, 'the shipped depth passes through');
+    eq(_dep({ injectionDepth: 4 }), 4, 'a deliberate shallow depth is honoured');
+    eq(_dep({ injectionDepth: 0 }), 0, 'zero is a legal depth (the very newest slot)');
+    // ABOVE ST's ceiling the injection is not "deep", it is GONE: ST only emits
+    // prompts at depths its loop actually visits.
+    eq(_dep({ injectionDepth: 10000 }), 9999, 'ST\u2019s ceiling itself is clamped below');
+    eq(_dep({ injectionDepth: 99999 }), 9999, 'an over-typed depth is clamped, never silently un-injected');
+    for (const bad of [-1, NaN, Infinity, null, undefined, '', [], {}]) {
+        const v = _dep({ injectionDepth: bad });
+        ok(Number.isInteger(v) && v >= 0 && v < 10000, 'absurd depth yields a usable one');
+    }
+
+    // The default itself, and that the ONE reader is the clamp.
+    ok(/^\s{4}injectionDepth: 9999,/m.test(SRC_FULL), 'the shipped default is 9999 — the top of the chat');
+    ok(SRC_FULL.includes('const dep  = _injectionDepth(s);'), 'updateInjection reads the depth through the clamp');
+    ok(!/const dep\s+= \(s\.injectionDepth \?\?/.test(SRC_FULL), 'and nowhere reads it raw');
+    ok(SRC_FULL.includes('const ST_MAX_INJECTION_DEPTH = 10000;'), 'ST\u2019s ceiling is named, not a magic number');
+
+    // Raising a shipped default reaches NOBODY: getSettings() fills missing keys
+    // only, so an existing install keeps its stored 4 forever without this.
+    ok(/function migrateInjectionDepth\(\)/.test(SRC_FULL), 'a one-time migration carries existing installs off the old default');
+    ok(SRC_FULL.includes('if (s.injectionDepth === 4) s.injectionDepth = defaultSettings.injectionDepth;'), 'it upgrades exactly the old shipped value, nothing else');
+    ok(SRC_FULL.includes('if (s.depthMigratedToTop) return;'), 'and runs once, so a later deliberate 4 is never overwritten');
+    ok(SRC_FULL.includes('try { migrateInjectionDepth(); } catch (_) {}'), 'wired at init');
+
+    // The control has to be able to express it.
+    ok(/<input type="number" id="sc_injection_depth" min="0" max="9999"/.test(H),
+        'the settings control reaches 9999 (a 0-9999 range slider is unusable on a phone)');
+    ok(!/id="sc_injection_depth"[^>]*type="range"/.test(H), 'it is not a range slider capped at 20 any more');
+}
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { 

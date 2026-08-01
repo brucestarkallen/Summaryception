@@ -25,6 +25,32 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.113.0: the memory block sits at the top of the chat ──
+    ['the depth reverts to 4 (block parked mid-conversation again)', 'index.js',
+        "    injectionDepth: 9999,   // messages up from newest; only used when position = 1. 9999 is",
+        "    injectionDepth: 4,   // messages up from newest; only used when position = 1. 9999 is",
+        'the shipped default is 9999 \u2014 the top of the chat'],
+
+    ['an over-typed depth is passed straight to ST (block silently vanishes)', 'index.js',
+        "    return Math.min(n, ST_MAX_INJECTION_DEPTH - 1);",
+        "    return n;",
+        'an over-typed depth is clamped, never silently un-injected'],
+
+    ['updateInjection reads the depth raw again', 'index.js',
+        "        const dep  = _injectionDepth(s);",
+        "        const dep  = (s.injectionDepth ?? defaultSettings.injectionDepth);",
+        'updateInjection reads the depth through the clamp'],
+
+    ['existing installs are left on the old depth forever', 'index.js',
+        "    if (s.injectionDepth === 4) s.injectionDepth = defaultSettings.injectionDepth;",
+        "    if (false) s.injectionDepth = defaultSettings.injectionDepth;",
+        'it upgrades exactly the old shipped value, nothing else'],
+
+    ['the control goes back to a slider capped at 20', 'settings.html',
+        '<input type="number" id="sc_injection_depth" min="0" max="9999" step="1" class="text_pole" />',
+        '<input type="range" id="sc_injection_depth" min="0" max="20" step="1" />',
+        'the settings control reaches 9999 (a 0-9999 range slider is unusable on a phone)'],
+
     // ── v5.112.0: the other three transports ──
     ['an unreadable profile shape is JSON-stringified into memory again', 'connectionutil.js',
         "    if (raw.data !== undefined) return _extractProfileText(raw.data, depth + 1);",
