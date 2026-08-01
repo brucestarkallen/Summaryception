@@ -1418,8 +1418,22 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
     // v5.98.0 MEDIUM wave
     ok(/store\.summarizedUpTo = recomputeSummarizedUpTo\(\);/.test(SRC_FULL), 'M1: snippet delete uses recomputeSummarizedUpTo — no more Math.max(...[]) = -Infinity → JSON null');
     ok(/A deleted Layer-0 snippet leaves its turns hidden AND unsummarized/.test(SRC_FULL), 'M1: deleting an L0 snippet returns its turns to verbatim');
-    ok(SRC_FULL.includes('const toMerge = layer.slice(0, s.snippetsPerPromotion);'), 'M2: promotion merges from a COPY — sources stay in the layer for the whole flight');
-    ok(!SRC_FULL.includes('const toMerge = layer.splice(0, s.snippetsPerPromotion);'), 'M2: no splice-out before the LLM call survives');
+    ok(SRC_FULL.includes('const toMerge = layer.slice(0, _b.perPromotion);'), 'M2: promotion merges from a COPY — sources stay in the layer for the whole flight');
+    // This used to name the OLD spelling (`s.snippetsPerPromotion`). Once v5.111.0
+    // clamped that read the searched-for string could never appear again, so the
+    // assertion passed forever no matter what the code did — a false green that
+    // only the negative test exposed. Test the INVARIANT, not a spelling: inside
+    // maybePromoteLayer, no cut off the FRONT of the layer may happen before the
+    // model call. (The accepted-merge removal below it is `splice(at, 1)`.)
+    {
+        const _pi = SRC_FULL.indexOf('async function maybePromoteLayer(layerIndex) {');
+        const _pj = SRC_FULL.indexOf('// ─── Character Ledger: injection block', _pi);
+        const _pb2 = SRC_FULL.slice(_pi, _pj);
+        const _cut = _pb2.indexOf('layer.splice(0,');
+        const _call = _pb2.indexOf('await callSummarizer');
+        ok(_call > 0, 'M2: the promotion model call is where we think it is');
+        ok(_cut === -1 || _cut > _call, 'M2: no splice-out before the LLM call survives');
+    }
     ok((SRC_FULL.match(/summarizedUpTo = Math\.max\(store\.summarizedUpTo, endIdx\);/g) || []).length >= 2, 'M3: both batch paths fail forward past empty passages');
     ok(SRC_FULL.includes("throw new ConnectionError('Empty response from summarizer', { retryable: true });"), 'M5: cleaned-to-empty model output is retryable, as the log always claimed');
 }
@@ -3812,6 +3826,58 @@ section('settings defaults — single-sourced, no inline copies');
     // re-hardcodes them fails here rather than in someone's chat.
     eq(_declared.verbatimTurns, '9', 'verbatimTurns default is 9 (one site read 10)');
     eq(_declared.ledgerMaxCharsPerChar, '1000', 'ledgerMaxCharsPerChar default is 1000 (three sites read 600)');
+}
+
+
+// ─── v5.111.0: promotion cannot run away ─────────────────────────────────────
+// Promotion is the one irreversible thing here — it destroys the sources and
+// keeps a merge. It read snippetsPerLayer / snippetsPerPromotion / maxLayers RAW
+// and trusted all three to be sane positive integers. With snippetsPerLayer
+// negative it recursed forever on an emptied layer, sending an EMPTY passage to
+// the model each time and writing whatever came back into memory as canon.
+section('promotion — bounded, and never merges nothing');
+{
+    const _i = SRC_FULL.indexOf('async function maybePromoteLayer(layerIndex) {');
+    const _j = SRC_FULL.indexOf('// ─── Character Ledger: injection block', _i);
+    const _body = SRC_FULL.slice(_i, _j);
+    ok(_i > 0 && _j > _i, 'maybePromoteLayer located');
+
+    ok(/const _b = _promoteBounds\(s\);/.test(_body), 'the three settings are clamped once, at the top');
+    const _raw = ['s.snippetsPerLayer', 's.snippetsPerPromotion', 's.maxLayers'].filter(k => _body.includes(k));
+    if (_raw.length) console.log('    raw setting reads still inside the function: ' + _raw.join(', '));
+    ok(_raw.length === 0, 'and nothing inside reads them raw again — every comparison is against a real integer');
+
+    ok(/if \(!Array\.isArray\(layer\) \|\| layer\.length === 0\) return;/.test(_body),
+        'an empty layer is never promoted — the re-entry that fed the runaway is closed');
+    ok(/if \(toMerge\.length < 2\) return;/.test(_body),
+        'a merge of fewer than two snippets is refused — an empty passage to the model is a hallucination generator');
+    ok(_body.indexOf('if (toMerge.length < 2) return;') < _body.indexOf('await callSummarizer'),
+        'and it is refused BEFORE the model call, not after paying for it');
+
+    // The clamp itself: absurd in, sane out.
+    const _pb = new Function('defaultSettings', SRC_FULL.slice(SRC_FULL.indexOf('function _promoteBounds')).slice(0, SRC_FULL.slice(SRC_FULL.indexOf('function _promoteBounds')).indexOf('\n}') + 2) + '\nreturn _promoteBounds;')(
+        { snippetsPerLayer: 100, snippetsPerPromotion: 2, maxLayers: 9 });
+    // The label must NOT carry the result: negative_test.mjs matches failures by
+    // NAME, and a label that changes when the bug is reintroduced is unmatchable.
+    // (Nor the input: JSON.stringify turns both NaN and null into "null".)
+    const _absurd = [0, -1, NaN, Infinity, null, undefined, '', [], {}, -1e9];
+    const _badPerLayer = [], _badPerPromo = [], _badDepth = [];
+    for (const bad of _absurd) {
+        const b = _pb({ snippetsPerLayer: bad, snippetsPerPromotion: bad, maxLayers: bad });
+        if (!(Number.isInteger(b.perLayer) && b.perLayer >= 1)) _badPerLayer.push(String(bad) + '->' + b.perLayer);
+        if (!(Number.isInteger(b.perPromotion) && b.perPromotion >= 2)) _badPerPromo.push(String(bad) + '->' + b.perPromotion);
+        if (!(Number.isInteger(b.maxLayers) && b.maxLayers >= 1)) _badDepth.push(String(bad) + '->' + b.maxLayers);
+    }
+    if (_badPerLayer.length) console.log('    perLayer escaped the clamp: ' + _badPerLayer.join(', '));
+    if (_badPerPromo.length) console.log('    perPromotion escaped the clamp: ' + _badPerPromo.join(', '));
+    if (_badDepth.length) console.log('    maxLayers escaped the clamp: ' + _badDepth.join(', '));
+    ok(_badPerLayer.length === 0, 'perLayer survives every absurd input as an integer >= 1');
+    ok(_badPerPromo.length === 0, 'perPromotion survives every absurd input as an integer >= 2');
+    ok(_badDepth.length === 0, 'maxLayers survives every absurd input as an integer >= 1');
+    const good = _pb({ snippetsPerLayer: 12, snippetsPerPromotion: 5, maxLayers: 4 });
+    eq(good.perLayer, 12, 'a legitimate value passes through untouched');
+    eq(good.perPromotion, 5, 'and so does a legitimate promotion size');
+    eq(good.maxLayers, 4, 'and a legitimate depth');
 }
 
 console.log('\n────────────────────────────────────────');

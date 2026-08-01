@@ -44,6 +44,14 @@ export { ConnectionError };
  * @param {boolean} useProxy - Whether to attempt proxying
  * @returns {string} - The (possibly proxied) URL
  */
+// An AbortError arrives with name 'AbortError' in browsers and as a DOMException
+// elsewhere; some polyfills only set the signal. Ask both.
+function _isAbort(err, signal) {
+    if (signal && signal.aborted) return true;
+    const n = err && (err.name || '');
+    return n === 'AbortError' || /\baborted?\b/i.test(String((err && err.message) || ''));
+}
+
 function proxiedUrl(url, useProxy = true) {
     if (!useProxy) return url;
     return `/proxy/${url}`;
@@ -319,6 +327,10 @@ async function sendViaOllama(url, model, systemPrompt, userPrompt, temperatureOv
             ...(signal ? { signal } : {}),
         });
     } catch (proxyError) {
+        // An abort is not a proxy failure. Retrying it fires a second request that
+        // is guaranteed to reject, logs a warning blaming the user's CORS setup,
+        // and dresses the user's own Stop as a retryable connection error.
+        if (_isAbort(proxyError, signal)) throw proxyError;
         console.warn(`${MODULE_NAME} CORS proxy failed, trying direct:`, proxyError.message);
         try {
             response = await fetch(targetUrl, {
@@ -424,6 +436,21 @@ export async function fetchOllamaModels(url) {
  * Routes through ST's CORS proxy for local endpoints.
  * Cloud endpoints skip the proxy since they have CORS headers.
  */
+// A plain (non-SSE) chat-completion body, from a provider that ignored
+// `stream: true`. Returns the text, or '' if this is not one.
+function _parseNonStreamed(text) {
+    if (!text || typeof text !== 'string') return '';
+    try {
+        const j = JSON.parse(text);
+        const c = j?.choices?.[0];
+        const out = c?.message?.content ?? c?.text ?? j?.content;
+        if (typeof out === 'string' && out.trim()) return out;
+        const r = c?.message?.reasoning_content ?? c?.message?.reasoning;
+        if (typeof r === 'string' && r.trim()) return r;
+    } catch (_) { /* not JSON — not a completion body */ }
+    return '';
+}
+
 async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens, temperatureOverride = null, signal = null) {
     if (!url) {
         throw new ConnectionError(
@@ -490,6 +517,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
                 ...(signal ? { signal } : {}),
             });
         } catch (proxyError) {
+            if (_isAbort(proxyError, signal)) throw proxyError;   // the user pressed Stop — not a CORS problem
             console.warn(`${MODULE_NAME} CORS proxy failed for OpenAI endpoint, trying direct:`, proxyError.message);
             try {
                 response = await fetch(endpoint, {
@@ -545,43 +573,92 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
 
     // ─── Stream reading ──────────────────────────────────────────
     // Read SSE chunks and assemble the full response content.
+    if (!response.body || typeof response.body.getReader !== 'function') {
+        // No readable stream at all (a proxy that buffers, or a polyfill).
+        // Fall back to reading the whole body and parsing it as one response.
+        const whole = await response.text().catch(() => '');
+        const once = _parseNonStreamed(whole);
+        if (once) return once;
+        throw new ConnectionError(
+            'OpenAI Compatible endpoint returned a body that is neither a stream nor a chat completion.',
+            { retryable: true }
+        );
+    }
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullContent = '';
     let buffer = '';
+    let sawSse = false;           // did ANY line arrive in SSE framing?
+    let raw = '';                 // the whole body, kept for the non-streaming fallback
+
+    // One line -> content. Providers differ on where the text lives: OpenAI puts
+    // it in delta.content, several reasoning models (DeepSeek/GLM/Qwen family)
+    // stream delta.reasoning_content alongside it, and a few echo the finished
+    // message as message.content on the last event. Take whichever is present;
+    // reasoning is only used when NOTHING else ever arrives, so a normal reply is
+    // never polluted by the model's scratchpad.
+    let reasoning = '';
+    const eat = (line) => {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) return;
+        sawSse = true;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') return;
+        try {
+            const parsed = JSON.parse(data);
+            const c = parsed.choices?.[0];
+            const delta = c?.delta?.content ?? c?.message?.content ?? c?.text;
+            if (typeof delta === 'string' && delta) fullContent += delta;
+            const r = c?.delta?.reasoning_content ?? c?.delta?.reasoning;
+            if (typeof r === 'string' && r) reasoning += r;
+        } catch (e) {
+            // Skip unparseable chunks (comments, keep-alive, etc.)
+        }
+    };
 
     try {
-        while (true) {
+        for (;;) {
             const { done, value } = await reader.read();
             if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-
-            // Process complete SSE lines
+            const chunk = decoder.decode(value, { stream: true });
+            raw += chunk;
+            buffer += chunk;
             const lines = buffer.split('\n');
             // Keep the last potentially incomplete line in the buffer
             buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || !trimmed.startsWith('data:')) continue;
-
-                const data = trimmed.slice(5).trim();
-                if (data === '[DONE]') continue;
-
-                try {
-                    const parsed = JSON.parse(data);
-                    const delta = parsed.choices?.[0]?.delta?.content;
-                    if (delta) {
-                        fullContent += delta;
-                    }
-                } catch (e) {
-                    // Skip unparseable chunks (comments, keep-alive, etc.)
-                }
-            }
+            for (const line of lines) eat(line);
         }
+        // FLUSH THE BUFFER. A final `data:` line with no trailing newline never
+        // left `buffer`, because lines.pop() unconditionally holds the last
+        // element back — so the last words of every such response were dropped
+        // with no error anywhere. A summariser losing the tail of its own summary
+        // corrupts memory quietly.
+        //
+        // The decoder flush below is hygiene, NOT a data-loss fix: {stream:true}
+        // already reassembles a character split across a chunk boundary on the
+        // next decode. It matters only for a stream that ENDS mid-character —
+        // i.e. a truncated response — where it yields U+FFFD instead of nothing.
+        const tail = decoder.decode();
+        if (tail) { raw += tail; buffer += tail; }
+        if (buffer) eat(buffer);
     } finally {
-        reader.releaseLock();
+        try { reader.releaseLock(); } catch (_) { /* already released */ }
+    }
+
+    if (!fullContent.trim() && !sawSse) {
+        // The provider ignored `stream: true` and answered with a plain chat
+        // completion. That used to surface as "empty response (streaming)" —
+        // retryable, so it burned every retry and then failed the batch, with a
+        // message that pointed nowhere near the cause.
+        const once = _parseNonStreamed(raw);
+        if (once) return once;
+    }
+
+    if (!fullContent.trim() && reasoning.trim()) {
+        // Reasoning arrived but no content did. Better the model's own words than
+        // a failed batch — cleanSummarizerOutput strips think-blocks downstream.
+        return reasoning;
     }
 
     if (!fullContent.trim()) {

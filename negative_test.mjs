@@ -25,6 +25,48 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.111.0: promotion cannot run away ──
+    ['promotion re-enters on an emptied layer again (the runaway)', 'index.js',
+        "    if (!Array.isArray(layer) || layer.length === 0) return;   // nothing to promote \u2014 never re-enter on an empty layer",
+        "    if (!Array.isArray(layer)) return;",
+        'an empty layer is never promoted \u2014 the re-entry that fed the runaway is closed'],
+
+    ['promotion merges nothing and writes the answer into memory', 'index.js',
+        "    if (toMerge.length < 2) return;",
+        "    if (toMerge.length < 0) return;",
+        'a merge of fewer than two snippets is refused \u2014 an empty passage to the model is a hallucination generator'],
+
+    ['promotion trusts a negative snippetsPerLayer again', 'index.js',
+        "        perLayer:     int(s.snippetsPerLayer,     1, 100000, defaultSettings.snippetsPerLayer),",
+        "        perLayer:     Number(s.snippetsPerLayer),",
+        'perLayer survives every absurd input as an integer >= 1'],
+
+    // ── v5.111.0: the transport layer ──
+    ['the stream tail is dropped again (final event, no trailing newline)', 'connectionutil.js',
+        "        if (buffer) eat(buffer);",
+        "        if (false) eat(buffer);",
+        'a final event with no trailing newline still lands', 'connection_test.mjs'],
+
+    ['the decoder stops streaming (split multi-byte chars corrupted)', 'connectionutil.js',
+        "            const chunk = decoder.decode(value, { stream: true });",
+        "            const chunk = decoder.decode(value);",
+        'a multi-byte character split across a chunk boundary is reassembled', 'connection_test.mjs'],
+
+    ['a non-streaming provider is misdiagnosed as empty again', 'connectionutil.js',
+        "    if (!fullContent.trim() && !sawSse) {",
+        "    if (false) {",
+        'a non-streamed chat completion is read', 'connection_test.mjs'],
+
+    ['an abort is retried as a CORS failure again', 'connectionutil.js',
+        "            if (_isAbort(proxyError, signal)) throw proxyError;   // the user pressed Stop \u2014 not a CORS problem",
+        "            if (false) throw proxyError;",
+        'an aborted proxied request is NOT retried directly (was 2 requests)', 'connection_test.mjs'],
+
+    ['reasoning leaks into a reply that has real content', 'connectionutil.js',
+        "    if (!fullContent.trim() && reasoning.trim()) {",
+        "    if (reasoning.trim()) {",
+        'reasoning never pollutes a reply that has real content', 'connection_test.mjs'],
+
     // ── v5.110.0: parameter fallbacks are copies too ──
     ['a parameter fallback re-hardcodes the old 600 cap', 'index.js',
         "    const cap = capChars || defaultSettings.ledgerMaxCharsPerChar;",
@@ -510,8 +552,8 @@ const MUTATIONS = [
         'branch repair drops deep-layer snippets that reach the branch (not just Layer 0)'],
 
     ['promotion cuts the sources before the call (mid-flight memory hole)', 'index.js',
-        '    const toMerge = layer.slice(0, s.snippetsPerPromotion);',
-        '    const toMerge = layer.splice(0, s.snippetsPerPromotion);',
+        '    const toMerge = layer.slice(0, _b.perPromotion);',
+        '    const toMerge = layer.splice(0, _b.perPromotion);',
         'M2: no splice-out before the LLM call survives'],
 
     ['audit stamps falsify recency again', 'index.js',
@@ -550,6 +592,52 @@ function run([label, file, cur, bug, want, gate]) {
         return [false, label, `exit ${r.status}, but the naming assertion did not fire.\n      wanted: ${want}\n      got:    ${got}`];
     }
     return [true, label, `exit ${r.status}, caught by: ${want}`];
+}
+
+// ── PREFLIGHT ────────────────────────────────────────────────────────────────
+// Every expected assertion name must exist VERBATIM as a literal in its gate
+// file. An assertion whose label interpolates a runtime value ("... -> " + n)
+// changes the moment the bug is reintroduced, so it can never be matched by
+// name — the mutation reports "the naming assertion did not fire" after a full
+// gate run. That mistake cost three separate 30-minute discoveries in one
+// session. Catch it in one second instead, before a single mutation runs.
+{
+    // A label may legitimately be a template (`${sel} resolves through X`) or a
+    // concatenation ('... (got ' + n + ')') and still be perfectly stable at run
+    // time, so a raw substring check would be a false-positive machine. Compare
+    // against PATTERNS: pull every string/template literal out of the gate file,
+    // turn ${...} into a wildcard, and require that at least one long-enough
+    // literal actually relates to the expectation.
+    const cache = new Map();
+    const pats = new Map();
+    const missing = [];
+    const litsOf = (srcTxt) => {
+        const out = [];
+        for (const m of srcTxt.matchAll(/'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/g)) {
+            const raw = m[1] ?? m[2] ?? m[3];
+            if (!raw || raw.length < 18) continue;
+            let lit = raw.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+                         .replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, '\n');
+            out.push(lit);
+        }
+        return out;
+    };
+    const covers = (lits, want) => lits.some(lit => {
+        if (lit.indexOf('${') === -1) return want.includes(lit) || lit.includes(want);
+        const rx = new RegExp('^' + lit.split(/\$\{[^}]*\}/).map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\S]*?'));
+        return rx.test(want);
+    });
+    for (const [label, , , , want, gate] of MUTATIONS) {
+        const g = gate || 'ledger_test.js';
+        if (!cache.has(g)) { cache.set(g, fs.readFileSync(path.join(SRC, g), 'utf8')); pats.set(g, litsOf(cache.get(g))); }
+        if (!covers(pats.get(g), want)) missing.push(`  \u2717 ${label}\n      expects: ${want}\n      but no assertion label in ${g} can produce that string \u2014 renamed, misspelt, or moved.`);
+    }
+    if (missing.length) {
+        console.log('PREFLIGHT FAILED \u2014 expectations that no gate file can ever emit:\n');
+        console.log(missing.join('\n\n'));
+        process.exit(1);
+    }
+    console.log(`preflight: all ${MUTATIONS.length} expectations are producible by a real assertion label \u2713\n`);
 }
 
 let failed = 0;

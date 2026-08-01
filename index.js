@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.110.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.111.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -5665,24 +5665,53 @@ function _stashSources(texts, cap) {
     return joined.slice(0, lim).replace(/\s+\S*$/, '') + '\n…(stash truncated)';
 }
 
+// Promotion is the one irreversible thing this extension does: it destroys the
+// source snippets and keeps a merged one. It read three settings raw and trusted
+// all three to be sane positive integers. They are not guaranteed to be — a
+// present-but-undefined key survives getSettings() (Object.hasOwn), and settings
+// arrive from JSON on disk, an import, or a sync, none of which the sliders bound.
+//
+// With snippetsPerLayer NEGATIVE the function ran away: the seed path empties
+// Layer 0, the tail check `layer.length > snippetsPerLayer` reads `0 > -1` TRUE,
+// and it re-enters on an EMPTY layer — where toMerge is [], storyTxt is '', and it
+// sends an empty passage to the model, accepts whatever comes back, pushes it as a
+// "merged" snippet, and recurses. Forever. One paid model call and one junk
+// snippet per iteration, on the path that is supposed to be compressing memory.
+//
+// One clamp at the top, one emptiness guard, one "a merge needs something to
+// merge" guard. Every comparison below is then against a real integer.
+function _promoteBounds(s) {
+    const int = (v, lo, hi, dflt) => {
+        const n = Math.floor(Number(v));
+        return (Number.isFinite(n) && n >= lo && n <= hi) ? n : dflt;
+    };
+    return {
+        perLayer:     int(s.snippetsPerLayer,     1, 100000, defaultSettings.snippetsPerLayer),
+        perPromotion: int(s.snippetsPerPromotion, 2, 100000, defaultSettings.snippetsPerPromotion),
+        maxLayers:    int(s.maxLayers,            1, 64,     defaultSettings.maxLayers),
+    };
+}
+
 async function maybePromoteLayer(layerIndex) {
     const s = getSettings();
     const store = getChatStore();
+    const _b = _promoteBounds(s);
     // `layer` and `destLayer` below are references INTO this store. A chat switch
     // mid-merge detaches all three, so the splice would cut snippets out of the
     // previous chat's layer and the push would land in an object nothing saves —
     // the sources destroyed, the merge lost.
     const startEpoch = _chatEpoch;
 
-    if (layerIndex >= s.maxLayers - 1) {
-        log(`Max layer depth (${s.maxLayers}) reached.`);
+    if (layerIndex >= _b.maxLayers - 1) {
+        log(`Max layer depth (${_b.maxLayers}) reached.`);
         return;
     }
 
     const layer = store.layers[layerIndex];
-    if (!layer || layer.length <= s.snippetsPerLayer) return;
+    if (!Array.isArray(layer) || layer.length === 0) return;   // nothing to promote — never re-enter on an empty layer
+    if (layer.length <= _b.perLayer) return;
 
-    log(`Layer ${layerIndex}: ${layer.length} snippets > limit ${s.snippetsPerLayer} → promoting`);
+    log(`Layer ${layerIndex}: ${layer.length} snippets > limit ${_b.perLayer} → promoting`);
 
     if (!store.layers[layerIndex + 1]) store.layers[layerIndex + 1] = [];
     const destLayer = store.layers[layerIndex + 1];
@@ -5701,10 +5730,10 @@ async function maybePromoteLayer(layerIndex) {
             { timeOut: 2000 }
         );
 
-        if (layer.length > s.snippetsPerLayer) {
+        if (layer.length > _b.perLayer) {
             await maybePromoteLayer(layerIndex);
         }
-        if (destLayer.length > s.snippetsPerLayer) {
+        if (destLayer.length > _b.perLayer) {
             await maybePromoteLayer(layerIndex + 1);
         }
         return;
@@ -5715,7 +5744,11 @@ async function maybePromoteLayer(layerIndex) {
     // assemble the injection block from a layer with these snippets spliced
     // OUT — one generation saw memory with a hole. They are spliced only
     // after the merged snippet is accepted.
-    const toMerge = layer.slice(0, s.snippetsPerPromotion);
+    const toMerge = layer.slice(0, _b.perPromotion);
+    // A "merge" of nothing is a hallucination generator: an empty passage goes to
+    // the model and whatever comes back is written into memory as canon. A merge
+    // of one is a rename that costs a model call. Neither is a promotion.
+    if (toMerge.length < 2) return;
     const storyTxt = toMerge.map(sn => sn.text).join('\n\n');   // paragraph breaks — the meta-summarizer must see where one scene summary ends and the next begins
     const contextStr = buildFullContext(layerIndex + 1);
 
@@ -5802,10 +5835,10 @@ async function maybePromoteLayer(layerIndex) {
 
     log(`Layer ${layerIndex + 1} now has ${destLayer.length} snippets`);
 
-    if (layer.length > s.snippetsPerLayer) {
+    if (layer.length > _b.perLayer) {
         await maybePromoteLayer(layerIndex);
     }
-    if (destLayer.length > s.snippetsPerLayer) {
+    if (destLayer.length > _b.perLayer) {
         await maybePromoteLayer(layerIndex + 1);
     }
 }
