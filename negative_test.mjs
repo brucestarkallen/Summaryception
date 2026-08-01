@@ -25,6 +25,32 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.112.0: the other three transports ──
+    ['an unreadable profile shape is JSON-stringified into memory again', 'connectionutil.js',
+        "    if (raw.data !== undefined) return _extractProfileText(raw.data, depth + 1);",
+        "    if (raw.data !== undefined) return typeof raw.data === 'string' ? raw.data : JSON.stringify(raw.data);",
+        'a JSON blob is NEVER handed back as the summary text', 'connection_test.mjs'],
+
+    ['legacy generateRaw arguments are reversed (story sent as system prompt)', 'connectionutil.js',
+        "        result = await generateRaw(userPrompt, systemPrompt);",
+        "        result = await generateRaw(systemPrompt, userPrompt);",
+        'legacy argument ORDER is prompt-first', 'connection_test.mjs'],
+
+    ['profile messages regress to a generateRaw-style options object', 'connectionutil.js',
+        "        const raw = await service.sendRequest(profileId, messages, {",
+        "        const raw = await service.sendRequest(profileId, { systemPrompt, prompt: userPrompt }, {",
+        'messages are an ARRAY, not a generateRaw-style options object', 'connection_test.mjs'],
+
+    ['an Ollama 404 is retried forever again', 'connectionutil.js',
+        "                                  { retryable: response.status >= 500, status: response.status }",
+        "                                  { retryable: true, status: response.status }",
+        'a 404 from Ollama is NOT retried \u2014 a missing model never fixes itself', 'connection_test.mjs'],
+
+    ['an aborted Ollama request is retried directly again', 'connectionutil.js',
+        "        if (_isAbort(proxyError, signal)) throw proxyError;",
+        "        if (false) throw proxyError;",
+        'an aborted Ollama request is NOT retried directly either', 'connection_test.mjs'],
+
     // ── v5.111.0: promotion cannot run away ──
     ['promotion re-enters on an emptied layer again (the runaway)', 'index.js',
         "    if (!Array.isArray(layer) || layer.length === 0) return;   // nothing to promote \u2014 never re-enter on an empty layer",

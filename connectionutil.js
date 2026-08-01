@@ -171,6 +171,21 @@ async function sendViaDefault(systemPrompt, userPrompt, responseLength) {
  * the second argument causes the entire object to be stuffed into the message
  * content field, resulting in "Invalid input" / validation errors from the API.
  */
+// ConnectionManagerRequestService has returned several shapes across ST versions.
+// Returns the text, or null when this is not a shape we can read — never a
+// stringified object, because whatever this returns becomes a memory snippet.
+function _extractProfileText(raw, depth = 0) {
+    if (typeof raw === 'string') return raw;
+    if (!raw || typeof raw !== 'object' || depth > 2) return null;
+    const direct = raw.content
+        ?? raw.message?.content
+        ?? raw.choices?.[0]?.message?.content
+        ?? raw.choices?.[0]?.text;
+    if (typeof direct === 'string') return direct;
+    if (raw.data !== undefined) return _extractProfileText(raw.data, depth + 1);
+    return null;
+}
+
 async function sendViaProfile(profileId, systemPrompt, userPrompt, debug) {
     if (!profileId) {
         throw new ConnectionError(
@@ -214,19 +229,14 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt, debug) {
         // Debug: log what we actually got back (gated — this dumped the ENTIRE model response to console on every single profile call)
         if (debug) console.log('[Summaryception][Connection] Profile sendRequest returned:', typeof raw, raw);
 
-        // Handle various possible return types
-        let result;
-        if (typeof raw === 'string') {
-            result = raw;
-        } else if (raw?.content) {
-            result = raw.content;
-        } else if (raw?.message?.content) {
-            result = raw.message.content;
-        } else if (raw?.choices?.[0]?.message?.content) {
-            result = raw.choices[0].message.content;
-        } else if (raw?.data) {
-            result = typeof raw.data === 'string' ? raw.data : JSON.stringify(raw.data);
-        } else if (raw && typeof raw === 'object') {
+        // Handle various possible return types.
+        // `raw.data` used to be JSON.stringify'd when it was an object, and the
+        // result returned AS THE MODEL'S PROSE — so a wrapper shape this list did
+        // not recognise was written into the story's memory as a snippet reading
+        // {"choices":[...]}. Unwrap one level with the same extractor instead: a
+        // shape we cannot read is an error, never a summary.
+        const result = _extractProfileText(raw);
+        if (result === null && raw && typeof raw === 'object') {
             const str = JSON.stringify(raw);
             console.warn('[Summaryception][Connection] Unexpected return type from sendRequest:', str.substring(0, 500));
             throw new ConnectionError(
@@ -235,7 +245,8 @@ async function sendViaProfile(profileId, systemPrompt, userPrompt, debug) {
                 `Please report this on the Summaryception GitHub.`,
                 { retryable: false }
             );
-        } else {
+        }
+        if (result === null) {
             throw new ConnectionError(
                 'Connection Profile returned an empty or invalid response.',
                 { retryable: true }
