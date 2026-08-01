@@ -25,6 +25,38 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.108.0: ONE exclusive channel, enforced at the lock ──
+    // Each of these is a hole that was ACTUALLY OPEN in v5.107.0.
+    ['THE ROOT: the lock checks only its own flag again', 'index.js',
+        "function _acquireSummarize() {\n    if (_llmChannelBusy()) return false;",
+        "function _acquireSummarize() {\n    if (isSummarizing) return false;",
+        'the lock refuses when ANY pass holds the channel, not just when isSummarizing'],
+
+    ['a caller discards the lock result (bare acquire)', 'index.js',
+        "        if (!_acquireSummarize()) { toastr.warning('A background pass is finishing \u2014 try again in a few seconds.', 'Summaryception'); return; }\n        const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store\n        const btn = $(this);\n        btn.prop('disabled', true).removeClass('fa-rotate-right')",
+        "        _acquireSummarize();\n        const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store\n        const btn = $(this);\n        btn.prop('disabled', true).removeClass('fa-rotate-right')",
+        'no call site discards the lock result'],
+
+    ['an entry point hand-rolls the subset check again', 'index.js',
+        "        if (_llmChannelBusy()) { toastr.warning('A background pass is finishing \u2014 try again in a few seconds.', 'Summaryception'); return; }\n        const sn = _row.sn;",
+        "        if (isSummarizing) { toastr.warning('Busy summarizing \u2014 try again in a moment.', 'Summaryception'); return; }\n        const sn = _row.sn;",
+        'isSummarizing is read ONLY by _llmChannelBusy() \u2014 no hand-rolled subset survives'],
+
+    ['the Co-Writer leaves the channel again', 'index.js',
+        "    if (!_acquireSummarize()) { btn.prop('disabled', false).text('\ud83d\udd0d Review Proposed Edits'); $('#sc_editor_cancel').hide(); return; }\n    try {",
+        "    try {",
+        'Co-Writer takes the channel before its pass'],
+
+    ['rebuild-all clears the snippets before it checks the channel', 'index.js',
+        "        if (_llmChannelBusy()) { toastr.warning('A background pass is finishing \u2014 try again in a few seconds.', 'Summaryception'); return; }\n        if (!confirm('Rebuild ALL snippets from the start?",
+        "        if (!confirm('Rebuild ALL snippets from the start?",
+        'rebuild-all checks the channel BEFORE it clears the snippets'],
+
+    ['the Stop button lies about a running background pass again', 'index.js',
+        "        if (!_llmChannelBusy() && !currentAbortController) {",
+        "        if (!isSummarizing && !currentAbortController) {",
+        'the Stop button asks the channel, not one flag'],
+
     // ── v5.105.0: checkpoint labels validated against their turn ──
     ['checkpoint labels are trusted blindly again (restores one turn high)', 'index.js',
         "                        const _true = _relocateCheckpoint(_chatNow, v.atTurn, v.tsig);\n                        if (_true < 0) continue;",

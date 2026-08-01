@@ -1351,7 +1351,7 @@ section('concurrency discipline — cancel token, loop-owned mutex, epoch guards
         ok(_body.includes('abortSummarization();'), 'chat change aborts in-flight work for the old chat');
         ok(_body.indexOf('abortSummarization();') < _body.indexOf('setTimeout('), 'and aborts BEFORE it schedules the new chat\'s repair');
     }
-    ok((SRC_FULL.match(/_acquireSummarize\(\);/g) || []).length >= 8, 'every driver goes through the single acquire helper');
+    ok((SRC_FULL.match(/_acquireSummarize\(\)/g) || []).length >= 13, 'every driver goes through the single acquire helper (12 call sites + the definition)');
     const noHelpers = SRC_FULL
         .replace('let isSummarizing = false;', '')
         .replace(/function _acquireSummarize\(\) \{[\s\S]*?\n\}/, '')
@@ -2456,7 +2456,7 @@ section('export tail — the transplant covers the verbatim window, the session 
     ok(!/store\.layers\[0\]\.push|store\.summarizedUpTo\s*=|ghostMessagesUpTo|saveChatStore/.test(h), 'export: NO store mutation — no push, no cursor advance, no ghosting, no save (a 9-turn verbatim window is still 9 after)');
     ok(/Object\.assign\(\{\}, store,\s*\{ layers:/.test(h), 'export: fresh snippets ride a COPIED view, never the store');
     ok(h.includes('export aborted so you never get a file missing its newest chapter'), 'export: a failed batch aborts loudly — no half-true file that LOOKS complete');
-    ok(h.includes('isSummarizing || _llmChannelBusy()') && h.includes('_acquireSummarize();') && h.includes('finally { _releaseSummarize();'), 'export: takes and releases the summarizer channel like every other pass');
+    ok(h.includes('if (_llmChannelBusy())') && h.includes('if (!_acquireSummarize())') && h.includes('finally { _releaseSummarize();'), 'export: takes and releases the summarizer channel like every other pass');
 
     // v5.83.0: the ledger gets the same guarantee — ephemerally, into a clone
     ok(h.includes('_exportTailBatches(chat, lp,'), 'export: ledger catch-up batches from the LIVE POINTER (the stale-wave root: pointer legally behind the chat)');
@@ -3657,6 +3657,83 @@ section('MC name — resolved automatically, override only to correct');
     ok(/const _true = _relocateCheckpoint\(_chatNow, v\.atTurn, v\.tsig\);/.test(SRC_FULL),
         'listLedgerCheckpoints corrects the label for every consumer');
     ok(/if \(_true < 0\) continue;/.test(SRC_FULL), 'and drops a snapshot whose turn no longer exists');
+}
+
+
+// ─── v5.108.0: ONE exclusive channel, enforced at the lock ───────────────────
+// Six entry points had drifted into a hand-rolled subset of the channel check.
+// The rule now lives at the single place the flag is set, and this section keeps
+// it there — structurally, so a new pass cannot reopen the hole by omission.
+section('exclusive LLM channel — the lock enforces it, not the callers');
+{
+    // The load banner is one line of PROSE that names these identifiers on
+    // purpose. Scan code, not the changelog printed at startup.
+    const SRC_CODE = SRC_FULL.split('\n').filter(l => l.indexOf('Summaryception v') === -1).join('\n');
+    // 1. THE ROOT: the only setter of isSummarizing checks the WHOLE channel.
+    const _acq = SRC_FULL.slice(SRC_FULL.indexOf('function _acquireSummarize()'));
+    const _acqBody = _acq.slice(0, _acq.indexOf('\n}') + 2);
+    ok(/if \(_llmChannelBusy\(\)\) return false;/.test(_acqBody),
+        'the lock refuses when ANY pass holds the channel, not just when isSummarizing');
+    ok(!/if \(isSummarizing\) return false;/.test(_acqBody),
+        'the lock no longer checks only its own flag');
+    ok(_acqBody.indexOf('_llmChannelBusy()') < _acqBody.indexOf('isSummarizing = true'),
+        'and it checks BEFORE it sets — same discipline every other flag setter follows');
+
+    // 2. THE CONTRACT: the answer is load-bearing at every call site. A bare
+    //    `_acquireSummarize();` throws the mutex away and is what let five
+    //    entry points run concurrently for real.
+    const _bare = (SRC_CODE.match(/(?<!function )(?<!!)_acquireSummarize\(\);/g) || []);
+    if (_bare.length) console.log('    bare _acquireSummarize() calls found: ' + _bare.length);
+    ok(_bare.length === 0, 'no call site discards the lock result');
+    const _guarded = (SRC_CODE.match(/if \(!_acquireSummarize\(\)\)/g) || []).length;
+    ok(_guarded >= 12, 'every acquire is in a refusal-honouring guard');
+    ok(_guarded === (SRC_CODE.match(/(?<!function )_acquireSummarize\(\)/g) || []).length,
+        'guarded call count equals total call count — nothing acquires unguarded');
+
+    // 3. NO HAND-ROLLED SUBSETS. isSummarizing is one of seven flags; reading it
+    //    as a busy-check is the bug. Outside the helpers and the predicate it must
+    //    not be read at all.
+    const _isRefs = (SRC_CODE.split('\n')
+        .filter(l => /\bisSummarizing\b/.test(l))
+        .filter(l => !/^\s*\/\//.test(l))
+        .filter(l => !/let isSummarizing = false;/.test(l))
+        .filter(l => !/isSummarizing = (true|false);/.test(l))
+        .filter(l => !/return isSummarizing \|\| _ledgerActive/.test(l))
+        .filter(l => !/\/\/.*isSummarizing/.test(l)));
+    if (_isRefs.length) console.log('    offending isSummarizing reads: ' + _isRefs.map(l => l.trim().slice(0, 70)).join(' | '));
+    ok(_isRefs.length === 0, 'isSummarizing is read ONLY by _llmChannelBusy() — no hand-rolled subset survives');
+
+    // 4. THE PREDICATE IS COMPLETE: every module-level channel flag is in it.
+    const _flags = (SRC_FULL.match(/^let (_\w*(?:Active|Busy))\b/gm) || [])
+        .map(l => l.replace(/^let /, ''));
+    const _pred = SRC_FULL.slice(SRC_FULL.indexOf('function _llmChannelBusy()'));
+    const _predBody = _pred.slice(0, _pred.indexOf('\n}'));
+    for (const f of _flags) ok(_predBody.includes(f), 'channel predicate covers ' + f);
+
+    // 5. THE CO-WRITER IS A MEMBER. It sends the entire memory dump — the largest
+    //    call here — and used to hold no flag at all, so every other pass saw an
+    //    idle channel for its whole duration.
+    const _ed = SRC_FULL.slice(SRC_FULL.indexOf('async function runContinuityEditorReview()'));
+    const _edBody = _ed.slice(0, _ed.indexOf('\nfunction renderEditorReview'));
+    ok(/if \(!_acquireSummarize\(\)\)/.test(_edBody), 'Co-Writer takes the channel before its pass');
+    ok(/_releaseSummarize\(\);/.test(_edBody), 'Co-Writer releases it in finally');
+    ok(_edBody.indexOf('_acquireSummarize()') < _edBody.indexOf('await callSummarizer'),
+        'and it takes it BEFORE the call, not after');
+
+    // 6. DESTRUCTION IS GATED BEFORE IT DESTROYS. Rebuild-all un-ghosts and clears
+    //    every snippet before it ever reaches the lock; refusing at the lock would
+    //    wipe the memory and rebuild nothing.
+    const _rb = SRC_FULL.slice(SRC_FULL.indexOf("'#sc_rebuild_snippets'"));
+    const _rbBody = _rb.slice(0, _rb.indexOf('\n    });'));
+    ok(_rbBody.indexOf('_llmChannelBusy()') >= 0 &&
+       _rbBody.indexOf('_llmChannelBusy()') < _rbBody.indexOf('store.layers.length = 0;'),
+        'rebuild-all checks the channel BEFORE it clears the snippets');
+
+    // 7. STOP TELLS THE TRUTH. A background pass holds its own flag and
+    //    currentAbortController is nulled between batches, so the old subset check
+    //    reported "Nothing is running." over a running queue.
+    ok(SRC_FULL.includes('if (!_llmChannelBusy() && !currentAbortController) {'),
+        'the Stop button asks the channel, not one flag');
 }
 
 console.log('\n────────────────────────────────────────');

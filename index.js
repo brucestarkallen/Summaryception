@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.107.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.108.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -1718,8 +1718,21 @@ const _activeAborters = new Set();
 // is released ONLY by the driver that acquired it, in its own finally.
 let _summarizeCancelRequested = false;
 
+// THE channel lock. It used to check only its OWN flag, so every caller that
+// forgot to pair it with an _llmChannelBusy() guard could start a second
+// concurrent callSummarizer while the ledger scribe / auditor / continuity pass
+// held the channel — and callSummarizer snapshots ST's prompt toggles, disables
+// them, and restores on finish, so interleaving them leaves the user's toggles
+// permanently wrong. Six entry points had drifted into exactly that hand-rolled
+// subset check (five wrote `if (isSummarizing)`, the Co-Writer wrote nothing at
+// all). Patching six callers leaves a seventh to be missed by whoever adds the
+// next pass, so the rule lives HERE, at the one place the flag is ever set:
+// every other channel-flag setter already checks _llmChannelBusy() before
+// setting, and now this one does too. Every caller, present and future, is
+// covered by construction — but only if the answer is honoured, so the return
+// value is load-bearing at every call site and the gate enforces that.
 function _acquireSummarize() {
-    if (isSummarizing) return false;
+    if (_llmChannelBusy()) return false;
     isSummarizing = true;
     _summarizeCancelRequested = false;
     return true;
@@ -1767,11 +1780,6 @@ function subst(tpl, token, value) {
     return String(tpl == null ? '' : tpl).split(token).join(value == null ? '' : String(value));
 }
 
-// The player and their protagonist are one participant. When a chat names the MC
-// separately from the persona, every pass must be told so explicitly — otherwise
-// the persona handle looks like just another name in the text, and the record
-// grows an entry for it and writes relationship notes between the player and the
-// character the player IS. Returns null when there is no split to explain.
 // Is this ledger key the player's own character? One matcher, reusing the same
 // resolver the ledger keys everything else with — a second, looser name test here
 // would eventually disagree with the page and quarantine the wrong person.
@@ -1788,6 +1796,11 @@ function isMcLedgerKey(key) {
     return resolveLedgerKey(probe, mc) === key;
 }
 
+// The player and their protagonist are one participant. When a chat names the MC
+// separately from the persona, every pass must be told so explicitly — otherwise
+// the persona handle looks like just another name in the text, and the record
+// grows an entry for it and writes relationship notes between the player and the
+// character the player IS. Returns null when there is no split to explain.
 function _personaSplit() {
     try {
         const mc = resolveMcName();
@@ -4434,7 +4447,6 @@ async function backfillLedgerFromHistory(opts) {
     const auto = !!(opts && opts.auto);   // autonomous rebuild (branch/trim fallback): no confirm, clean-slate first
     const s = getSettings();
     if (!s.ledgerEnabled) { if (!auto) toastr.warning('Enable the Character Ledger first.', 'Summaryception'); return; }
-    if (isSummarizing) { if (!auto) toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
     if (_llmChannelBusy()) { if (!auto) toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
 
     const store = getChatStore();
@@ -4473,7 +4485,7 @@ async function backfillLedgerFromHistory(opts) {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.clear(toast); if (!auto) toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     try {
         for (const b of batches) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4521,7 +4533,6 @@ async function backfillLedgerFromHistory(opts) {
 async function runLedgerForSnippet(layerIdx, snippetIdx) {
     const s = getSettings();
     if (!s.ledgerEnabled) { toastr.warning('Enable the Character Ledger first.', 'Summaryception'); return; }
-    if (isSummarizing) { toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
     if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const store = getChatStore();
     const layer = store.layers[layerIdx];
@@ -4530,7 +4541,7 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
     const sn = layer[snippetIdx];
     const { chat } = SillyTavern.getContext();
     const startEpoch = _chatEpoch;
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     try {
         const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
         if (!storyTxt.trim()) { toastr.error('Source turns are empty.', 'Summaryception'); return; }
@@ -4553,7 +4564,6 @@ async function runLedgerForSnippet(layerIdx, snippetIdx) {
 async function backfillAuditsForLayer0() {
     const s = getSettings();
     if (!s.sisterEnabled) { toastr.warning('Enable the Detail Auditor first.', 'Summaryception'); return; }
-    if (isSummarizing) { toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
     if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const store = getChatStore();
     const l0 = (store.layers && store.layers[0]) ? store.layers[0] : [];
@@ -4575,7 +4585,7 @@ async function backfillAuditsForLayer0() {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.clear(toast); toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     try {
         for (const sn of targets) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4716,7 +4726,6 @@ async function processContinuityQueue() {
 async function backfillContinuityForLayer0() {
     const s = getSettings();
     if (!s.continuityEnabled) { toastr.warning('Enable the Continuity Auditor first.', 'Summaryception'); return; }
-    if (isSummarizing) { toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
     if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const store = getChatStore();
     const targets = [];   // snippet OBJECTS, so a mid-run deletion can't shift us onto the wrong one
@@ -4738,7 +4747,7 @@ async function backfillContinuityForLayer0() {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.clear(toast); toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     try {
         for (const sn of targets) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -4903,14 +4912,14 @@ async function applyAllContinuityFixes() {
     const sourceCount = allOpen.length - open.length;
     open.sort((a, b) => ((a.turnRange && a.turnRange[0]) || 0) - ((b.turnRange && b.turnRange[0]) || 0));
     if (open.length === 0) { toastr.info(`No snippet-level fixes to apply${sourceCount ? ` — ${sourceCount} source-level flag(s) need the copilot (message edits).` : '.'}`, 'Summaryception', { timeOut: 4500 }); return; }
-    if (isSummarizing) { toastr.warning('Busy — try again in a moment.', 'Summaryception'); return; }
+    if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const startEpoch = _chatEpoch;
     let done = 0, applied = 0, cancelled = false;
     const toast = toastr.info(`Applying continuity fixes: 0 / ${open.length}`, 'Summaryception Continuity', {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
     });
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.clear(toast); toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     try {
         for (const flag of open) {
             if (cancelled || _chatEpoch !== startEpoch) break;
@@ -5187,7 +5196,9 @@ async function summarizeOneBatch(visibleTurns) {
         return false;
     }
 
-    _acquireSummarize();
+    // A busy channel between maybeSummarizeTurns' guard and here (the catch-up
+    // dialog is an await window) must DEFER, not drop: the retry re-runs it.
+    if (!_acquireSummarize()) { _armSummarizeRetry(); trace('<<< EXITING summarizeOneBatch - CHANNEL BUSY, retry armed'); return false; }
 
     try {
         const startIdx = batch[0].index;
@@ -5459,7 +5470,7 @@ async function runCatchup(visibleTurns, overflow) {
         }
     );
 
-    _acquireSummarize();
+    if (!_acquireSummarize()) { toastr.clear(progressToast); toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
     // The loop re-reads the LIVE context chat every iteration. Without an epoch
     // guard, switching chats mid-run turned the catch-up on the NEW chat —
     // summarizing and ghosting turns the user never consented to process there.
@@ -7635,8 +7646,8 @@ function updateSnippetBrowser() {
             return;
         }
 
-        if (isSummarizing) {
-            toastr.warning('Already summarizing. Please wait.', 'Summaryception');
+        if (_llmChannelBusy()) {
+            toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception');
             return;
         }
 
@@ -7645,7 +7656,7 @@ function updateSnippetBrowser() {
 
         if (!confirm(`Regenerate summary for turns ${rangeStart}–${rangeEnd}?`)) return;
 
-        _acquireSummarize();
+        if (!_acquireSummarize()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
         const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store
         const btn = $(this);
         btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
@@ -7832,11 +7843,11 @@ function updateSnippetBrowser() {
         const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-detail-row').data('sig'));
         if (!_row) { _snipRowGone(); return; }
         if (!_row.sn.turnRange) return;
-        if (isSummarizing) { toastr.warning('Busy summarizing — try again in a moment.', 'Summaryception'); return; }
+        if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
         const sn = _row.sn;
         const [rangeStart, rangeEnd] = sn.turnRange;
         const { chat } = SillyTavern.getContext();
-        _acquireSummarize();
+        if (!_acquireSummarize()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
         const startEpoch = _chatEpoch;   // a chat switch mid-call must not write into a detached store
         const btn = $(this);
         btn.prop('disabled', true).removeClass('fa-wand-magic-sparkles').addClass('fa-spinner fa-spin');
@@ -8295,10 +8306,20 @@ async function runContinuityEditorReview() {
     if (dump.snippets.length === 0 && !dump.notepad.trim()) {
         toastr.info('No memory yet to edit in this chat.', 'Summaryception'); return;
     }
+    // The Co-Writer is a background pass like any other and must hold the one
+    // exclusive channel while it runs: it sends the ENTIRE memory dump, the
+    // largest and slowest call here, and it used to hold no flag at all — so the
+    // scribe, auditor and summarizer all saw an idle channel and fired straight
+    // into it.
+    if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const btn = $('#sc_editor_review');
     btn.prop('disabled', true).text('Thinking…');
     _editorCancelled = false;
     $('#sc_editor_cancel').show();
+    // Taken as the LAST statement before the try: anything between the acquire
+    // and the finally that owns the release is a window where a throw strands
+    // the channel held forever, deadlocking every background pass.
+    if (!_acquireSummarize()) { btn.prop('disabled', false).text('🔍 Review Proposed Edits'); $('#sc_editor_cancel').hide(); return; }
     try {
         const memStr = JSON.stringify(dump, null, 1);
         let userTpl = (s.editorUserPrompt || '');
@@ -8330,6 +8351,7 @@ async function runContinuityEditorReview() {
         log('Continuity editor error:', e);
         toastr.error('Co-Writer failed — nothing was changed.', 'Summaryception', { timeOut: 5000 });
     } finally {
+        _releaseSummarize();
         $('#sc_editor_cancel').hide();
         _editorCancelled = false;
         btn.prop('disabled', false).text('🔍 Review Proposed Edits');
@@ -9267,7 +9289,10 @@ function bindUIEvents() {
     $(document).on('click', '#sc_rebuild_snippets', async function () {
         const s = getSettings();
         if (!s.enabled) { toastr.warning('Enable Summaryception first.'); return; }
-        if (isSummarizing) { toastr.warning('Already summarizing. Please wait.'); return; }
+        // Checked HERE, not at the lock: everything below un-ghosts and CLEARS
+        // the snippets before runCatchup is reached, so a refusal further down
+        // would destroy the memory and rebuild nothing.
+        if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
         if (!confirm('Rebuild ALL snippets from the start?\n\nThis un-ghosts every message, clears the existing snippets, and re-summarizes the whole chat from turn 0. Your character ledger and notepad are kept.')) return;
         $(this).prop('disabled', true).text(' Working…');
         try {
@@ -9331,8 +9356,8 @@ function bindUIEvents() {
             toastr.warning('Enable Summaryception first.');
             return;
         }
-        if (isSummarizing) {
-            toastr.warning('Already summarizing. Please wait.');
+        if (_llmChannelBusy()) {
+            toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception');
             return;
         }
         if (s.pauseSummarization) {
@@ -9366,7 +9391,12 @@ function bindUIEvents() {
     });
 
     $(document).on('click', '#sc_stop_summarize', function () {
-        if (!isSummarizing && !currentAbortController) {
+        // Same hand-rolled subset as the five entry points: a ledger / auditor /
+        // continuity pass holds its OWN flag, not isSummarizing, and
+        // currentAbortController is nulled in callSummarizer's finally — so
+        // between two batches of a background queue this reported "Nothing is
+        // running." over a queue that was very much running, and refused to stop it.
+        if (!_llmChannelBusy() && !currentAbortController) {
             toastr.info('Nothing is running.', 'Summaryception');
             return;
         }
@@ -9414,9 +9444,9 @@ function bindUIEvents() {
         const tailBatches = _exportTailBatches(chat, store.summarizedUpTo, getSettings().turnsPerSummary);
         let tail = [];
         if (tailBatches.length) {
-            if (isSummarizing || _llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
+            if (_llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
             $btn.prop('disabled', true);
-            _acquireSummarize();
+            if (!_acquireSummarize()) { $btn.prop('disabled', false); toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
             const startEpoch = _chatEpoch;   // a chat switch mid-export must not summarize the new chat into the file
             toastr.info('Summarizing the last ' + tailBatches.length + ' batch' + (tailBatches.length === 1 ? '' : 'es') + ' of recent turns for the export (your session stays exactly as it is)…', 'Summaryception', { timeOut: 5000, progressBar: true });
             try {
@@ -9449,9 +9479,9 @@ function bindUIEvents() {
             const lp = (typeof store.ledgerLiveIdx === 'number') ? store.ledgerLiveIdx : -1;
             const lBatches = _exportTailBatches(chat, lp, getSettings().turnsPerSummary);
             if (lBatches.length) {
-                if (isSummarizing || _llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
+                if (_llmChannelBusy()) { toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
                 $btn.prop('disabled', true);
-                _acquireSummarize();
+                if (!_acquireSummarize()) { $btn.prop('disabled', false); toastr.info('A background pass is running — try the export again in a few seconds.', 'Summaryception', { timeOut: 3500 }); return; }
                 const startEpoch = _chatEpoch;   // a chat switch mid-export must not read the new chat into the file
                 toastr.info('Bringing the character ledger current for the export (' + lBatches.length + ' batch' + (lBatches.length === 1 ? '' : 'es') + ' — your session stays exactly as it is)…', 'Summaryception', { timeOut: 5000, progressBar: true });
                 try {
@@ -10206,7 +10236,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — a copilot renaming a character no longer destroys her history. Renaming an object key is only possible as page surgery (delete the old key, add the new one), and through v5.96.0 the reconciler faithfully read that as a deletion plus a brand-new character: the whole history orphaned under the old name, a tombstone plus a full re-adoption doubling the journal, and — worst — any rewind or branch past the rename resurrected the OLD name, silently undoing the copilot's fix. The reconciler now pairs a vanished fold key with a new page key carrying the same person's content (verbatim core is identity; a record-only entry pairs on verbatim state) and RE-KEYS the journal instead: history intact under the new name, pins follow, staging follows, rewinds show the same person under her current name. Different cores are a REPLACEMENT and still delete+create on purpose; ambiguous pairings are left alone entirely, because re-keying the wrong person is worse than an orphaned history. Deliberate renames get a first-class door: window.summaryceptionContinuity.renameCharacter(from, to) — validated, merge-refusing, exact. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — one exclusive LLM channel, enforced at the lock instead of at six copies of it. _acquireSummarize() set isSummarizing after checking only isSummarizing, so any caller that forgot to pair it with an _llmChannelBusy() guard could start a SECOND concurrent callSummarizer while the ledger scribe / auditor / continuity pass held the channel — and callSummarizer snapshots ST's prompt toggles, disables them and restores on finish, so interleaving them leaves the user's toggles permanently wrong. Five entry points had drifted into exactly that hand-rolled subset (Force Summarize, Rebuild All, snippet redo, detail redo, Apply-all fixes) and the Co-Writer held no flag at all — a bidirectional hole, since every other pass then saw an idle channel for the whole duration of the largest call this extension makes. The check now lives at the one place the flag is ever set, its answer is load-bearing at all twelve call sites, and isSummarizing is read by nothing but _llmChannelBusy(). Rebuild All checks BEFORE it clears the snippets, because refusing at the lock would have wiped the memory and rebuilt nothing. Stop asks the channel too: it used to report “Nothing is running.” between two batches of a running background queue. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
