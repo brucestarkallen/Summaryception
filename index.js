@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.109.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.110.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -2289,7 +2289,7 @@ function serializeLedgerForScribe(ledger, budgetChars) {
     const entries = names
         .map(name => ({ name, entry: ledger[name], u: (ledger[name] && ledger[name].updatedAt) || 0 }))
         .sort((a, b) => b.u - a.u);
-    const budget = budgetChars || 6000;
+    const budget = budgetChars || defaultSettings.ledgerContextMaxChars;
     const lines = [];
     let used = 0, omitted = 0;
     for (const { name, entry } of entries) {
@@ -5924,7 +5924,7 @@ function formatLedgerEntry(name, entry, capChars, recordOnly) {
     // Strip any trailing period so the ". " separator gives exactly one, never "..".
     const cleaned = parts.map(p => p.replace(/[.\s]+$/, ''));
     let line = norm(name) + (recordOnly ? " (player's character — record only)" : '') + ' — ' + cleaned.join('. ') + '.';
-    const cap = capChars || 600;
+    const cap = capChars || defaultSettings.ledgerMaxCharsPerChar;
     if (line.length > cap) line = line.slice(0, Math.max(1, cap - 1)).replace(/\s+\S*$/, '').trimEnd() + '…';
     return line;
 }

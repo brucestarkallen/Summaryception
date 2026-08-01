@@ -3792,6 +3792,22 @@ section('settings defaults — single-sourced, no inline copies');
     ok((SRC_FULL.match(/\?\? defaultSettings\./g) || []).length >= 55,
         'the fallbacks read through that object (' + (SRC_FULL.match(/\?\? defaultSettings\./g) || []).length + ' sites)');
 
+    // v5.110.0: the same defect wearing a different shape. `const cap = capChars
+    // || 600;` is a PARAMETER fallback, so the `s.KEY ?? N` scan above cannot see
+    // it — and 600 is the OLD ledgerMaxCharsPerChar, stale since it was raised to
+    // 1000. Every caller passes a cap today, so it was unreachable; the next one
+    // who omits it would have got a budget 40% under the user's setting.
+    // Matching against the CURRENT default values would be decorative: 600 is a
+    // STALE value that no default holds any more, which is exactly the case worth
+    // catching. So the rule is stricter and needs no lookup — a parameter fallback
+    // may not be a magic number at all. Name defaultSettings.<key> or a named const.
+    const _paramCopies = [];
+    for (const m of _after.matchAll(/\b(?:const|let|var)\s+\w+\s*=\s*\w+\s*\|\|\s*(-?\d{2,}(?:\.\d+)?)\s*;/g)) {
+        _paramCopies.push(m[0].trim());
+    }
+    if (_paramCopies.length) console.log('    magic numeric parameter fallbacks: ' + _paramCopies.join(' | '));
+    ok(_paramCopies.length === 0, 'no parameter fallback is a magic number — it names its source');
+
     // The two that had already drifted, pinned by value so a future edit that
     // re-hardcodes them fails here rather than in someone's chat.
     eq(_declared.verbatimTurns, '9', 'verbatimTurns default is 9 (one site read 10)');

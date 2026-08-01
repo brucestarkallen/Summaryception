@@ -25,6 +25,12 @@ const SCRATCH = path.join(os.tmpdir(), 'sc_negative_scratch');
 // each function is individually correct. Those are provable only end to end, so
 // their mutation names e2e_test.mjs instead.
 const MUTATIONS = [
+    // ── v5.110.0: parameter fallbacks are copies too ──
+    ['a parameter fallback re-hardcodes the old 600 cap', 'index.js',
+        "    const cap = capChars || defaultSettings.ledgerMaxCharsPerChar;",
+        "    const cap = capChars || 600;",
+        'no parameter fallback is a magic number \u2014 it names its source'],
+
     // ── v5.109.0: a default has exactly one home ──
     ['a call site copies a numeric default inline again (the drift that shipped)', 'index.js',
         "    const keep = Math.max(0, asstTurns.length - (s.verbatimTurns ?? defaultSettings.verbatimTurns));",
