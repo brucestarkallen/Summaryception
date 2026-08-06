@@ -680,6 +680,22 @@ const MUTATIONS = [
         "    if (body) body += '\\n\\n' + _STALE_STATE_NOTE;",
         'a cast whose states are all current pays nothing for the explanation'],
 
+    // ── v5.116.0: the ageing label must reach the chat already in progress ──
+    ['the state backfill dates entries by `_t` again (a threads note refreshes a fossil)', 'index.js',
+        "        if (!nt || typeof nt.state !== 'string') continue;",
+        "        if (!nt) continue;",
+        'the fossil is dated at the turn its STATE was written'],
+
+    ['the backfill overwrites a first-hand stamp with a reconstruction', 'index.js',
+        "        if (typeof e._st === 'number' && isFinite(e._st)) continue;",
+        "        if (false) continue;",
+        'a first-hand stamp from the merge or a fold is never overwritten by a reconstruction'],
+
+    ['the one-shot state backfill is burned on a page that has not loaded yet', 'index.js',
+        "        if (notes.length > 0 && Object.keys(page).length === 0) return 0;",
+        "        void notes; void page;",
+        'and the one shot is NOT spent on it'],
+
     ['"hiding off" skips the hide again (summarized turns STILL sent to the model)', 'index.js',
         '    if (s.disableGhosting) log(`Ghosting ${toHide.length} message(s) up to ${upto} — excluded from AI context, visuals neutralized.`);',
         '    if (s.disableGhosting) { log(`Ghosted ${toHide.length} message(s) up to ${upto} — metadata only (hiding disabled).`); return; }',

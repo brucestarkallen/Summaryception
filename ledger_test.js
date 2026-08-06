@@ -27,7 +27,7 @@ function extractTopLevel(name) {
 }
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
-const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
+const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', '_STATE_STAMP_V', '_backfillStateStamps', '_stampStatesFrom', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
     '_chatHeadTurn', '_stateAsOf', '_STALE_STATE_NOTE', '_STALE_LABEL_RE', 'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe', '_noteLabel',
     '_assembleSummaryParts', 'SC_SECTION_ORDER', '_summaryUmbrella', 'assembleSummaryBlock', 'buildPinnedBlock', 'getPins', '_pinNeedle', '_countTokens', 'computeInjectionBudget',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
@@ -99,7 +99,7 @@ return {
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
   normalizeContinuityOutput, _continuitySig, mergeContinuityFlags, reconcileSnippetFlags, _findSnippetByTurnRange, _findSnippetsCovering,
   _baseNotesFromPage, adoptExternalLedgerEdits, _notesFromDeltas, _swapStagedLedgerIn,
-  _journalNow, _canonNotesAgainst, _canonicalizeLedgerNotes, wipeLedgerData,
+  _journalNow, _canonNotesAgainst, _canonicalizeLedgerNotes, _backfillStateStamps, _stampStatesFrom, wipeLedgerData,
   _pinNeedle, _findPinSource, _pinAlive, _syncNotepadUi, _lastAssistantAt,
   _tpMark, buildTransplantExport, parseTransplant, storeFieldsFromTransplant, _exportTailBatches,
   _locateSnippetForOp, _applyInverseOp, _lev, _normName,
@@ -4203,6 +4203,68 @@ section('v5.115.0: a state is a SNAPSHOT and must carry its own age');
     ok(!/Now: cheering/.test(ser), 'and never presented as the current moment');
     const ser2 = L.serializeLedgerForScribe(led, 6000, 20);
     ok(ser2.includes('Now: cheering'), 'an explicit clock overrides the derived one');
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+section('v5.116.0: the ageing label reaches the chat you are already playing');
+{
+    // v5.115.0 stamped `_st` on every NEW state write. An existing chat has none —
+    // so it fell back to `_t`, which moves for an arc- or threads-only note. The
+    // exact shape of the bug that was reported: a character nobody has written
+    // about in four hundred messages, whose THREADS were touched five turns ago.
+    const notes = [
+        { t: 12,  name: 'Tommen', at: 1, core: 'a boy king', state: 'screaming LONG LIVE THE KING at the high table' },
+        { t: 405, name: 'Tommen', at: 2, threads: ['the crown sits badly'] },
+        { t: 408, name: 'Brienne', at: 3, state: 'before the throne, sword sheathed' },
+    ];
+    const page = {
+        'Tommen':  { core: 'a boy king', state: 'screaming LONG LIVE THE KING at the high table', threads: ['the crown sits badly'], _t: 405 },
+        'Brienne': { core: 'sworn sword', state: 'before the throne, sword sheathed', _t: 408 },
+    };
+    const store = { ledger: page, ledgerNotes: notes };
+    eq(L._backfillStateStamps(store), 2, 'both entries are dated from the journal');
+    eq(page.Tommen._st, 12, 'the fossil is dated at the turn its STATE was written, not the turn its threads moved');
+    eq(page.Tommen._t, 405, '(precondition: `_t` really is recent, so the fallback alone would have called the fossil fresh)');
+    eq(page.Brienne._st, 408, 'and a genuinely current state keeps its recent date');
+
+    L.__setSettings(Object.assign({}, defaultSettings, { ledgerStateFreshTurns: 20 }));
+    eq(L._stateAsOf(page.Tommen, 411).label, 'Last noted 399 turns ago', 'so the block finally dates it');
+    eq(L._stateAsOf(page.Brienne, 411).label, 'Now', 'and leaves the current one alone');
+
+    // One shot, and never an overwrite.
+    eq(L._backfillStateStamps(store), 0, 'idempotent — the version guard means it runs once');
+    const store2 = { ledger: { 'Tommen': { state: 'x', _st: 999 } }, ledgerNotes: notes };
+    L._backfillStateStamps(store2);
+    eq(store2.ledger.Tommen._st, 999, 'a first-hand stamp from the merge or a fold is never overwritten by a reconstruction');
+}
+{
+    // The one-shot must not be burned on a store whose page has not loaded yet —
+    // the same trap the key-space migration documents.
+    const notes = [{ t: 5, name: 'Mara', at: 1, state: 'waiting' }];
+    const unloaded = { ledger: {}, ledgerNotes: notes };
+    eq(L._backfillStateStamps(unloaded), 0, 'an unmaterialized page is an absence of an answer, not an answer');
+    eq(unloaded.ledgerStateStampV, undefined, 'and the one shot is NOT spent on it');
+    unloaded.ledger = { 'Mara': { state: 'waiting', _t: 90 } };
+    eq(L._backfillStateStamps(unloaded), 1, 'once the page arrives, the migration still fires');
+    eq(unloaded.ledger.Mara._st, 5, 'with the journal\'s answer, not the page\'s `_t`');
+
+    // Staging is journalled separately and must be dated too, or a rebuild swaps
+    // in a page full of undated states.
+    const st = {
+        ledger: { 'A': { state: 'a', _t: 9 } }, ledgerNotes: [{ t: 3, name: 'A', at: 1, state: 'a' }],
+        ledgerStaging: { 'B': { state: 'b', _t: 9 } }, ledgerStagingNotes: [{ t: 4, name: 'B', at: 1, state: 'b' }],
+    };
+    eq(L._backfillStateStamps(st), 2, 'the staged page is dated in the same pass');
+    eq(st.ledgerStaging.B._st, 4, 'from its OWN journal');
+
+    // Nothing to work with is not a crash.
+    eq(L._stampStatesFrom(null, {}), 0, 'no journal -> nothing dated, no throw');
+    eq(L._stampStatesFrom([{ t: 1, name: 'X', state: 's' }], null), 0, 'no page -> nothing dated, no throw');
+    eq(L._stampStatesFrom([null, 5, { t: NaN, name: 'X', state: 's' }, { t: 1, name: '', state: 's' }, { t: 1, name: 'X' }], { 'X': { state: 's' } }), 0, 'malformed notes are skipped rather than trusted');
+    const legacy = { ledger: { 'Old': { state: 'from before the journal existed', _t: 3 } }, ledgerNotes: [] };
+    eq(L._backfillStateStamps(legacy), 0, 'a pre-journal chat has no answer to give');
+    eq(legacy.ledger.Old._st, undefined, 'so the entry keeps falling back to `_t` — unchanged behaviour, never a guess');
 }
 
 console.log('\n────────────────────────────────────────');
