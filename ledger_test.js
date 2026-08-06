@@ -28,7 +28,7 @@ function extractTopLevel(name) {
 
 const SRC_FULL = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
 const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast', '_editRewindDecision', '_ledgerMissingCore', '_missingCoreNotice', '_synthesizeCheckpoint', 'computeLedgerCast', 'reindexAfterDeletion', '_computeLiveLedgerRange', '_NOTES_SOFT_CAP', '_NOTES_KEEP_TAIL', '_NOTES_CANON_V', '_journalNow', '_canonNotesAgainst', '_canonicalizeLedgerNotes', 'foldLedgerNotes', 'ledgerHistoryFor', '_histOpen', '_historyHtml', 'escapeHtml', 'notesCover', 'ensureLedgerNotes', 'wipeLedgerData', 'appendLedgerNotes', 'rewindLedgerFromNotes', 'compactLedgerNotes', 'stripLeadingLabel', '_ledgerAuditTargets', '_pickEvidenceIndices', 'buildLedgerAuditEvidence', '_ambiguousTokens', '_characterWeight', '_ESC_RE', '_escapeRegex', 'characterAliases', 'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock', 'buildMemoryDump', 'getAssistantTurns', '_arcTrajectory', '_arcSnapScore', '_arcRegressionCandidates', '_arcHistoryPacket', '_shrinkVerdict', '_stashSources', 'subst', '_personaSplit', '_identityNote', '_healPersonaEntry', '_arbiterMcName', 'resolveMcName', '_acceptLearnedMc', 'isMcLedgerKey', '_renameEvidence', '_renameLedgerKeySpace', 'renameLedgerCharacter',
-    'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe', '_noteLabel',
+    '_chatHeadTurn', '_stateAsOf', '_STALE_STATE_NOTE', '_STALE_LABEL_RE', 'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe', '_noteLabel',
     '_assembleSummaryParts', 'SC_SECTION_ORDER', '_summaryUmbrella', 'assembleSummaryBlock', 'buildPinnedBlock', 'getPins', '_pinNeedle', '_countTokens', 'computeInjectionBudget',
     'resolveLedgerKey', '_LEDGER_LABEL_RE', 'stripLeadingLabel', 'mergeLedgerDeltas', 'subst', '_storeHasContent', '_computeLiveLedgerRange', '_selectRoster', '_composeRoster', 'getLedgerPins', '_pickCheckpoint', '_computeReplayChunks', '_selectCheckpointKeeps', '_contiguousRanges', '_selectStorageEvictions',
     'normalizeContinuityOutput', '_continuitySig', 'mergeContinuityFlags', 'reconcileSnippetFlags', '_findSnippetByTurnRange', '_findSnippetsCovering', '_baseNotesFromPage', 'adoptExternalLedgerEdits', '_notesFromDeltas', '_swapStagedLedgerIn', '_pinNeedle', '_findPinSource', '_pinAlive', '_syncNotepadUi', '_lastAssistantAt', '_tpMark', 'buildTransplantExport', 'parseTransplant', 'storeFieldsFromTransplant', '_exportTailBatches', '_locateSnippetForOp', '_applyInverseOp', '_lev', '_normName',
@@ -93,7 +93,7 @@ return {
   __setChat:     (v)=>{ __chat = v; },
   __resetDom, __dom: () => __dom,
   stripMetaBlocks, buildPassageFromRange, _ledgerDroppingPast, _editRewindDecision, _ledgerMissingCore, _missingCoreNotice, _synthesizeCheckpoint, computeLedgerCast, reindexAfterDeletion, _computeLiveLedgerRange, foldLedgerNotes, ledgerHistoryFor, _historyHtml, _histOpen, notesCover, ensureLedgerNotes, appendLedgerNotes, rewindLedgerFromNotes, compactLedgerNotes, _ledgerAuditTargets, _pickEvidenceIndices, buildLedgerAuditEvidence, _ambiguousTokens, _characterWeight,
-  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, _renameEvidence, _renameLedgerKeySpace, renameLedgerCharacter, formatLedgerEntry,
+  _escapeRegex, characterAliases, wordPresentInText, _parsePresenceMarkers, _stripPresenceNoise, _fbTokens, _fbScore, _fbDateLabel, buildFlashbackBlock, _arcTrajectory, _arcSnapScore, _arcRegressionCandidates, _arcHistoryPacket, _shrinkVerdict, _stashSources, subst, _healPersonaEntry, resolveMcName, _acceptLearnedMc, isMcLedgerKey, _renameEvidence, _renameLedgerKeySpace, renameLedgerCharacter, _chatHeadTurn, _stateAsOf, _STALE_STATE_NOTE, _STALE_LABEL_RE, formatLedgerEntry,
   buildCharacterBlock, serializeLedgerForScribe, resolveLedgerKey, mergeLedgerDeltas, _noteLabel,
   _assembleSummaryParts, SC_SECTION_ORDER, _summaryUmbrella, assembleSummaryBlock, computeInjectionBudget, _countTokens,
   subst, _storeHasContent, _computeLiveLedgerRange, _selectRoster, _composeRoster, _pickCheckpoint, _computeReplayChunks, _selectCheckpointKeeps, _contiguousRanges, _selectStorageEvictions,
@@ -395,7 +395,25 @@ section('buildCharacterBlock — roster (off-screen cast never vanishes)');
     // are, so the world stopped existing outside the current scene. Their last
     // recorded state is where the story left them — carrying it invents nothing.
     ok(b.includes('last seen'), 'roster entries carry the last-known state, so the off-screen world stays alive');
-    ok(/last seen \(turn \d+\)/.test(b) || !/_t/.test(JSON.stringify(b)), 'and stamp it with the turn, so staleness is visible rather than implied');
+    ok(!/last seen \(/.test(b), 'an entry with no turn stamp claims no age at all rather than inventing one');
+    {
+        // v5.115.0: the distance is what carries meaning. "(turn 41)" is a number the
+        // storyteller has no frame for — it cannot know what turn it is NOW.
+        setStore({
+            'Mira': { core: 'guarded tsundere', state: 'flustered', updatedAt: 30 },
+            'Kai': { core: 'reckless rival', state: 'went home early', updatedAt: 8, _st: 2, _t: 2 },
+        });
+        L.__setChat(new Array(41).fill(0).map(() => ({ mes: 'Mira glared across the courtyard.' })));
+        const b2 = L.buildCharacterBlock();
+        ok(/last seen \(38 turns ago\): went home early/.test(b2), 'the roster dates the state by DISTANCE from now, measured from state\'s own stamp');
+        ok(!/turn 2/.test(b2), 'and never as a bare absolute index the storyteller cannot place');
+    }
+    setStore({
+        'Mira': { core: 'guarded tsundere; clipped sarcasm', state: 'flustered', updatedAt: 30 },
+        'Professor Halden': { core: 'stern academy mentor; speaks in measured warnings', state: 'absent from the room', updatedAt: 5 },
+        'Kai': { core: 'reckless rival; goads everyone', state: 'went home early', updatedAt: 8 },
+    });
+    L.__setChat([{ mes: 'Mira glared across the courtyard.' }]);
     ok(b.indexOf('Mira') < b.indexOf('Other people in this world'), 'active full cards come before the roster');
     // roster respects the cap
     L.__setSettings(Object.assign({}, defaultSettings, { ledgerRosterMax: 1 }));
@@ -1511,7 +1529,20 @@ section('roster carries the off-screen world');
     const block = L.buildCharacterBlock(led, s, msgs.join('\n'), [], 0, msgs);
     void block;
 }
-ok(SRC_FULL.includes("if (state) s += ' | last seen'"), 'roster lines carry the last-known state');
+{
+    // NOT a source-string search: the previous form (`"if (state) s += ' | last seen'"`)
+    // was the exact class of assertion this repo has already been burned by — a
+    // rename (here `s` -> `s2`, because that local was shadowing the settings object)
+    // silently retires the check forever. Assert the behaviour instead.
+    L.__setSettings(Object.assign({}, defaultSettings));
+    setStore({
+        'Onstage': { core: 'here', state: 'in the doorway', updatedAt: 9 },
+        'Offstage': { core: 'a smith', state: 'at his forge', updatedAt: 4, _st: 1, _t: 1 },
+    });
+    L.__setChat([{ mes: 'Onstage waited.' }]);
+    const rb = L.buildCharacterBlock();
+    ok(/Offstage[^;]*last seen[^:]*: at his forge/.test(rb), 'roster lines carry the last-known state');
+}
 ok(SRC_FULL.includes("that is still where they are and what they are doing"), 'the framing tells the storyteller last-seen means still-there, not a guess');
 ok(SRC_FULL.includes("const state = _clip(entry && entry.state, 90);"), 'the state is clipped so a full roster stays cheap');
 
@@ -4056,6 +4087,122 @@ section('context-cost meter — mirrors the injection by construction');
     eq(_off.characters, '', 'ledger injection off \u2014 the part is empty, so the meter lists nothing for it');
     ok(!L.assembleSummaryBlock().includes('<characters>'), 'and the block really does drop it');
     L.__setSettings(_S);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+section('v5.115.0: a state is a SNAPSHOT and must carry its own age');
+{
+    const S = Object.assign({}, defaultSettings, { ledgerStateFreshTurns: 20 });
+
+    // ── _stateAsOf: the age itself ──
+    eq(L._stateAsOf({ state: 'x', _st: 5 }, null, S).label, 'Now', 'no clock -> the ledger says nothing about age rather than guessing');
+    eq(L._stateAsOf({ state: 'x' }, 500, S).label, 'Now', 'no stamp -> unchanged behaviour (an old chat is not flooded with staleness it cannot substantiate)');
+    eq(L._stateAsOf({ state: 'x', _st: 90 }, 100, S).label, 'Now', 'inside the horizon it is still Now');
+    eq(L._stateAsOf({ state: 'x', _st: 80 }, 100, S).label, 'Now', 'exactly ON the horizon is still Now (the boundary is inclusive)');
+    eq(L._stateAsOf({ state: 'x', _st: 79 }, 100, S).label, 'Last noted 21 turns ago', 'one past the horizon flips the label, and reports the true distance');
+    eq(L._stateAsOf({ state: 'x', _st: 79 }, 100, S).stale, true, 'and reports itself stale to the caller');
+    eq(L._stateAsOf({ state: 'x', _st: 4, _t: 400 }, 400, S).label, 'Last noted 396 turns ago', "state's OWN stamp wins: `_t` moves for an arc/threads note and would date a fossil to a turn it was never observed at");
+    eq(L._stateAsOf({ state: 'x', _t: 4 }, 400, S).label, 'Last noted 396 turns ago', 'and `_t` is the backfill for entries written before the stamp existed');
+    eq(L._stateAsOf({ state: 'x', _st: 900 }, 100, S).age, 0, 'a rewind can leave a stamp above the head — age is never negative');
+
+    // Horizon settings, including the values inject_chaos punches in.
+    eq(L._stateAsOf({ state: 'x', _st: 1 }, 999, Object.assign({}, S, { ledgerStateFreshTurns: 0 })).label, 'Now', '0 disables the ageing label entirely (pre-v5.115 behaviour on demand)');
+    eq(L._stateAsOf({ state: 'x', _st: 1 }, 999, Object.assign({}, S, { ledgerStateFreshTurns: '30' })).label, 'Last noted 998 turns ago', "a jQuery slider hands back a STRING — '30' is a value, not corruption");
+    eq(L._stateAsOf({ state: 'x', _st: 990 }, 999, Object.assign({}, S, { ledgerStateFreshTurns: '30' })).label, 'Now', 'and that string really is honoured as the horizon');
+    for (const junk of [NaN, Infinity, -5, null, undefined, '', [], {}]) {
+        const r = L._stateAsOf({ state: 'x', _st: 1 }, 999, Object.assign({}, S, { ledgerStateFreshTurns: junk }));
+        ok(r.label === 'Last noted 998 turns ago', 'a horizon punched to ' + JSON.stringify(junk) + ' falls back to the default instead of producing garbage');
+    }
+
+    // ── the label reaches the line ──
+    const e = { core: 'a boy king', state: 'screaming LONG LIVE THE KING at the high table', _st: 12 };
+    L.__setSettings(S);
+    ok(L.formatLedgerEntry('Tommen', e, 600, false, 412).includes('Last noted 400 turns ago: screaming'), 'the full card carries the age');
+    ok(L.formatLedgerEntry('Tommen', e, 600, false).includes('Now: screaming'), 'and omitting the clock is byte-identical to the old behaviour');
+}
+
+// ── the stamp is written by BOTH state writers, and by neither for other fields ──
+{
+    L.__setSettings(Object.assign({}, defaultSettings));
+    setStore({});
+    L.mergeLedgerDeltas([{ name: 'Tommen', core: 'a boy king', state: 'cheering at the feast' }], undefined, 12);
+    eq(currentStore().ledger.Tommen._st, 12, 'the page merge stamps the turn the state was observed at');
+    L.mergeLedgerDeltas([{ name: 'Tommen', threads: ['the crown sits badly'] }], undefined, 400);
+    eq(currentStore().ledger.Tommen._st, 12, 'a threads-only pass moves `_t` but NOT `_st` — the state was not re-observed');
+    eq(currentStore().ledger.Tommen._t, 400, '(precondition: `_t` really did move, so `_t` alone would have reported the fossil as fresh)');
+    L.mergeLedgerDeltas([{ name: 'Tommen', arc: 'drifting' }], undefined, 402);
+    eq(currentStore().ledger.Tommen._st, 12, 'and neither does an arc-only pass');
+    L.mergeLedgerDeltas([{ name: 'Tommen', state: 'small and frightened on the throne' }], undefined, 410);
+    eq(currentStore().ledger.Tommen._st, 410, 'a real state write re-stamps it');
+
+    // The audit lands corrections at the entry's EXISTING `_t` on purpose — it
+    // re-describes the past, it does not observe the present. Freshness must
+    // follow that rule, or every audited character would look newly seen.
+    L.mergeLedgerDeltas([{ name: 'Tommen', state: 'corrected wording of the same moment' }], undefined, 410);
+    eq(currentStore().ledger.Tommen._st, 410, 'an audit correction stamped at the old turn does not fake freshness');
+
+    const folded = L.foldLedgerNotes([
+        { t: 12, name: 'Tommen', state: 'cheering at the feast', at: 1 },
+        { t: 400, name: 'Tommen', threads: ['the crown sits badly'], at: 2 },
+    ]);
+    eq(folded.Tommen._st, 12, 'the notes fold stamps the same way, from the state note only');
+    eq(folded.Tommen._t, 400, '(precondition: the fold advanced `_t` past it)');
+}
+
+// ── THE REPRODUCTION: a silent attendee's fossil state asserted as the present ──
+{
+    // Tommen is on the attendance sheet, so presence is correct and stays correct.
+    // But the scribe only writes state for characters the PASSAGE touched, and he
+    // has had no line for two hundred turns — so his snapshot ages without bound
+    // while the block swears he is doing it right now.
+    const S = Object.assign({}, defaultSettings, { ledgerStateFreshTurns: 20, ledgerMaxActive: 1 });
+    L.__setSettings(S);
+    setStore({
+        'Jovan': { core: 'the protagonist', state: 'before the throne', updatedAt: 99, _st: 410 },
+        'Tommen': { core: 'a boy king', state: 'on his chair at the high table, screaming LONG LIVE THE KING', updatedAt: 50, _st: 12, _t: 12 },
+    });
+    const sheet = '[IST: Jovan|before the throne] [IST: Tommen|at the high table] The great hall was cold in the morning light.';
+    L.__setChat(new Array(412).fill(0).map(() => ({ mes: sheet })));
+    const b = L.buildCharacterBlock();
+
+    ok(b.includes('Also present in this scene'), 'precondition: Tommen still holds his slot — presence was never the bug');
+    ok(!/\| now: on his chair/i.test(b), 'the compact tier no longer stamps "now" on a four-hundred-turn-old snapshot');
+    ok(/last noted 399 turns ago: on his chair/i.test(b), 'it dates the snapshot instead, so the storyteller is not handed a contradiction to resolve');
+    ok(b.includes('OLD snapshot'), 'and the block explains, once, what the marked lines mean');
+    ok(b.includes('never replay the old action as if it were happening now'), 'in the terms that actually matter: do not replay it');
+    ok(/Jovan[^\n]*Now: before the throne/.test(b), 'a character whose state IS current is untouched — the label is evidence, not a blanket hedge');
+
+    // The disclaimer is earned, never boilerplate.
+    setStore({
+        'Jovan': { core: 'the protagonist', state: 'before the throne', updatedAt: 99, _st: 410 },
+        'Tommen': { core: 'a boy king', state: 'small on the throne', updatedAt: 50, _st: 405, _t: 405 },
+    });
+    const b2 = L.buildCharacterBlock();
+    ok(!b2.includes('OLD snapshot'), 'a cast whose states are all current pays nothing for the explanation');
+    ok(!/last noted/i.test(b2), 'and carries no stale labels at all');
+
+    // Off by choice.
+    L.__setSettings(Object.assign({}, S, { ledgerStateFreshTurns: 0 }));
+    setStore({
+        'Jovan': { core: 'the protagonist', state: 'before the throne', updatedAt: 99, _st: 410 },
+        'Tommen': { core: 'a boy king', state: 'screaming LONG LIVE THE KING', updatedAt: 50, _st: 12, _t: 12 },
+    });
+    const b3 = L.buildCharacterBlock();
+    ok(!/last noted/i.test(b3) && !b3.includes('OLD snapshot'), 'the horizon at 0 restores the old labelling exactly, disclaimer and all');
+    L.__setSettings(S);
+}
+
+// ── the scribe reads the ledger before rewriting it, so it needs the age too ──
+{
+    L.__setSettings(Object.assign({}, defaultSettings, { ledgerStateFreshTurns: 20 }));
+    L.__setChat(new Array(412).fill(0).map(() => ({ mes: 'x' })));
+    const led = { 'Tommen': { core: 'a boy king', state: 'cheering at the feast', updatedAt: 5, _st: 12, _t: 12 } };
+    const ser = L.serializeLedgerForScribe(led, 6000);
+    ok(ser.includes('Last noted 399 turns ago: cheering at the feast'), "the scribe's own input is aged — its prompt resumes a returning character from their last recorded state, so an unaged fossil taught it the fossil WAS the present");
+    ok(!/Now: cheering/.test(ser), 'and never presented as the current moment');
+    const ser2 = L.serializeLedgerForScribe(led, 6000, 20);
+    ok(ser2.includes('Now: cheering'), 'an explicit clock overrides the derived one');
 }
 
 console.log('\n────────────────────────────────────────');

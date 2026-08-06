@@ -644,6 +644,42 @@ const MUTATIONS = [
         '        e.updatedAt = n.at || e.updatedAt || 0;',
         'M4: a content-less audit stamp does NOT bump updatedAt'],
 
+    // ── v5.115.0: a state is a snapshot, and must carry its own age ──
+    ['a fossil state is asserted as the present moment again (the Tommen bug)', 'index.js',
+        "    if (typeof entry.state === 'string' && entry.state.trim()) parts.push(_stateAsOf(entry, nowTurn).label + ': ' + norm(entry.state));",
+        "    if (typeof entry.state === 'string' && entry.state.trim()) parts.push('Now: ' + norm(entry.state));",
+        'the full card carries the age'],
+
+    ['the compact "also present" tier stamps now: on a fossil again', 'index.js',
+        "            if (state) s2 += ' | ' + aged.label.toLowerCase() + ': ' + state;",
+        "            if (state) s2 += ' | now: ' + state;",
+        'the compact tier no longer stamps "now" on a four-hundred-turn-old snapshot'],
+
+    ['the page merge stops stamping the turn the state was observed at', 'index.js',
+        '                if (_stateWritten) entry._st = atTurn;',
+        '                void _stateWritten;',
+        'the page merge stamps the turn the state was observed at'],
+
+    ['the notes fold stops stamping the state note', 'index.js',
+        "        if (typeof n.state === 'string') { e.state = n.state; e._st = n.t; }",
+        "        if (typeof n.state === 'string') { e.state = n.state; }",
+        'the notes fold stamps the same way, from the state note only'],
+
+    ['state ageing reads `_t` again, so a threads-only note dates the fossil fresh', 'index.js',
+        "    const st = (typeof entry._st === 'number' && isFinite(entry._st)) ? entry._st\n        : ((typeof entry._t === 'number' && isFinite(entry._t)) ? entry._t : null);",
+        "    const st = (typeof entry._t === 'number' && isFinite(entry._t)) ? entry._t : null;",
+        "state's OWN stamp wins"],
+
+    ['a punched/blank freshness horizon silently coerces to 0 and switches the label off', 'index.js',
+        "    if (typeof raw === 'number' && isFinite(raw) && raw >= 0) fresh = raw;",
+        "    if (isFinite(Number(raw)) && Number(raw) >= 0) fresh = Number(raw);",
+        'falls back to the default instead of producing garbage'],
+
+    ['the staleness note becomes unconditional boilerplate', 'index.js',
+        "    if (body && _STALE_LABEL_RE.test(_onScreenText)) body += '\\n\\n' + _STALE_STATE_NOTE;",
+        "    if (body) body += '\\n\\n' + _STALE_STATE_NOTE;",
+        'a cast whose states are all current pays nothing for the explanation'],
+
     ['"hiding off" skips the hide again (summarized turns STILL sent to the model)', 'index.js',
         '    if (s.disableGhosting) log(`Ghosting ${toHide.length} message(s) up to ${upto} — excluded from AI context, visuals neutralized.`);',
         '    if (s.disableGhosting) { log(`Ghosted ${toHide.length} message(s) up to ${upto} — metadata only (hiding disabled).`); return; }',

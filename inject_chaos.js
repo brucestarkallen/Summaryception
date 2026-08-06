@@ -39,7 +39,7 @@ const NAMES = [
     'wordPresentInText', '_parsePresenceMarkers', '_stripPresenceNoise',
     '_personaSplit', 'resolveMcName', '_arbiterMcName', 'isMcLedgerKey',
     'getLedgerPins', '_selectRoster', '_composeRoster', 'computeLedgerCast',
-    'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
+    '_chatHeadTurn', '_stateAsOf', '_STALE_STATE_NOTE', '_STALE_LABEL_RE', 'formatLedgerEntry', 'buildCharacterBlock', 'serializeLedgerForScribe',
     'buildMemoryDump', '_FB_STOP', '_fbTokens', '_fbScore', '_fbDateLabel', 'buildFlashbackBlock',
 ];
 
@@ -68,7 +68,7 @@ const SillyTavern = { getContext(){ return { chat: __chat, name1: __settings.__n
 ${body}
 return {
   __setSettings:(v)=>{ __settings=v; }, __setStore:(v)=>{ __store=v; }, __setChat:(v)=>{ __chat=v; },
-  formatLedgerEntry, computeLedgerCast, buildCharacterBlock, buildFlashbackBlock, serializeLedgerForScribe,
+  _chatHeadTurn, _stateAsOf, _STALE_STATE_NOTE, _STALE_LABEL_RE, formatLedgerEntry, computeLedgerCast, buildCharacterBlock, buildFlashbackBlock, serializeLedgerForScribe,
 };
 `;
 const L = new Function(sandbox)();
@@ -84,7 +84,7 @@ function pick(a) { return a[ri(0, a.length - 1)]; }
 const ABSURD = [0, -1, 1, NaN, Infinity, -Infinity, null, undefined, '', '5', [], {}, 1e9, 0.5];
 const NUM_KEYS = ['ledgerMaxActive', 'ledgerActiveWindow', 'ledgerMaxCharsPerChar', 'ledgerRosterMax',
     'ledgerMentionMax', 'ledgerMentionWindow', 'verbatimTurns', 'flashbackMaxChars',
-    'flashbackMinScore', 'flashbackMaxScenes', 'ledgerCompactMaxChars'];
+    'flashbackMinScore', 'flashbackMaxScenes', 'ledgerCompactMaxChars', 'ledgerStateFreshTurns'];
 const BOOL_KEYS = ['ledgerEnabled', 'ledgerInjectRoster', 'ledgerRosterRotate', 'ledgerMcRecordOnly',
     'flashbackEnabled', 'injectLedger', 'ledgerShowThreads'];
 
@@ -110,6 +110,12 @@ function makeLedger() {
             arc:     rnd() < 0.7 ? 'trust rebuilding after the docks '.repeat(ri(1, 25))  : pick([null, '', undefined]),
             threads: rnd() < 0.7 ? Array.from({ length: ri(0, 6) }, (_, j) => 'open thread ' + j) : pick([null, 'notarray', [], undefined, [null, '', 5]]),
             updatedAt: pick([Date.now(), 0, NaN, null, undefined, -5]),
+            // v5.115.0: turn stamps decide whether a state prints as "now" or gets
+            // dated. Without them every fuzzed entry looked permanently fresh and the
+            // ageing path — plus the invariant guarding it — was never once executed.
+            // Values above the chat head are the rewind case; the rest is garbage.
+            _t:  rnd() < 0.7 ? pick([0, 1, 5, 20, 29, 500, -3, NaN, null, undefined, '7']) : undefined,
+            _st: rnd() < 0.6 ? pick([0, 1, 5, 20, 29, 500, -3, NaN, null, undefined, '7']) : undefined,
         };
     }
     return led;
@@ -224,6 +230,15 @@ for (let iter = 0; iter < RUNS; iter++) {
                 const hits = blk.split('\n').filter(l => { const q = l.trim(); return q.startsWith(nm + ':') || q.startsWith(nm + ' \u2014'); }).length;
                 if (hits > 1) note('a character appears TWICE in the injected block', nm + ' x' + hits);
             }
+            // v5.115.0: the ageing label explains itself or it is not there. A block
+            // that dates a snapshot without the note leaves the storyteller resolving
+            // the same ambiguity by hand; a note with nothing to explain is boilerplate
+            // charged to every turn. The roster's own "last seen" framing is separate
+            // and must never trigger it.
+            const _staleLabel = L._STALE_LABEL_RE.test(blk);
+            const _staleNote = blk.includes(L._STALE_STATE_NOTE);
+            if (_staleLabel && !_staleNote) note('a dated snapshot went out with nothing explaining what the date means', blk.slice(0, 140));
+            if (_staleNote && !_staleLabel) note('the staleness note was charged to a block with no dated snapshot in it', blk.slice(0, 140));
         }
     }
 
@@ -267,5 +282,6 @@ Invariants held through every randomised assembly:
   \u2022 no card, block, flashback or scribe dump contains "undefined" / "NaN" / "[object Object]"
   \u2022 a per-character cap is a budget, not a suggestion
   \u2022 THE PLAYER'S CHARACTER IS A RECORD: record-only cards never carry core or arc
-  \u2022 nobody is listed twice, and nobody is both on screen and in the roster`);
+  \u2022 nobody is listed twice, and nobody is both on screen and in the roster
+  \u2022 a dated snapshot always carries its explanation, and never the other way round`);
 console.log('INJECTION CHAOS PASSED \u2713');
