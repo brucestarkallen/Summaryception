@@ -588,6 +588,17 @@
                     </div>
 
                     <div class="sc-row">
+                        <label for="sc_ledger_state_fresh">
+                            <span>"Now" stays "Now" for (messages)</span>
+                            <small class="sc-hint">A character's <em>Now</em> is a snapshot of the moment the scribe last wrote about them &mdash; and the scribe only writes for characters the passage actually touched, so someone standing silently in a scene keeps the same snapshot indefinitely. Past this many messages the line is relabelled <strong>"last noted N turns ago"</strong> instead of <em>now</em>, in the injection, the scribe's own input and this panel, so an old action is never handed over as the present moment. Set to 0 to label everything <em>now</em> regardless of age.</small>
+                        </label>
+                        <div class="sc-slider-row">
+                            <input type="range" id="sc_ledger_state_fresh" min="0" max="120" step="1" />
+                            <span id="sc_ledger_state_fresh_val" class="sc-val">20</span>
+                        </div>
+                    </div>
+
+                    <div class="sc-row">
                         <label for="sc_ledger_active_window">
                             <span>"On screen" window (messages)</span>
                             <small class="sc-hint">How many recent messages are scanned to decide who counts as active/on-screen right now.</small>

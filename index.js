@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.114.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.115.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -140,6 +140,7 @@ const defaultSettings = Object.freeze({
     ledgerMentionMax: 3,           // cap on recalled pages per turn (story-investment weight decides who wins the slots)
     ledgerMentionChars: 500,       // per-character cap for a recalled page — full context for the reference, slightly leaner than an on-screen card
     ledgerMaxActive: 6,            // max characters injected at once
+    ledgerStateFreshTurns: 20,     // how many messages a `state` snapshot stays labelled "Now". Beyond it the label becomes "Last noted N turns ago" — the scribe only writes state for characters the PASSAGE touched, so a person standing silently in the room keeps a snapshot that ages without bound while the block still claims they are doing it. 0 disables the ageing label (every state reads as "Now", pre-v5.115 behavior).
     ledgerMaxCharsPerChar: 1000,   // per-character injection cap (chars) — sized for a dense CURRENT card (behavioral anchor + whereabouts + compressed arc), not for saving tokens. The cap's real job is bounding accumulation so stale/redundant detail can't pile into noise that drifts the model; keep cards dense and current, not merely small.
     ledgerContextMaxChars: 6000,   // ledger context budget handed to the scribe
     ledgerLiveUpdate: true,        // update the ledger over the recent (not-yet-summarized) window every turn, not only when a batch is summarized — keeps "Now"/arcs/threads tracking the current scene instead of lagging ~verbatimTurns behind
@@ -2304,8 +2305,18 @@ function _llmChannelBusy() {
 // Compact, human-readable dump of the current ledger for the scribe's context,
 // most-recently-updated first, bounded by a char budget. Uses formatLedgerEntry
 // (no per-field cap) so the scribe sees the full established picture.
-function serializeLedgerForScribe(ledger, budgetChars) {
+// The scribe reads the CURRENT LEDGER before writing the next one, and its prompt
+// says a character re-entering after being off-page resumes from their last
+// recorded state. Handing it "Now: <fossil>" therefore did not merely mislead the
+// storyteller — it taught the scribe that the fossil WAS the present and invited it
+// to carry the mood forward unchanged, so the error compounded every pass. Aged
+// honestly, the same prompt line ("a character PRESENT in the passage must never be
+// left describing an EARLIER scene") finally has the evidence it needs to fire.
+function serializeLedgerForScribe(ledger, budgetChars, nowTurn) {
     if (!ledger || typeof ledger !== 'object') return '(empty — no characters recorded yet)';
+    // Derived, not demanded: every one of the six callers would otherwise have to
+    // remember, and the failure mode of forgetting is invisible.
+    const _now = (typeof nowTurn === 'number' && isFinite(nowTurn)) ? nowTurn : _chatHeadTurn();
     const names = Object.keys(ledger);
     if (names.length === 0) return '(empty — no characters recorded yet)';
     const entries = names
@@ -2315,7 +2326,7 @@ function serializeLedgerForScribe(ledger, budgetChars) {
     const lines = [];
     let used = 0, omitted = 0;
     for (const { name, entry } of entries) {
-        const line = formatLedgerEntry(name, entry, 100000);
+        const line = formatLedgerEntry(name, entry, 100000, false, _now);
         if (!line) continue;
         if (lines.length > 0 && used + line.length > budget) { omitted++; continue; }
         lines.push(line);
@@ -2920,7 +2931,7 @@ function foldLedgerNotes(notes, maxTurn) {
         if (n.gone === true) { delete out[key]; continue; }   // tombstone: deleted here; a LATER note lawfully re-introduces them
         const e = out[key] || {};
         if (typeof n.core === 'string') e.core = n.core;
-        if (typeof n.state === 'string') e.state = n.state;
+        if (typeof n.state === 'string') { e.state = n.state; e._st = n.t; }   // state's OWN turn — `_t` moves for a threads-only note and would report a fossil state as fresh
         if (typeof n.arc === 'string') e.arc = n.arc;
         if (Array.isArray(n.threads)) e.threads = n.threads.slice();
         if (typeof n.a === 'number') e._a = n.a;          // audit stamp rides the notes too
@@ -3585,7 +3596,8 @@ function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
         const _recOnly = _mcRecOnly && isMcLedgerKey(key);
         let touched = false;
         if (typeof d.core === 'string' && !_recOnly)  { const v = stripLeadingLabel(d.core);  if (v) { const dup = _dupOf('core', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' core arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.core = v; applied.core = v; _seenBatch.core.set(v, key); touched = true; } } }
-        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; applied.state = v; touched = true; } }
+        let _stateWritten = false;
+        if (typeof d.state === 'string') { const v = stripLeadingLabel(d.state); if (v) { entry.state = v; applied.state = v; touched = true; _stateWritten = true; } }
         if (typeof d.arc === 'string' && !_recOnly)   { const v = stripLeadingLabel(d.arc);   if (v) { const dup = _dupOf('arc', v, key); if (dup) { _contam++; log(`Ledger contamination guard: '${key}' arc arrived verbatim-identical to '${dup}' — dropped.`); } else { entry.arc = v; applied.arc = v; _seenBatch.arc.set(v, key); touched = true; } } }
         if (Array.isArray(d.threads)) {
             const tv = d.threads
@@ -3599,7 +3611,14 @@ function mergeLedgerDeltas(deltas, target, atTurn, appliedOut) {
         }
         if (touched) {
             entry.updatedAt = Date.now();
-            if (typeof atTurn === 'number' && isFinite(atTurn)) entry._t = atTurn;   // last turn that shaped this entry — lets rewinds drop future-derived state instantly
+            if (typeof atTurn === 'number' && isFinite(atTurn)) {
+                entry._t = atTurn;   // last turn that shaped this entry — lets rewinds drop future-derived state instantly
+                // …and state gets its OWN stamp, because `_t` moves for arc/threads
+                // too. An audit correction lands at the entry's existing `_t` (it
+                // re-describes the past, it does not observe the present), so this
+                // follows the same rule and never fakes freshness.
+                if (_stateWritten) entry._st = atTurn;
+            }
             ledger[key] = entry;
             changed++;
             _applied.push(applied);
@@ -5958,9 +5977,76 @@ function wordPresentInText(haystackLower, needle) {
     }
 }
 
+// ONE clock. `_t`/`_st` are chat MESSAGE indices (the live pass stamps
+// `turns[last].index`), so the head of the chat is the same unit and the
+// subtraction is exact. Centralized because the alternative is six call sites that
+// each have to remember to pass it — and a caller that forgets does not fail
+// loudly, it silently reverts to printing a fossil as the present moment.
+function _chatHeadTurn() {
+    try {
+        const { chat } = SillyTavern.getContext();
+        return (Array.isArray(chat) && chat.length) ? chat.length - 1 : null;
+    } catch (_) { return null; }
+}
+
+// A `state` is a SNAPSHOT of one past moment, and until v5.115.0 nothing recorded
+// WHEN it was taken — so every surface printed it as "Now" no matter how old it
+// was. That is not a display nicety: the scribe is told to write state only for
+// characters the PASSAGE touched, and a person standing silently in a scene is
+// absent from every passage, so their snapshot ages without bound while the
+// character block keeps asserting it as the present moment. A boy king who cheered
+// at a feast two hundred turns earlier was still "screaming LONG LIVE THE KING" in
+// a block headed "Also present in this scene" — the storyteller was handed a
+// contradiction and had to guess which half was true. The roster tier already knew
+// this ("last seen (turn N)"); the ON-SCREEN tiers, which the storyteller trusts
+// most, were the ones lying. `_st` (stamped by BOTH state writers — the page merge
+// and the notes fold) makes the age knowable; this makes it visible. The ledger
+// may not claim to know the present when all it holds is the past.
+function _stateAsOf(entry, nowTurn, s) {
+    const res = { age: null, stale: false, label: 'Now' };
+    if (!entry || typeof entry !== 'object') return res;
+    if (typeof nowTurn !== 'number' || !isFinite(nowTurn)) return res;   // caller has no clock — say nothing rather than guess
+    // `_st` is state's own turn. `_t` — the last turn that shaped ANY field — is the
+    // backfill for entries written before the stamp existed; it can only ever be
+    // NEWER than the state it stands in for, so the fallback errs toward "fresh".
+    // An existing chat therefore behaves exactly as it did before rather than being
+    // flooded with staleness the ledger cannot substantiate.
+    const st = (typeof entry._st === 'number' && isFinite(entry._st)) ? entry._st
+        : ((typeof entry._t === 'number' && isFinite(entry._t)) ? entry._t : null);
+    if (st === null) return res;
+    // A rewind can leave a page stamp above the new head; age is never negative.
+    res.age = Math.max(0, Math.floor(nowTurn) - Math.floor(st));
+    let sv = s;
+    if (!sv) { try { sv = getSettings(); } catch (_) { sv = null; } }
+    // 0 is a real answer ("label everything Now"), so garbage must NOT coerce into
+    // it: `Number('')` and `Number([])` are both 0, and silently reading a punched
+    // or half-written setting as "switch the safety label off" is precisely the
+    // failure this function exists to prevent. Only an actual non-negative finite
+    // number counts — or a numeric STRING, because a jQuery range input hands back
+    // `'20'`, and a setting saved through the panel must not read as corrupt.
+    const raw = sv ? sv.ledgerStateFreshTurns : undefined;
+    let fresh = Number(defaultSettings.ledgerStateFreshTurns);
+    if (typeof raw === 'number' && isFinite(raw) && raw >= 0) fresh = raw;
+    else if (typeof raw === 'string' && raw.trim() !== '' && isFinite(Number(raw)) && Number(raw) >= 0) fresh = Number(raw);
+    if (fresh <= 0 || res.age <= fresh) return res;
+    res.stale = true;
+    res.label = 'Last noted ' + res.age + ' turns ago';
+    return res;
+}
+
+// The label's canonical shape, in ONE place: `_stateAsOf` produces it and every
+// consumer detects it with the same pattern, so the two can never drift apart.
+const _STALE_LABEL_RE = /last noted \d+ turns? ago/i;
+
+// The one sentence that disambiguates a mixed block. Emitted ONLY when a stale
+// label actually appears, so a scene whose cast is all current pays nothing.
+const _STALE_STATE_NOTE = 'Where a line is marked "last noted N turns ago" rather than "now", that is an OLD snapshot the record has not been able to refresh \u2014 it is where that person was and what they were doing then, not what they are doing in this scene. Treat it as history: place them in the present moment from the scene itself, and never replay the old action as if it were happening now.';
+
 // One compact, prose-like line per character. Priority order Nature → Now →
 // Open → Arc means a length cap truncates the least-critical field (Arc) first.
-function formatLedgerEntry(name, entry, capChars, recordOnly) {
+// `nowTurn` is the current head of the chat; omit it and every state reads "Now"
+// exactly as it did before the stamp existed.
+function formatLedgerEntry(name, entry, capChars, recordOnly, nowTurn) {
     if (!entry || typeof entry !== 'object') return '';
     const norm = (v) => String(v).trim().replace(/\s+/g, ' ');
     const parts = [];
@@ -5969,7 +6055,7 @@ function formatLedgerEntry(name, entry, capChars, recordOnly) {
     // rule keep their data — it is the player's record — it simply stops being
     // injected as direction).
     if (!recordOnly && typeof entry.core === 'string' && entry.core.trim())   parts.push('Nature: ' + norm(entry.core));
-    if (typeof entry.state === 'string' && entry.state.trim()) parts.push('Now: ' + norm(entry.state));
+    if (typeof entry.state === 'string' && entry.state.trim()) parts.push(_stateAsOf(entry, nowTurn).label + ': ' + norm(entry.state));
     if (Array.isArray(entry.threads)) {
         const th = entry.threads.filter(t => typeof t === 'string' && t.trim()).map(norm);
         if (th.length) parts.push('Open: ' + th.join('; '));
@@ -6282,6 +6368,7 @@ function buildCharacterBlock() {
 
     let recentLower = '';
     let recentMsgs = [];
+    const nowTurn = _chatHeadTurn();
     try {
         const { chat } = SillyTavern.getContext();
         const windowSize = Math.max(1, s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
@@ -6299,8 +6386,11 @@ function buildCharacterBlock() {
     // Every storyteller-facing surface asks the same question of the same name.
     const _recOnly = (name) => (s.ledgerMcRecordOnly !== false) && isMcLedgerKey(name);
     const shown = cast.shown;
+    // A stale label is only worth explaining when one is actually printed, and only
+    // for the tiers that assert PRESENCE — the roster already frames itself as the
+    // past ("last seen"), so it needs no disclaimer and must not trigger one.
     const blocks = shown
-        .map(({ name, entry }) => formatLedgerEntry(name, entry, capChars, _recOnly(name)))
+        .map(({ name, entry }) => formatLedgerEntry(name, entry, capChars, _recOnly(name), nowTurn))
         .filter(Boolean);
 
     // Roster: one compact line per character NOT currently on screen (name + the
@@ -6325,9 +6415,15 @@ function buildCharacterBlock() {
         const citems = cast.compact.map(({ name, entry }) => {
             const core = _recOnly(name) ? '' : _clipC(entry && entry.core, 90);
             const state = _clipC(entry && entry.state, 90);
+            // THIS is the line that produced the contradiction: presence is decided
+            // by the attendance sheet (correct), but the state riding along it was
+            // whatever the scribe last wrote — and the tier stamped "now:" on it
+            // regardless of age, so a feast-day snapshot arrived inside a sentence
+            // swearing these people are in the room right now.
+            const aged = _stateAsOf(entry, nowTurn, s);
             let s2 = name;
             if (core) s2 += ' \u2014 ' + core;
-            if (state) s2 += ' | now: ' + state;
+            if (state) s2 += ' | ' + aged.label.toLowerCase() + ': ' + state;
             return s2;
         }).filter(Boolean);
         if (citems.length) compactLine = 'Also present in this scene \u2014 they are here and must not vanish from it; give them presence when the moment touches them: ' + citems.join('; ') + '.';
@@ -6340,7 +6436,7 @@ function buildCharacterBlock() {
     let recalledBlock = '';
     if (cast.recalled && cast.recalled.length) {
         const rcap = Math.max(80, s.ledgerMentionChars ?? defaultSettings.ledgerMentionChars);
-        const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap, _recOnly(name))).filter(Boolean);
+        const rb = cast.recalled.map(({ name, entry }) => formatLedgerEntry(name, entry, rcap, _recOnly(name), nowTurn)).filter(Boolean);
         if (rb.length) recalledBlock = 'Just mentioned, not in the scene \u2014 the story referenced these people; know them fully so the reference lands true, but they are off-screen and do not appear unless the story brings them in:\n' + rb.join('\n');
     }
 
@@ -6368,11 +6464,16 @@ function buildCharacterBlock() {
             // the whole cast instead of a spotlight on six of them — and it invents
             // nothing, which is the only reason it is allowed.
             const state = _clip(entry && entry.state, 90);
-            const asOf = (entry && typeof entry._t === 'number') ? entry._t : null;
-            let s = name;
-            if (core) s += ' \u2014 ' + core;
-            if (state) s += ' | last seen' + (asOf !== null ? ' (turn ' + asOf + ')' : '') + ': ' + state;
-            return s;
+            // "(turn 41)" is a number the storyteller has no frame for — it cannot
+            // know what turn it is NOW, so an absolute stamp said nothing about how
+            // cold the line was. The distance is the part that carries meaning, and
+            // it comes from state's OWN stamp: `_t` moves when arc or threads move,
+            // which dated a fossil whereabouts to a turn it was never observed at.
+            const aged = _stateAsOf(entry, nowTurn, s);
+            let s2 = name;
+            if (core) s2 += ' \u2014 ' + core;
+            if (state) s2 += ' | last seen' + (aged.age !== null ? ' (' + aged.age + ' turns ago)' : '') + ': ' + state;
+            return s2;
         }).filter(Boolean);
         if (items.length > 0) rosterLine = 'Other people in this world, currently off-screen \u2014 the story continues around them. "last seen" is where the story left each one; absent something that moved them, that is still where they are and what they are doing, and time has passed since. Use it to keep the world alive off-screen and to bring anyone back when the moment calls for it, true to who they are: ' + items.join('; ') + '.';
     }
@@ -6383,6 +6484,14 @@ function buildCharacterBlock() {
     if (compactLine) body += (body ? '\n\n' : '') + compactLine;
     if (recalledBlock) body += (body ? '\n\n' : '') + recalledBlock;
     if (rosterLine) body += (body ? '\n\n' : '') + rosterLine;
+    // Paid for only when earned — and "earned" is judged on the text that actually
+    // REACHED the model, not on the intent to write it. Asking the entries instead
+    // charged the note to blocks whose per-character cap had truncated the label
+    // clean off the end of the line: an explanation for something the storyteller
+    // could not see. The roster is excluded on purpose — it frames itself as the
+    // past already ("last seen"), so it needs no disclaimer and must not trigger one.
+    const _onScreenText = blocks.join('\n') + '\n' + compactLine + '\n' + recalledBlock;
+    if (body && _STALE_LABEL_RE.test(_onScreenText)) body += '\n\n' + _STALE_STATE_NOTE;
 
     const tpl = s.ledgerInjectTemplate || '\n\n<characters>\n{{characters}}\n</characters>\n';
     return subst(tpl, '{{characters}}', body);
@@ -7255,8 +7364,9 @@ function registerSlashCommands() {
                     .map(name => ({ name, entry: ledger[name], u: (ledger[name] && ledger[name].updatedAt) || 0 }))
                     .sort((a, b) => b.u - a.u);
                 const lines = ['**Character Ledger**'];
+                const _now = _chatHeadTurn();
                 for (const { name, entry } of entries) {
-                    const line = formatLedgerEntry(name, entry, 100000);
+                    const line = formatLedgerEntry(name, entry, 100000, false, _now);
                     if (line) lines.push('- ' + line);
                 }
                 return lines.join('\n');
@@ -7348,6 +7458,8 @@ function updateUI() {
         $('#sc_ledger_active_window_val').text(s.ledgerActiveWindow ?? defaultSettings.ledgerActiveWindow);
         $('#sc_ledger_max_active').val(s.ledgerMaxActive ?? defaultSettings.ledgerMaxActive);
         $('#sc_ledger_max_active_val').text(s.ledgerMaxActive ?? defaultSettings.ledgerMaxActive);
+        $('#sc_ledger_state_fresh').val(s.ledgerStateFreshTurns ?? defaultSettings.ledgerStateFreshTurns);
+        $('#sc_ledger_state_fresh_val').text(s.ledgerStateFreshTurns ?? defaultSettings.ledgerStateFreshTurns);
         $('#sc_ledger_max_chars').val(s.ledgerMaxCharsPerChar ?? defaultSettings.ledgerMaxCharsPerChar);
         $('#sc_ledger_live').prop('checked', s.ledgerLiveUpdate !== false);
         $('#sc_ledger_live_every').val(s.ledgerLiveEveryTurns ?? defaultSettings.ledgerLiveEveryTurns);
@@ -7576,7 +7688,11 @@ function renderLedger() {
 
         // THE SAME selection the injection uses — not a copy. The panel's contract:
         // describe exactly what the storyteller receives THIS turn, per character.
+        // That contract covers the state LABEL too: a card headed "Now" over a field
+        // the injection has aged to "Last noted 412 turns ago" is the panel lying
+        // about the one thing the user opens it to check.
         const s = getSettings();
+        const _panelNow = _chatHeadTurn();
         let recentLower = '';
         let _panelMsgs = [];
         try {
@@ -7660,7 +7776,7 @@ function renderLedger() {
                     <button class="sc-ledger-del menu_button fa-solid fa-xmark" title="Delete this character from the ledger"></button>
                 </div>
                 ${field('Nature', entry.core)}
-                ${field('Now', entry.state)}
+                ${field(_stateAsOf(entry, _panelNow, s).label, entry.state)}
                 ${threadsHtml}
                 ${field('Arc', entry.arc)}
                 ${_histOpen.has(name) ? _historyHtml(store, name) : ''}
@@ -8965,6 +9081,7 @@ function bindUIEvents() {
         { id: '#sc_max_layers', key: 'maxLayers', display: '#sc_max_layers_val' },
         { id: '#sc_ledger_active_window', key: 'ledgerActiveWindow', display: '#sc_ledger_active_window_val' },
         { id: '#sc_ledger_max_active', key: 'ledgerMaxActive', display: '#sc_ledger_max_active_val' },
+        { id: '#sc_ledger_state_fresh', key: 'ledgerStateFreshTurns', display: '#sc_ledger_state_fresh_val' },
         { id: '#sc_ledger_max_chars', key: 'ledgerMaxCharsPerChar', display: '#sc_ledger_max_chars_val' },
         { id: '#sc_ledger_live_every', key: 'ledgerLiveEveryTurns', display: '#sc_ledger_live_every_val' },
         { id: '#sc_ledger_roster_max', key: 'ledgerRosterMax', display: '#sc_ledger_roster_max_val' },
@@ -10105,6 +10222,7 @@ function bindUIEvents() {
         s.ledgerInjectTemplate = defaultSettings.ledgerInjectTemplate;
         s.ledgerActiveWindow = defaultSettings.ledgerActiveWindow;
         s.ledgerMaxActive = defaultSettings.ledgerMaxActive;
+        s.ledgerStateFreshTurns = defaultSettings.ledgerStateFreshTurns;
         s.ledgerMaxCharsPerChar = defaultSettings.ledgerMaxCharsPerChar;
         s.ledgerContextMaxChars = defaultSettings.ledgerContextMaxChars;
 
