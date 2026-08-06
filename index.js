@@ -18,7 +18,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.115.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.116.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -704,6 +704,9 @@ function getChatStore() {
     }
     // One key space for page and journal. Idempotent, guarded by a stored version.
     _canonicalizeLedgerNotes(chatMetadata[MODULE_NAME]);
+    // …and every state gets the date the journal already holds for it, so the
+    // ageing label works on the chat you are playing tonight, not the next one.
+    _backfillStateStamps(chatMetadata[MODULE_NAME]);
     return chatMetadata[MODULE_NAME];
 }
 
@@ -2887,6 +2890,62 @@ function _canonNotesAgainst(notes, page) {
 }
 
 // Runs once per store, from getChatStore — the single door every path goes through.
+// The journal already knows WHEN each character's state was written — v5.115.0
+// simply never asked it. Without this, an existing chat gets `_st` only on the NEXT
+// state write, and until then falls back to `_t`, which moves for an arc- or
+// threads-only note. A character whose threads were touched five turns ago and
+// whose state is four hundred turns old therefore reads as FRESH, and the fossil
+// ships as the present moment exactly as it did before the fix — the repair would
+// have reached the chat that needed it last, if at all. This is exact, not a
+// guess: the newest note carrying `state` is that state's turn, by construction.
+// Where the journal has been compacted the base note's turn is used, which can only
+// UNDER-report the age, so the migration never invents staleness it cannot prove.
+const _STATE_STAMP_V = 1;
+
+function _backfillStateStamps(store) {
+    if (!store || (store.ledgerStateStampV | 0) >= _STATE_STAMP_V) return 0;
+    let n = 0;
+    try {
+        // Same rule the key-space migration follows: an unmaterialized page is not
+        // an answer, it is an absence of one. Stamping the version on a store whose
+        // ledger simply had not loaded yet would burn the one shot forever.
+        const notes = Array.isArray(store.ledgerNotes) ? store.ledgerNotes : [];
+        const page = (store.ledger && typeof store.ledger === 'object') ? store.ledger : {};
+        if (notes.length > 0 && Object.keys(page).length === 0) return 0;
+        n += _stampStatesFrom(notes, page);
+        n += _stampStatesFrom(store.ledgerStagingNotes, store.ledgerStaging);
+    } catch (e) { log('ledger state-stamp backfill failed (non-fatal):', e); return 0; }
+    store.ledgerStateStampV = _STATE_STAMP_V;
+    if (n) log(`Ledger: dated ${n} character state(s) from the journal — a snapshot nobody has refreshed is now labelled with its age instead of asserted as the present moment.`);
+    return n;
+}
+
+// Pure: give every page entry that lacks one the turn of its newest STATE note.
+// Only ever FILLS a missing stamp — a stamp already written by the merge or a fold
+// is first-hand and outranks anything reconstructed here.
+function _stampStatesFrom(notes, page) {
+    if (!Array.isArray(notes) || !page || typeof page !== 'object') return 0;
+    const newest = new Map();
+    for (const nt of notes) {
+        if (!nt || typeof nt.state !== 'string') continue;
+        if (typeof nt.t !== 'number' || !isFinite(nt.t)) continue;
+        if (typeof nt.name !== 'string' || !nt.name.trim()) continue;
+        const k = nt.name.trim();
+        const cur = newest.get(k);
+        if (cur === undefined || nt.t > cur) newest.set(k, nt.t);
+    }
+    let n = 0;
+    for (const [key, e] of Object.entries(page)) {
+        if (!e || typeof e !== 'object') continue;
+        if (typeof e._st === 'number' && isFinite(e._st)) continue;
+        const t = newest.get(key);
+        if (typeof t !== 'number') continue;
+        e._st = t;
+        n++;
+    }
+    return n;
+}
+
 function _canonicalizeLedgerNotes(store) {
     if (!store || (store.ledgerNotesCanon | 0) >= _NOTES_CANON_V) return 0;
     let n = 0;
