@@ -22,7 +22,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.117.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.118.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -86,6 +86,16 @@ const defaultSettings = Object.freeze({
         `Role: you correct a single memory-snippet to remove a continuity error. You get the current SNIPPET and a CORRECTION (the established truth). Rewrite the snippet so it is fully consistent with the correction, changing ONLY what the correction requires and preserving everything else — length, tone, and all other facts. Do not add commentary or new events. Output ONLY the corrected snippet text — no preamble, no quotes, no labels. If the snippet already matches the correction, output it unchanged.`,
     continuityFixUserPrompt:
         `<snippet>{{snippet}}</snippet>\n<correction>{{story_txt}}</correction>\n<record>{{context_str}}</record>\n\nRewrite <snippet> so it is consistent with <correction>, changing only what is needed and keeping everything else intact. Output only the corrected snippet text.`,
+    // ── Source-level repair: the auditor's "the MESSAGE is wrong" findings are fixed
+    //    in-extension by surgically editing the offending story message(s), then
+    //    re-deriving the snippet from the corrected passage so memory stops narrating
+    //    the contradiction. No external copilot involved. ──
+    continuityAutoFixMessages: true, // ON: source-level findings are repaired automatically as they're found — the message is edited, the snippet re-derived from the corrected passage, and the flag cleared only when a fresh audit agrees. Player-authored turns are NEVER edited. Every edit keeps a before/after backup for Undo.
+    continuityMsgFixMaxEdits: 3,    // a fix needing more messages than this is a rewrite, not a repair — refused (the flag stays open for review)
+    continuityMsgFixSystemPrompt:
+        `Role: surgical continuity editor for an ongoing collaborative fiction. You receive the established RECORD, one CONTRADICTION with its correction, and the offending PASSAGE as index-tagged messages. Your ONLY job is to make the passage agree with the record by editing the FEWEST messages possible, and changing each as LITTLE as possible: preserve the author's voice, formatting, length, dialogue and every unrelated event exactly — you are removing one contradiction, not rewriting the scene. HARD RULES: (1) NEVER edit a (PLAYER) message — the player's turns are not yours to touch; if the contradiction lives only there, output []. (2) An edit's "text" is the COMPLETE new text of that message — everything the message should say afterwards, not a diff and not a fragment. (3) Never invent new canon, never add events the correction does not require, never delete content unrelated to the contradiction. (4) If no safe minimal edit exists, output exactly: []. Output ONLY a JSON array of edits, no preamble, no markdown: [{"index":<message index number>,"text":"<complete corrected message text>"}]`,
+    continuityMsgFixUserPrompt:
+        `<player_name>{{player_name}}</player_name>\n<record>{{context_str}}</record>\n<contradiction>{{snippet}}</contradiction>\n<passage>\n{{story_txt}}\n</passage>\n\n<passage> is the story as written, one message per block, each prefixed with its [index] and author. <record> is established canon. <contradiction> names what in the passage contradicts the record and how it should read instead.\n\nEdit the fewest (STORY/assistant-named) messages by the smallest amount so the passage no longer contradicts the record. Keep each edited message's style, length, formatting, and all unrelated content. Never edit a (PLAYER) message. If a message's text is embedded in another message's quote, edit the ORIGINAL, not the quote. If no safe minimal edit exists, output [].\n\nOutput ONLY the JSON array: [{"index":<number>,"text":"<complete corrected message text>"}]`,
     // ── Promotion shrink guard ──
     // Promotion is the one IRREVERSIBLE operation in the memory system: N snippets
     // are spliced out of a layer and replaced by a single meta-summary. A thin
@@ -696,6 +706,9 @@ function getChatStore() {
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityFlags)) chatMetadata[MODULE_NAME].continuityFlags = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityDismissed)) chatMetadata[MODULE_NAME].continuityDismissed = [];
     if (!Array.isArray(chatMetadata[MODULE_NAME].continuityResolved)) chatMetadata[MODULE_NAME].continuityResolved = [];
+    // Source-message repair backups: every message a continuity fix overwrote, with
+    // before/after, so "Undo" can put the original text back. Bounded — oldest drops off.
+    if (!Array.isArray(chatMetadata[MODULE_NAME].continuityMsgFixes)) chatMetadata[MODULE_NAME].continuityMsgFixes = [];
     // FIELD REPAIR. A chat whose summarizedUpTo was destroyed by the pre-v5.102.0
     // delete handler has no such key at all now — JSON.stringify drops undefined —
     // and every guard downstream tests `typeof === 'number'`, so the damage is
@@ -4818,6 +4831,20 @@ async function processContinuityQueue() {
                         } else {
                             toastr.warning(`Continuity: ${added} issue${added === 1 ? '' : 's'} flagged for review.`, 'Summaryception', { timeOut: 5000 });
                         }
+                        // Source-level findings: the message itself is repaired here too —
+                        // no external copilot. Each flag is attempted ONCE (msgFixTried);
+                        // a refusal leaves it open for review instead of looping.
+                        if (getSettings().continuityAutoFixMessages) {
+                            const tr = job.snip.turnRange;
+                            const srcFlags = (getChatStore().continuityFlags || []).filter(f => f && f.status === 'open' && f.where !== 'snippet' && !f.msgFixTried && Array.isArray(f.turnRange) && tr && f.turnRange[0] === tr[0] && f.turnRange[1] === tr[1]);
+                            for (const f of srcFlags) {
+                                try {
+                                    const r = await applyMessageFix(f.id, { auto: true });
+                                    if (r.ok) toastr.info(`Continuity: repaired the story message itself (${r.edited} edit${r.edited === 1 ? '' : 's'}) — re-checking; Undo lives in the resolved list.`, 'Summaryception', { timeOut: 6000 });
+                                    else log('Continuity auto message-fix declined:', r.reason);
+                                } catch (e) { log('Continuity auto message-fix failed (non-fatal):', e); }
+                            }
+                        }
                     }
                 } else {
                     log('Continuity (background): snippet consistent — no flags.');
@@ -4846,7 +4873,8 @@ async function backfillContinuityForLayer0() {
     if (targets.length === 0) { toastr.info('No snippets to check yet.', 'Summaryception', { timeOut: 4000 }); return; }
     if (!confirm(
         `Check continuity across ${targets.length} snippet(s)?\n\n` +
-        `Runs one check per snippet (~${targets.length} background LLM calls), comparing each to its source passage and the established record. Any problems land in the Continuity list — nothing is changed automatically. You can stop anytime; progress is kept.`
+        `Runs one check per snippet (~${targets.length} background LLM calls), comparing each to its source passage and the established record. Problems land in the Continuity list.` +
+        `${getSettings().continuityAutoFix || getSettings().continuityAutoFixMessages ? ' With auto-fix on, snippet-level fixes are applied, and source-level ones repair the offending story message (player turns are never touched; every message edit keeps an Undo backup).' : ' Nothing is changed automatically.'} You can stop anytime; progress is kept.`
     )) return;
 
     const { chat } = SillyTavern.getContext();
@@ -4871,6 +4899,10 @@ async function backfillContinuityForLayer0() {
                 if (getSettings().continuityAutoFix && sn.turnRange) {
                     const mine = (store.continuityFlags || []).filter(f => f && f.status === 'open' && f.where === 'snippet' && Array.isArray(f.turnRange) && f.turnRange[0] === sn.turnRange[0] && f.turnRange[1] === sn.turnRange[1]);
                     for (const f of mine) { try { await applyContinuityFix(f.id); } catch (_) {} }
+                }
+                if (getSettings().continuityAutoFixMessages && sn.turnRange) {
+                    const srcFlags = (store.continuityFlags || []).filter(f => f && f.status === 'open' && f.where !== 'snippet' && !f.msgFixTried && Array.isArray(f.turnRange) && f.turnRange[0] === sn.turnRange[0] && f.turnRange[1] === sn.turnRange[1]);
+                    for (const f of srcFlags) { try { await applyMessageFix(f.id, { auto: true }); } catch (e) { log('Continuity backfill: message fix failed (non-fatal):', e); } }
                 }
                 consec = 0;
             } catch (e) {
@@ -5013,17 +5045,17 @@ async function applyContinuityFix(id) {
 }
 
 // Apply every open flag's fix, OLDEST -> NEWEST, so each correction lands before the
-// snippets that follow it are touched (no cascading errors).
+// snippets that follow it are touched (no cascading errors). Source-level flags are
+// repaired at the message (applyMessageFix), snippet-level at the snippet.
 async function applyAllContinuityFixes() {
     const store = getChatStore();
     const allOpen = (store.continuityFlags || []).filter(f => f && f.status === 'open' && f.fix);
-    const open = allOpen.filter(f => f.where === 'snippet').slice();
-    const sourceCount = allOpen.length - open.length;
+    const open = allOpen.slice();
     open.sort((a, b) => ((a.turnRange && a.turnRange[0]) || 0) - ((b.turnRange && b.turnRange[0]) || 0));
-    if (open.length === 0) { toastr.info(`No snippet-level fixes to apply${sourceCount ? ` — ${sourceCount} source-level flag(s) need the copilot (message edits).` : '.'}`, 'Summaryception', { timeOut: 4500 }); return; }
+    if (open.length === 0) { toastr.info('No open continuity fixes to apply.', 'Summaryception', { timeOut: 4000 }); return; }
     if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
     const startEpoch = _chatEpoch;
-    let done = 0, applied = 0, cancelled = false;
+    let done = 0, applied = 0, msgApplied = 0, cancelled = false;
     const toast = toastr.info(`Applying continuity fixes: 0 / ${open.length}`, 'Summaryception Continuity', {
         timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, closeButton: true,
         onCloseClick: () => { cancelled = true; abortSummarization(); },
@@ -5032,18 +5064,362 @@ async function applyAllContinuityFixes() {
     try {
         for (const flag of open) {
             if (cancelled || _chatEpoch !== startEpoch) break;
-            try { if (await applyContinuityFix(flag.id)) applied++; } catch (e) { log('applyAll: one fix failed:', e); }
+            // applyMessageFix re-emits MESSAGE_EDITED mid-run, which re-checks and may
+            // CLEAR later flags sharing the range — re-validate each flag is still open
+            // before spending a call on it.
+            const live = (getChatStore().continuityFlags || []).find(f => f && f.id === flag.id && f.status === 'open');
+            if (!live) { done++; continue; }
+            try {
+                if (live.where === 'snippet') {
+                    if (await applyContinuityFix(live.id)) applied++;
+                } else {
+                    const r = await applyMessageFix(live.id);
+                    if (r.ok) msgApplied++;
+                }
+            } catch (e) { log('applyAll: one fix failed:', e); }
             done++;
-            $(toast).find('.toast-message').text(`Applying continuity fixes: ${done} / ${open.length} | ${applied} applied\nClick ✕ to stop`);
+            $(toast).find('.toast-message').text(`Applying continuity fixes: ${done} / ${open.length} | ${applied + msgApplied} applied\nClick ✕ to stop`);
         }
     } finally { _releaseSummarize(); }
     toastr.clear(toast);
     if (_chatEpoch === startEpoch) {
         updateInjection(true);
-        toastr.success(`Applied ${applied} snippet-level fix${applied === 1 ? '' : 'es'} (oldest → newest)${sourceCount ? `; ${sourceCount} source-level flag(s) left for the copilot.` : '.'}`, 'Summaryception', { timeOut: 5500 });
+        const parts = [];
+        if (applied) parts.push(`${applied} snippet-level`);
+        if (msgApplied) parts.push(`${msgApplied} source message${msgApplied === 1 ? '' : 's'} repaired (Undo in the resolved list)`);
+        toastr.success(parts.length ? `Applied ${parts.join(' + ')} (oldest → newest).` : 'No fixes could be applied — the flags stay open for review.', 'Summaryception', { timeOut: 6000 });
     } else {
         toastr.warning('Chat changed — stopped applying fixes; progress kept.', 'Summaryception', { timeOut: 5000 });
     }
+}
+
+// ─── Source-level repair: fix the MESSAGE, then heal the memory ────────────
+//
+// The auditor's `where: 'source'` finding means the story text itself contradicts
+// the record and the snippet only faithfully repeated it. Until now this was a dead
+// end: a disabled "Copilot / message" button, and the actual repair outsourced to a
+// hand edit or an external tool. That gap is the bug — the extension that detected
+// the contradiction is the one holding every piece needed to repair it (the record,
+// the passage, the message array, and the summarizer connection), so the repair
+// lives HERE:
+//
+//   1. callMessageFixer  — an LLM surgical edit: the fewest messages, the smallest
+//      change each, player turns untouchable, complete corrected texts only.
+//   2. _validateMessageEdits + _fixVerdict — no edit outside the flagged range, no
+//      gutting rewrites, no more than continuityMsgFixMaxEdits messages.
+//   3. Backup BEFORE overwrite (store.continuityMsgFixes) — an auto edit with no
+//      undo path is how trust dies.
+//   4. Re-derive the Layer-0 snippet from the CORRECTED passage, or memory keeps
+//      narrating the contradiction the message no longer contains.
+//   5. THEN emit MESSAGE_EDITED — the existing machinery (ledger rewind, debounced
+//      continuity recheck) runs against the already-healed snippet, and the flag is
+//      cleared by reconcile only when a fresh audit agrees the contradiction is gone.
+
+// Parse the fixer's reply into raw edit candidates. Junk in → [] out; an empty
+// "correction" is a message deletion, never a fix, so it is refused here.
+function normalizeMessageFixOutput(raw) {
+    let t = (raw || '').trim();
+    if (!t) return [];
+    t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    if (/^\[\s*\]$/.test(t)) return [];
+    let arr = null;
+    try { arr = JSON.parse(t); } catch (_) {
+        const m = t.match(/\[[\s\S]*\]/);
+        if (m) { try { arr = JSON.parse(m[0]); } catch (_) {} }
+    }
+    if (arr && !Array.isArray(arr) && typeof arr === 'object') arr = [arr];
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (const it of arr) {
+        if (!it || typeof it !== 'object') continue;
+        const index = Number(it.index);
+        const text = typeof it.text === 'string' ? it.text : '';
+        if (!Number.isInteger(index) || index < 0) continue;
+        if (!text.trim()) continue;
+        out.push({ index, text });
+    }
+    return out;
+}
+
+// The law around an edit, pure and total: inside the flagged range, the message
+// exists, it is NOT the player's turn, one edit per message (first write wins),
+// no no-op rewrites, and never more messages than the cap — a fix that needs five
+// messages is a rewrite wearing a repair's clothes. Returns the surviving edits
+// plus why the rest were dropped, so the caller can log an honest reason.
+function _validateMessageEdits(edits, turnRange, chat, maxEdits) {
+    const zero = { ok: false, edits: [], droppedUser: 0, droppedRange: 0, droppedNoop: 0 };
+    if (!Array.isArray(turnRange)) return { ...zero, reason: 'the flag has no turn range' };
+    const a = turnRange[0], b = turnRange[1];
+    let droppedUser = 0, droppedRange = 0, droppedNoop = 0;
+    const out = [];
+    const seen = new Set();
+    for (const e of (Array.isArray(edits) ? edits : [])) {
+        if (!e || !Number.isInteger(e.index) || e.index < a || e.index > b) { droppedRange++; continue; }
+        const msg = chat && chat[e.index];
+        if (!msg || typeof msg.mes !== 'string') { droppedRange++; continue; }
+        if (msg.is_user === true) { droppedUser++; continue; }   // the player's turns are never auto-edited
+        if (seen.has(e.index)) continue;
+        seen.add(e.index);
+        if (e.text.trim() === msg.mes.trim()) { droppedNoop++; continue; }
+        out.push({ index: e.index, text: e.text });
+    }
+    const cap = (typeof maxEdits === 'number' && maxEdits > 0) ? Math.floor(maxEdits) : 3;
+    if (out.length > cap) return { ok: false, edits: [], droppedUser, droppedRange, droppedNoop, reason: `needs ${out.length} message edits (cap ${cap}) — that is a rewrite, not a repair` };
+    if (out.length === 0) {
+        const reason = droppedUser > 0
+            ? 'the contradiction lives in the PLAYER\u2019s turn — never auto-edited; fix it by hand or dismiss'
+            : droppedRange > 0
+                ? 'every proposed edit pointed outside the flagged range'
+                : droppedNoop > 0
+                    ? 'every proposed edit already matches the current text'
+                    : 'the fixer proposed no edits';
+        return { ok: false, edits: [], droppedUser, droppedRange, droppedNoop, reason };
+    }
+    return { ok: true, edits: out, droppedUser, droppedRange, droppedNoop };
+}
+
+// The passage as the fixer must see it: RAW message text with [index] tags. NOT
+// stripMetaBlocks — the model returns each message's COMPLETE corrected text, which
+// replaces `mes` wholesale; a stripped view would make the edit silently delete
+// machine-note blocks it never saw.
+function _indexedPassageForFix(chat, a, b) {
+    const lines = [];
+    for (let i = a; i <= b && i < (chat ? chat.length : 0); i++) {
+        const m = chat[i];
+        if (!m || typeof m.mes !== 'string' || !m.mes.trim()) continue;
+        const who = m.is_user ? 'PLAYER' : (String(m.name || '').trim() || 'STORY');
+        lines.push(`[${i}] (${who}) ${m.mes.trim()}`);
+    }
+    return lines.join('\n\n');
+}
+
+async function callMessageFixer(flag, chat) {
+    const s = getSettings();
+    const passage = _indexedPassageForFix(chat, flag.turnRange[0], flag.turnRange[1]);
+    if (!passage.trim()) return [];
+    const issueBlock = `ISSUE: ${flag.issue || '(unspecified)'}\nREQUIRED CORRECTION: ${flag.fix}`;
+    const raw = await callSummarizer(passage, buildContinuityRecord(), {
+        systemPrompt: s.continuityMsgFixSystemPrompt,
+        userPrompt: s.continuityMsgFixUserPrompt,
+        snippet: issueBlock,   // the {{snippet}} slot carries ISSUE + CORRECTION
+        quiet: true,
+    });
+    return normalizeMessageFixOutput(raw);
+}
+
+// Regenerate ONE snippet from its (possibly just-corrected) source passage — the
+// exact core of the snippet-browser redo button, shared so the message fixer heals
+// the record with the SAME code the user drives by hand. Returns '' on failure.
+async function _rederiveSnippetText(sn) {
+    if (!sn || !Array.isArray(sn.turnRange)) return '';
+    const store = getChatStore();
+    const { chat } = SillyTavern.getContext();
+    const storyTxt = buildPassageFromRange(chat, sn.turnRange[0], sn.turnRange[1]);
+    if (!storyTxt.trim()) return '';
+    const contextParts = [];
+    for (let i = store.layers.length - 1; i >= 0; i--) {
+        const l = store.layers[i];
+        if (!l) continue;
+        for (const other of l) { if (other === sn) continue; contextParts.push(other.text); }   // skip self by identity
+    }
+    const contextStr = contextParts.length > 0 ? contextParts.join(' ') : '(none yet)';
+    return await callSummarizer(storyTxt, contextStr);
+}
+
+/**
+ * Repair a source-level continuity flag by editing the offending story message(s)
+ * in place. Returns { ok, reason, edited } — never throws upward.
+ *
+ * The flag itself is deliberately NOT removed here: the MESSAGE_EDITED emit at the
+ * end drives the debounced recheck, which clears the flag via reconcile ONLY when a
+ * fresh audit confirms the contradiction is actually gone. A fix that didn't take
+ * leaves the flag open (with msgFixTried set, so the autonomous path never loops).
+ */
+async function applyMessageFix(idOrFlag, { auto = false } = {}) {
+    const store = getChatStore();
+    const list = store.continuityFlags || [];
+    const flag = (idOrFlag && typeof idOrFlag === 'object') ? idOrFlag : list.find(f => f && f.id === idOrFlag);
+    if (!flag || !flag.fix) return { ok: false, reason: 'flag not found or has no fix' };
+    if (flag.where === 'snippet') return { ok: false, reason: 'snippet-level — that is what Apply does' };
+    if (!Array.isArray(flag.turnRange)) return { ok: false, reason: 'flag has no turn range' };
+
+    const s = getSettings();
+    const ctx = SillyTavern.getContext();
+    const chat = ctx.chat;
+    if (!Array.isArray(chat) || chat.length === 0) return { ok: false, reason: 'no chat loaded' };
+
+    // Mark BEFORE the call: a crash or refusal must never become an auto-retry loop.
+    if (auto && !flag.msgFixTried) { flag.msgFixTried = true; try { await saveChatStore(); } catch (_) {} }
+
+    // Snapshot the range as the fixer will see it — the apply step may touch only
+    // messages that still read exactly like this.
+    const beforeSnap = new Map();
+    for (let i = flag.turnRange[0]; i <= flag.turnRange[1] && i < chat.length; i++) {
+        if (chat[i] && typeof chat[i].mes === 'string') beforeSnap.set(i, chat[i].mes);
+    }
+
+    const startEpoch = _chatEpoch;
+    let edits;
+    try {
+        const proposed = await callMessageFixer(flag, chat);
+        if (_chatEpoch !== startEpoch) return { ok: false, reason: 'chat switched mid-fix — result discarded' };
+        const v = _validateMessageEdits(proposed, flag.turnRange, chat, s.continuityMsgFixMaxEdits);
+        if (!v.ok) { log(`applyMessageFix: refused — ${v.reason}.`); return { ok: false, reason: v.reason, droppedUser: v.droppedUser }; }
+        for (const e of v.edits) {
+            const before = beforeSnap.get(e.index);
+            if (typeof before !== 'string' || !chat[e.index] || chat[e.index].mes !== before) {
+                return { ok: false, reason: `message ${e.index} changed while the fix was computed — discarded, flag stays open` };
+            }
+            // A surgical repair keeps nearly all of the message; a gist/refusal/truncated
+            // fragment replacing it is refused by the SAME verdict that guards snippets.
+            const verdict = _fixVerdict(before.length, e.text.length, s);
+            if (!verdict.ok) {
+                log(`applyMessageFix: edit to message ${e.index} kept only ${(verdict.ratio * 100).toFixed(0)}% of it (${verdict.reason}) — refused.`);
+                return { ok: false, reason: `the rewrite of message ${e.index} kept only ${(verdict.ratio * 100).toFixed(0)}% of the text — refused, message untouched` };
+            }
+        }
+        edits = v.edits;
+    } catch (e) {
+        log('applyMessageFix: fixer call failed (non-fatal):', e);
+        return { ok: false, reason: String((e && e.message) || e) };
+    }
+
+    // Backup BEFORE the overwrite.
+    const backupId = 'mf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
+    const backup = {
+        id: backupId,
+        at: Date.now(),
+        issue: flag.issue || '',
+        fix: flag.fix || '',
+        kind: flag.kind || 'continuity',
+        turnRange: [flag.turnRange[0], flag.turnRange[1]],
+        edits: edits.map(e => ({ index: e.index, before: beforeSnap.get(e.index), after: e.text })),
+        snippet: null,   // filled if the covering snippet is re-derived below
+    };
+
+    for (const e of edits) chat[e.index].mes = e.text;
+    try { if (typeof ctx.updateMessageBlock === 'function') { for (const e of edits) ctx.updateMessageBlock(e.index, chat[e.index]); } } catch (_) {}
+    try { if (ctx.saveChat) await ctx.saveChat(); } catch (e) { log('applyMessageFix: chat save issue:', e); }
+
+    // Heal the record: re-derive the Layer-0 snippet that narrates this range from
+    // the CORRECTED passage. Without this, memory would keep asserting the very
+    // contradiction the message no longer contains. (Promoted meta-summaries have no
+    // source range of their own to re-derive from; the recheck still reconciles the
+    // flag, and the next promotion/rebuild carries the corrected text forward.)
+    const found = _findSnippetByTurnRange(store, flag.turnRange);
+    const isLayer0 = !!(found && store.layers && store.layers[0] && store.layers[0].includes(found.snippet));
+    if (isLayer0) {
+        const sn = found.snippet;
+        const snBefore = sn.text;
+        try {
+            const fresh = await _rederiveSnippetText(sn);
+            if (_chatEpoch !== startEpoch) return { ok: false, reason: 'chat switched during snippet re-derivation — message edit kept, snippet untouched' };
+            const still = _findSnippetByTurnRange(getChatStore(), flag.turnRange);
+            if (fresh && still && still.snippet === sn && sn.text === snBefore && fresh !== snBefore) {
+                sn.text = fresh;
+                sn.timestamp = Date.now();
+                sn.regenerated = true;
+                backup.snippet = { before: snBefore, after: fresh };
+            }
+        } catch (e) { log('applyMessageFix: snippet re-derivation failed (message edit kept):', e); }
+    }
+
+    // Persist the backup (bounded) and log the resolution WITH its undo handle.
+    if (!Array.isArray(store.continuityMsgFixes)) store.continuityMsgFixes = [];
+    store.continuityMsgFixes.push(backup);
+    if (store.continuityMsgFixes.length > 10) store.continuityMsgFixes = store.continuityMsgFixes.slice(-10);
+    if (!Array.isArray(store.continuityResolved)) store.continuityResolved = [];
+    store.continuityResolved.unshift({ issue: flag.issue, fix: flag.fix, kind: flag.kind, where: 'source', turnRange: [flag.turnRange[0], flag.turnRange[1]], applied: true, msgFix: true, backupId, resolvedAt: Date.now() });
+    store.continuityResolved = store.continuityResolved.slice(0, 20);
+    await saveChatStore();
+    updateInjection(true);
+    try { renderLedger(); } catch (_) {}
+
+    // NOW tell the world. Ledger rewind + the debounced continuity recheck listen to
+    // MESSAGE_EDITED — emitting after the snippet heal means the recheck audits the
+    // corrected passage against the corrected memory, never against the stale snippet.
+    try {
+        const { eventSource, event_types } = SillyTavern.getContext();
+        if (eventSource && event_types && event_types.MESSAGE_EDITED) {
+            for (const e of edits) { try { await eventSource.emit(event_types.MESSAGE_EDITED, e.index); } catch (_) {} }
+        }
+    } catch (_) {}
+
+    // No snippet covers this range anymore (deleted while we worked): nothing will
+    // reconcile the flag, so close it here rather than leave a ghost open.
+    if (!_findSnippetByTurnRange(getChatStore(), flag.turnRange)) {
+        const li = (getChatStore().continuityFlags || []).findIndex(f => f && f.id === flag.id);
+        if (li >= 0) getChatStore().continuityFlags.splice(li, 1);
+        try { await saveChatStore(); updateInjection(); } catch (_) {}
+    }
+
+    log(`Continuity: source repair applied — ${edits.length} message(s) edited [${edits.map(e => e.index).join(', ')}], backup ${backupId}${backup.snippet ? ', snippet re-derived' : ''}.`);
+    return { ok: true, edited: edits.length, backupId };
+}
+
+/**
+ * Undo a source repair: restore each message's original text — but never blindly.
+ * A message that no longer reads as the fix left it (user edit, swipe, another fix)
+ * keeps its newer truth and the undo refuses. The snippet is restored the same way.
+ * The restored contradiction is re-raised as an open flag via mergeContinuityFlags
+ * (a dismissal is still respected), and the MESSAGE_EDITED emit lets the recheck
+ * heal the snippet text if it has drifted from the restored source since.
+ */
+async function undoMessageFix(backupId) {
+    const store = getChatStore();
+    const arr = Array.isArray(store.continuityMsgFixes) ? store.continuityMsgFixes : [];
+    const bi = arr.findIndex(b => b && b.id === backupId);
+    if (bi < 0) { toastr.error('That backup is no longer available (only the last 10 message fixes are kept).', 'Summaryception'); return false; }
+    const backup = arr[bi];
+    const ctx = SillyTavern.getContext();
+    const chat = ctx.chat;
+    if (!Array.isArray(chat)) return false;
+
+    for (const e of (backup.edits || [])) {
+        const m = chat[e.index];
+        if (!m || typeof m.mes !== 'string') { toastr.error(`Message ${e.index} no longer exists — undo refused.`, 'Summaryception'); return false; }
+        if (m.mes !== e.after) {
+            toastr.warning(`Message ${e.index} changed since this fix (edit or swipe) — undo refused so newer text is not destroyed. If it still needs correcting, edit by hand.`, 'Summaryception', { timeOut: 7000 });
+            return false;
+        }
+    }
+
+    for (const e of backup.edits) {
+        chat[e.index].mes = e.before;
+        try { if (typeof ctx.updateMessageBlock === 'function') ctx.updateMessageBlock(e.index, chat[e.index]); } catch (_) {}
+    }
+    try { if (ctx.saveChat) await ctx.saveChat(); } catch (e) { log('undoMessageFix: chat save issue:', e); }
+
+    // Restore the re-derived snippet too, under the same never-destroy-newer-truth law.
+    if (backup.snippet && Array.isArray(backup.turnRange)) {
+        const found = _findSnippetByTurnRange(store, backup.turnRange);
+        if (found && found.snippet && found.snippet.text === backup.snippet.after) {
+            found.snippet.text = backup.snippet.before;
+        }
+    }
+
+    arr.splice(bi, 1);
+    // Take the "fixed" line off the resolved log and re-raise the finding.
+    if (Array.isArray(store.continuityResolved)) {
+        const ri = store.continuityResolved.findIndex(r => r && r.backupId === backupId);
+        if (ri >= 0) store.continuityResolved.splice(ri, 1);
+    }
+    if (backup.issue || backup.fix) {
+        mergeContinuityFlags(store, backup.turnRange || null, [{ issue: backup.issue, fix: backup.fix, kind: backup.kind || 'continuity', where: 'source' }]);
+    }
+
+    try {
+        const { eventSource, event_types } = SillyTavern.getContext();
+        if (eventSource && event_types && event_types.MESSAGE_EDITED) {
+            for (const e of backup.edits) { try { await eventSource.emit(event_types.MESSAGE_EDITED, e.index); } catch (_) {} }
+        }
+    } catch (_) {}
+
+    await saveChatStore();
+    updateInjection(true);
+    try { renderLedger(); } catch (_) {}
+    log(`Continuity: source repair ${backupId} undone — original message text restored.`);
+    return true;
 }
 
 // Which snippets' source ranges cover a given message index. Pure.
@@ -7513,6 +7889,7 @@ function updateUI() {
         $('#sc_ledger_enabled').prop('checked', s.ledgerEnabled !== false);
         $('#sc_continuity_enabled').prop('checked', s.continuityEnabled === true);
         $('#sc_continuity_autofix').prop('checked', s.continuityAutoFix === true);
+        $('#sc_continuity_autofix_messages').prop('checked', s.continuityAutoFixMessages === true);
         $('#sc_continuity_nudge').prop('checked', s.continuityNudge === true);
         $('#sc_continuity_nudge_max').val(s.continuityNudgeMax ?? defaultSettings.continuityNudgeMax);
         $('#sc_continuity_nudge_max_val').text(s.continuityNudgeMax ?? defaultSettings.continuityNudgeMax);
@@ -7662,7 +8039,13 @@ let _ledgerOrder = [];
 
 function _resolvedLogHtml(resolved) {
     if (!resolved || resolved.length === 0) return '';
-    const items = resolved.slice(0, 8).map(r => `<li>${escapeHtml((r.applied ? '✔ fixed: ' : '✔ resolved: ') + (r.fix || r.issue || ''))}</li>`).join('');
+    const items = resolved.slice(0, 8).map(r => {
+        const label = escapeHtml((r.applied ? (r.msgFix ? '✔ fixed at source: ' : '✔ fixed: ') : '✔ resolved: ') + (r.fix || r.issue || ''));
+        const undo = r.backupId
+            ? ` <button class="menu_button sc-cf-undo" data-backup="${escapeHtml(String(r.backupId))}" title="Restore the original message text (refuses if a message changed since — newer text is never destroyed)"><i class="fa-solid fa-rotate-left"></i> Undo</button>`
+            : '';
+        return `<li>${label}${undo}</li>`;
+    }).join('');
     return `<details class="sc-cf-resolved"><summary class="sc-muted">Recently resolved (${resolved.length})</summary><ul>${items}</ul></details>`;
 }
 
@@ -7696,11 +8079,14 @@ function renderContinuity() {
                 : (_retired
                     ? `<span class="sc-muted" title="Delivered ${_n} times without being resolved, so it no longer occupies an injection slot — new findings get through instead. Still listed here, and Apply still works.">retired from injection after ${_n} deliveries</span>`
                     : `<span class="sc-muted">delivered ${_n}${_dl > 0 ? '/' + _dl : ''}</span>`);
+            const tried = !isSnippet && f.msgFixTried
+                ? '<span class="sc-muted" title="The automatic repair already ran on this finding and was refused or only partially fixed it — review by hand, or press Fix message to try again.">auto-fix tried</span>'
+                : '';
             const applyBtn = isSnippet
                 ? `<button class="menu_button sc-cf-apply" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-wand-magic-sparkles"></i> Apply</button>`
-                : `<button class="menu_button sc-cf-copilot" title="The source message is wrong — fix it via the copilot or manually; auto-fix never edits messages" disabled><i class="fa-solid fa-robot"></i> Copilot / message</button>`;
+                : `<button class="menu_button sc-cf-fixmsg" data-id="${escapeHtml(String(f.id))}" title="Repair the source message itself: a surgical edit aligns it with the record (player turns are never edited), the snippet is re-derived from the corrected passage, and a backup is kept for Undo."><i class="fa-solid fa-hammer"></i> Fix message</button>`;
             html += `<div class="sc-cf-card">`
-                + `<div class="sc-cf-head">${badge}<span class="sc-cf-turns">${tr}</span> ${deliv}</div>`
+                + `<div class="sc-cf-head">${badge}<span class="sc-cf-turns">${tr}</span> ${deliv} ${tried}</div>`
                 + `<div class="sc-cf-issue">${escapeHtml(f.issue || '')}</div>`
                 + `<div class="sc-cf-fix"><span class="sc-cf-fixlabel">Fix:</span> ${escapeHtml(f.fix || '')}</div>`
                 + `<div class="sc-cf-actions">${applyBtn}<button class="menu_button sc-cf-dismiss" data-id="${escapeHtml(String(f.id))}"><i class="fa-solid fa-xmark"></i> Dismiss</button></div>`
@@ -8029,10 +8415,9 @@ function updateSnippetBrowser() {
     $('.sc-snippet-redo').off('click').on('click', async function () {
         const layerIdx = parseInt($(this).closest('.sc-snippet').data('layer'));
         let snippetIdx = parseInt($(this).closest('.sc-snippet').data('idx'));
-        const store = getChatStore();
         const _row = _resolveSnipRow(layerIdx, snippetIdx, $(this).closest('.sc-snippet').data('sig'));
         if (!_row) { _snipRowGone(); return; }
-        const layer = _row.arr; snippetIdx = _row.idx;
+        snippetIdx = _row.idx;
 
         const sn = _row.sn;
 
@@ -8051,7 +8436,6 @@ function updateSnippetBrowser() {
         }
 
         const [rangeStart, rangeEnd] = sn.turnRange;
-        const { chat } = SillyTavern.getContext();
 
         if (!confirm(`Regenerate summary for turns ${rangeStart}–${rangeEnd}?`)) return;
 
@@ -8061,35 +8445,19 @@ function updateSnippetBrowser() {
         btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
 
         try {
-            const storyTxt = buildPassageFromRange(chat, rangeStart, rangeEnd);
-
-            if (!storyTxt.trim()) {
-                toastr.error('Source turns are empty — cannot regenerate.', 'Summaryception');
-                return;
-            }
-
-            const contextParts = [];
-            for (let i = store.layers.length - 1; i >= 0; i--) {
-                const l = store.layers[i];
-                if (!l) continue;
-                for (let j = 0; j < l.length; j++) {
-                    if (i === layerIdx && j === snippetIdx) continue;
-                    contextParts.push(l[j].text);
-                }
-            }
-            const contextStr = contextParts.length > 0 ? contextParts.join(' ') : '(none yet)';
-
             toastr.info(`Regenerating summary for turns ${rangeStart}–${rangeEnd}…`, 'Summaryception', {
                 timeOut: 3000,
                 progressBar: true,
             });
 
-            const newSummary = await callSummarizer(storyTxt, contextStr);
+            // One regeneration code path — the continuity message-fixer heals the
+            // record through this same function.
+            const newSummary = await _rederiveSnippetText(sn);
 
             if (_chatEpoch !== startEpoch) { toastr.info('Chat changed — regenerated summary discarded, original snippet kept.', 'Summaryception', { timeOut: 4000 }); return; }
 
             if (!newSummary) {
-                toastr.error('Regeneration failed — original snippet kept.', 'Summaryception');
+                toastr.error('Regeneration failed (empty source or empty reply) — original snippet kept.', 'Summaryception');
                 return;
             }
 
@@ -9489,8 +9857,29 @@ function bindUIEvents() {
     $(document).on('click', '#sc_continuity_view .sc-cf-apply', async function () {
         const id = $(this).data('id'); if (!id) return;
         $(this).prop('disabled', true).text('Applying…');
-        try { const ok = await applyContinuityFix(String(id)); if (!ok) toastr.info('Nothing to change, or source-level (left for the copilot).', 'Summaryception', { timeOut: 3500 }); }
+        try { const ok = await applyContinuityFix(String(id)); if (!ok) toastr.info('Nothing to change — the snippet is gone or already agrees.', 'Summaryception', { timeOut: 3500 }); }
         finally { try { renderContinuity(); } catch (_) {} }
+    });
+    // Source-level: repair the offending story MESSAGE in place (backup kept; Undo
+    // is offered in the resolved list). Holds the channel like every other driver.
+    $(document).on('click', '#sc_continuity_view .sc-cf-fixmsg', async function () {
+        const id = $(this).data('id'); if (!id) return;
+        if (_llmChannelBusy()) { toastr.warning('A background pass is finishing — try again in a few seconds.', 'Summaryception'); return; }
+        const btn = $(this);
+        btn.prop('disabled', true).text('Repairing…');
+        if (!_acquireSummarize()) { btn.prop('disabled', false).text('Fix message'); toastr.warning('A background pass took the channel — try again in a few seconds.', 'Summaryception'); return; }
+        try {
+            const r = await applyMessageFix(String(id));
+            if (r.ok) toastr.success(`Message repaired (${r.edited} edit${r.edited === 1 ? '' : 's'}), snippet re-derived from the corrected passage. The auditor is re-checking; Undo is in the resolved list.`, 'Summaryception', { timeOut: 6000 });
+            else toastr.warning(`Couldn't repair the message: ${r.reason}. The flag stays open.`, 'Summaryception', { timeOut: 7000 });
+        } finally {
+            _releaseSummarize();
+            try { renderContinuity(); } catch (_) {}
+        }
+    });
+    $(document).on('click', '#sc_continuity_view .sc-cf-undo', async function () {
+        const bid = $(this).data('backup'); if (!bid) return;
+        try { await undoMessageFix(String(bid)); } finally { try { renderContinuity(); } catch (_) {} }
     });
     $(document).on('click', '#sc_continuity_view .sc-cf-dismiss', async function () {
         const id = $(this).data('id'); if (!id) return;
@@ -9498,6 +9887,7 @@ function bindUIEvents() {
     });
     $(document).on('change', '#sc_continuity_enabled', function () { getSettings().continuityEnabled = $(this).prop('checked'); saveSettings(); });
     $(document).on('change', '#sc_continuity_autofix', function () { getSettings().continuityAutoFix = $(this).prop('checked'); saveSettings(); });
+    $(document).on('change', '#sc_continuity_autofix_messages', function () { getSettings().continuityAutoFixMessages = $(this).prop('checked'); saveSettings(); });
     $(document).on('change', '#sc_continuity_nudge', function () { getSettings().continuityNudge = $(this).prop('checked'); saveSettings(); updateInjection(true); });
     $(document).on('input', '#sc_continuity_nudge_max', function () { const v = parseInt($(this).val(), 10) || 6; getSettings().continuityNudgeMax = v; $('#sc_continuity_nudge_max_val').text(v); saveSettings(); });
     $(document).on('change', '#sc_continuity_system_prompt', function () { getSettings().continuitySystemPrompt = $(this).val(); saveSettings(); });
@@ -10781,8 +11171,11 @@ async function fetchProfilesFallback(selectElement, currentValue) {
                 recheckMessage: (idx) => { try { const arr = _findSnippetsCovering(getChatStore(), Number(idx)); return Promise.all(arr.map(sn => recheckSnippet(sn))).then(() => arr.length); } catch (_) { return 0; } },
                 apply: (id) => applyContinuityFix(id),
                 applyAll: () => applyAllContinuityFixes(),
+                fixMessage: (id) => applyMessageFix(id),
+                undoFix: (backupId) => undoMessageFix(backupId),
                 enable: (on) => { getSettings().continuityEnabled = (on !== false); saveSettings(); return getSettings().continuityEnabled; },
                 setAutoFix: (on) => { getSettings().continuityAutoFix = (on !== false); saveSettings(); return getSettings().continuityAutoFix; },
+                setAutoFixMessages: (on) => { getSettings().continuityAutoFixMessages = (on !== false); saveSettings(); return getSettings().continuityAutoFixMessages; },
                 setNudge: (on) => { getSettings().continuityNudge = (on !== false); saveSettings(); return getSettings().continuityNudge; },
                 renameCharacter: (from, to) => {
                     try {
@@ -10815,7 +11208,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the OpenAI-compatible connection is now a SAVED PROVIDER LIST: keep several endpoints (OpenRouter, LM Studio, DeepSeek…) and switch between them from a dropdown instead of deleting and retyping, with a one-time migration that carries the old single slot over. Each provider carries its own Disable-Thinking strategy — one mechanism per provider family (chat_template_kwargs / enable_thinking / thinking.type / reasoning_effort / the /no_think prompt switch), never a bundle, because strict servers answer unknown parameters with a 400 and an "auto" spray is how a working provider gets misdiagnosed as broken. The output cleaner also strips raw <think> blocks now, so a model that thinks anyway still can't leak its scratchpad into memory. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the continuity auditor's source-level findings are no longer a dead end: "the MESSAGE contradicts the record" is now repaired in-extension by a surgical message edit (fewest messages, smallest change, player turns never touched, gutting rewrites refused by the same verdict that guards snippet fixes), with a before/after backup for Undo. The covering snippet is then re-derived from the CORRECTED passage — without that, memory would keep narrating the contradiction the message no longer contains — and only then is MESSAGE_EDITED emitted, so the ledger rewind and the debounced recheck run against healed memory and the flag clears only when a fresh audit agrees. Auto-fix is on by default (continuityAutoFixMessages) and each finding is attempted once — a refusal leaves the flag open, never a retry loop. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches

@@ -117,7 +117,14 @@
                     <input type="checkbox" id="sc_continuity_autofix" />
                     <span>Auto-fix snippet-level issues</span>
                 </label>
-                <small class="sc-hint">Apply snippet-level fixes automatically (oldest→newest) as they're found, instead of leaving flags. Only ever rewrites a snippet to match its source (never your story messages), so it can't cause a drift loop. Source-level issues still go to the copilot.</small>
+                <small class="sc-hint">Apply snippet-level fixes automatically (oldest→newest) as they're found, instead of leaving flags. Only ever rewrites a snippet to match its source, so it can't cause a drift loop.</small>
+            </div>
+            <div class="sc-row">
+                <label class="checkbox_label" for="sc_continuity_autofix_messages">
+                    <input type="checkbox" id="sc_continuity_autofix_messages" />
+                    <span>Auto-fix source-level issues (repairs the story message)</span>
+                </label>
+                <small class="sc-hint">When the story MESSAGE itself contradicts the record, repair it in place: a surgical edit changes the fewest messages by the smallest amount (your own turns are never edited), the snippet is re-derived from the corrected passage so memory stops narrating the contradiction, and the auditor re-checks before the flag clears. Every message edit keeps a backup — Undo lives in the "Recently resolved" list. A fix that would rewrite too much is refused and the flag stays open. Each finding is auto-attempted once, never in a loop.</small>
             </div>
 
             <div class="sc-row">
