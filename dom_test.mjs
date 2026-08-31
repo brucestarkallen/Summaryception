@@ -214,6 +214,85 @@ providerUI.renderOpenAIProviderUI();
 ok(settings.openaiActiveProviderId === settings.openaiProviders[0].id, 'a dangling active id is repaired by render, so the panel never lies about what will be called');
 ok(providerSaves > 0, 'every one of these paths persisted');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5.118.0: the continuity panel — a source-level finding must have a REAL
+// in-extension action (the disabled "Copilot / message" dead end is gone), the
+// Fix message binding must reach applyMessageFix holding the channel, and a
+// resolved entry with a backup must offer Undo. SHIPPED renderer + SHIPPED
+// bindings, real DOM.
+
+console.log('\n== continuity panel: source findings are actionable, resolved fixes are undoable ==');
+
+window.document.body.insertAdjacentHTML('beforeend', '<div id="sc_continuity_view"></div>');
+
+const cfBlocks = [
+    slice('function _resolvedLogHtml(resolved) {', 'function renderContinuity() {'),
+    slice('function renderContinuity() {', '// Which characters have their history expanded'),
+    slice('function escapeHtml(text) {', '// ─── Continuity Editor'),
+    slice("$(document).on('click', '#sc_continuity_view .sc-cf-apply'", "$(document).on('change', '#sc_continuity_enabled'"),
+].join('\n');
+
+const cfStore = {
+    continuityFlags: [{
+        id: 'cf_dom', status: 'open', where: 'source', kind: 'continuity', turnRange: [6, 11],
+        issue: 'The passage contradicts the record.', fix: 'Align the message with the record.', createdAt: 1, nudged: 0,
+    }],
+    continuityResolved: [],
+};
+const cfSettings = { continuityNudge: true, continuityNudgeDeliveries: 12 };
+const cfCalls = { fix: [], undo: [] };
+const cfSandbox = {
+    $, window, document: window.document,
+    getChatStore: () => cfStore,
+    getSettings: () => cfSettings,
+    applyContinuityFix: async () => false,
+    applyMessageFix: async (id) => { cfCalls.fix.push(id); return { ok: true, edited: 1 }; },
+    undoMessageFix: async (bid) => { cfCalls.undo.push(bid); return true; },
+    dismissContinuityFlag: async () => true,
+    _llmChannelBusy: () => false,
+    _acquireSummarize: () => true,
+    _releaseSummarize: () => {},
+    toastr: { info: () => {}, success: () => {}, warning: () => {}, error: () => {} },
+};
+const cfRunner = new Function(...Object.keys(cfSandbox), cfBlocks + '\nreturn { renderContinuity };');
+const renderContinuityNow = cfRunner(...Object.values(cfSandbox)).renderContinuity;
+renderContinuityNow();
+
+{
+    const btn = window.document.querySelector('#sc_continuity_view .sc-cf-fixmsg');
+    ok(btn !== null, 'a source-level finding gets a "Fix message" button');
+    ok(btn && !btn.disabled, 'and it is ENABLED — the disabled copilot dead-end is gone');
+    ok(window.document.querySelector('#sc_continuity_view .sc-cf-copilot') === null, 'no disabled Copilot button is rendered anymore');
+    ok((window.document.querySelector('#sc_continuity_view').textContent || '').includes('delivered 0/12'), 'the delivery counter renders');
+}
+{
+    cfStore.continuityFlags[0].msgFixTried = true;
+    renderContinuityNow();
+    ok((window.document.querySelector('#sc_continuity_view').textContent || '').includes('auto-fix tried'), 'a refused auto-attempt says so on the card');
+    delete cfStore.continuityFlags[0].msgFixTried;
+}
+{
+    // click Fix message — the binding must call applyMessageFix with the flag id
+    window.document.querySelector('#sc_continuity_view .sc-cf-fixmsg').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 20));
+    ok(cfCalls.fix.length === 1 && cfCalls.fix[0] === 'cf_dom', 'the Fix message binding reaches applyMessageFix with the flag id');
+}
+{
+    cfStore.continuityFlags = [];
+    cfStore.continuityResolved = [{ fix: 'He reads the reply first.', applied: true, msgFix: true, backupId: 'mf_dom1', resolvedAt: 1 }];
+    renderContinuityNow();
+    const undoBtn = window.document.querySelector('#sc_continuity_view .sc-cf-undo');
+    ok(undoBtn !== null, 'a message-level resolution offers Undo in the resolved list');
+    undoBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 20));
+    ok(cfCalls.undo.length === 1 && cfCalls.undo[0] === 'mf_dom1', 'Undo reaches undoMessageFix with the backup id');
+}
+{
+    cfStore.continuityFlags = [{ id: 'cf_snip', status: 'open', where: 'snippet', kind: 'drift', turnRange: [0, 2], issue: 'x', fix: 'y', createdAt: 1 }];
+    renderContinuityNow();
+    ok(window.document.querySelector('#sc_continuity_view .sc-cf-apply') !== null, 'snippet-level findings keep their Apply button');
+}
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }

@@ -726,6 +726,42 @@ const MUTATIONS = [
         "    return THINKING_MODES.some(m => m.id === mode) ? mode : 'off';",
         "    return mode || 'off';",
         'an unknown thinking mode collapses to off', 'connection_test.mjs'],
+
+    // ── v5.118.0: source-level repair ──
+    ['the fixer edits the player\u2019s turn again (a user edit laundered through the model)', 'index.js',
+        "        if (msg.is_user === true) { droppedUser++; continue; }   // the player's turns are never auto-edited",
+        "        if (false) { droppedUser++; continue; }",
+        'the player\u2019s turn is never auto-edited'],
+
+    ['an edit outside the flagged range is accepted again', 'index.js',
+        "        if (!e || !Number.isInteger(e.index) || e.index < a || e.index > b) { droppedRange++; continue; }",
+        "        if (!e || !Number.isInteger(e.index)) { droppedRange++; continue; }",
+        'an edit outside the flagged range is refused \u2014 even when the message EXISTS'],
+
+    ['a message fix is written with no undo backup', 'index.js',
+        "    store.continuityMsgFixes.push(backup);",
+        "    void backup;",
+        'a before/after backup exists', 'e2e_test.mjs'],
+
+    ['the gutting-rewrite verdict is bypassed for message edits', 'index.js',
+        "            const verdict = _fixVerdict(before.length, e.text.length, s);",
+        "            const verdict = { ok: true, ratio: 1 };",
+        'a rewrite that guts the message is refused', 'e2e_test.mjs'],
+
+    ['the message is fixed but the snippet keeps narrating the contradiction', 'index.js',
+        "    if (isLayer0) {",
+        "    if (false) {",
+        'the snippet is RE-DERIVED from the corrected passage', 'e2e_test.mjs'],
+
+    ['the autonomous path retries a refused message fix forever', 'index.js',
+        "f.where !== 'snippet' && !f.msgFixTried && Array.isArray(f.turnRange) && tr &&",
+        "f.where !== 'snippet' && Array.isArray(f.turnRange) && tr &&",
+        'BOTH autonomous paths (live queue and backfill) skip findings already attempted'],
+
+    ['the disabled copilot dead-end button comes back', 'index.js',
+        'class="menu_button sc-cf-fixmsg"',
+        'class="menu_button sc-cf-copilot"',
+        'the disabled copilot dead-end button is GONE'],
 ];
 
 function scratchCopy() {

@@ -36,7 +36,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'RETRY_CONFIG', 'isRetryableError', '_tpThreads',
     'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow',
     '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn', '_ckptDue',
-    '_turnSig', '_CKPT_DRIFT_WINDOW', '_relocateCheckpoint'];
+    '_turnSig', '_CKPT_DRIFT_WINDOW', '_relocateCheckpoint',
+    'normalizeMessageFixOutput', '_validateMessageEdits', '_indexedPassageForFix'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -107,6 +108,7 @@ return {
   recomputeSummarizedUpTo, _snipSig, _resolveSnipRow,
   _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn, _ckptDue,
   _turnSig, _relocateCheckpoint, _CKPT_DRIFT_WINDOW,
+  normalizeMessageFixOutput, _validateMessageEdits, _indexedPassageForFix,
 };
 `;
 const L = new Function(sandbox)();
@@ -3619,9 +3621,74 @@ section('MC name — resolved automatically, override only to correct');
     ok(/continuityEnabled: true/.test(dflt), 'the continuity auditor runs');
     ok(/continuityNudge: true/.test(dflt), 'its findings are delivered to the storyteller');
     ok(/continuityAutoFix: true/.test(dflt), 'and snippet-level fixes are applied automatically');
+    ok(/continuityAutoFixMessages: true/.test(dflt), 'and SOURCE-level findings repair the message — the panel is a fallback, not the only path');
+    ok(/continuityMsgFixMaxEdits: 3/.test(dflt), 'a source repair is capped — past the cap it is a rewrite, not a repair');
     ok(/continuityNudgeDeliveries: 12/.test(dflt), 'deliveries are bounded so new findings always get a slot');
     ok(/continuityFixMinRatio: 0\.5/.test(dflt), 'and an auto-rewrite must keep at least half the snippet');
     ok(/ledgerAuditEnabled: true/.test(dflt) && /ledgerAuditEveryTurns: 12/.test(dflt), 'the ledger auditor was already armed');
+}
+
+// ─── v5.118.0: source-level repair — the message fixer's law ────────────────────
+// Until now a `where: 'source'` finding was a dead end: a disabled button pointing
+// at an external copilot, while the contradiction sat in the chat AND in the memory
+// narrating it. The repair now lives in-extension: surgical message edit → snippet
+// re-derived from the corrected passage → recheck clears the flag only when a fresh
+// audit agrees. The parsing and the edit law are total functions — gate them so a
+// "harmless" refactor can't reopen the hole.
+{
+    section('message fixer — junk parses to nothing, and the edit law is total');
+    eq(L.normalizeMessageFixOutput(''), [], 'empty output parses to no edits');
+    eq(L.normalizeMessageFixOutput('not json at all'), [], 'prose parses to no edits');
+    eq(L.normalizeMessageFixOutput('[]'), [], 'an explicit empty array is a clean "no safe edit"');
+    eq(L.normalizeMessageFixOutput('```json\n[{"index":2,"text":"The doorbell rings, five minutes early."}]\n```'), [{ index: 2, text: 'The doorbell rings, five minutes early.' }], 'a fenced JSON array parses');
+    eq(L.normalizeMessageFixOutput('[{"index":0,"text":""}]'), [], 'KILL SHOT: an empty text is a message deletion, never a fix — refused at parse');
+    eq(L.normalizeMessageFixOutput('[{"index":"2","text":"x"}]'), [{ index: 2, text: 'x' }], 'a string index is coerced');
+    eq(L.normalizeMessageFixOutput('[{"index":-1,"text":"x"}]'), [], 'a negative index never parses');
+    eq(L.normalizeMessageFixOutput('[{"index":2}]'), [], 'an edit without text is dropped');
+
+    const chat = [
+        { mes: 'Jovan pockets the phone, her reply still unread.', is_user: false, name: 'Narrator' },
+        { mes: 'I head downstairs.', is_user: true, name: 'Player' },
+        { mes: 'The doorbell rings.', is_user: false, name: 'Narrator' },
+    ];
+    let v = L._validateMessageEdits([{ index: 0, text: 'Jovan reads her reply, then pockets the phone.' }], [0, 2], chat, 3);
+    ok(v.ok && v.edits.length === 1 && v.edits[0].index === 0, 'a clean single edit passes');
+    v = L._validateMessageEdits([{ index: 1, text: 'I head downstairs, phone forgotten.' }], [0, 2], chat, 3);
+    ok(!v.ok && v.droppedUser === 1 && v.edits.length === 0, 'KILL SHOT: the player\u2019s turn is never auto-edited — the fixer cannot launder a user edit through the model');
+    v = L._validateMessageEdits([{ index: 2, text: 'Rewritten doorbell.' }], [0, 1], chat, 3);
+    ok(!v.ok && v.droppedRange === 1, 'an edit outside the flagged range is refused — even when the message EXISTS (in-range and exists are different laws)');
+    v = L._validateMessageEdits([{ index: 2, text: 'The doorbell rings.' }], [0, 2], chat, 3);
+    ok(!v.ok && v.droppedNoop === 1, 'a no-op rewrite is not an edit');
+    v = L._validateMessageEdits([{ index: 0, text: 'first' }, { index: 0, text: 'second' }], [0, 2], chat, 3);
+    ok(v.ok && v.edits.length === 1 && v.edits[0].text === 'first', 'duplicate indices collapse — first write wins');
+    v = L._validateMessageEdits([{ index: 0, text: 'x' }, { index: 2, text: 'y' }], [0, 2], chat, 1);
+    ok(!v.ok && /cap 1/.test(v.reason), 'more messages than the cap is a rewrite, not a repair');
+    v = L._validateMessageEdits([{ index: 0, text: 'x' }], null, chat, 3);
+    ok(!v.ok, 'a flag with no turn range edits nothing');
+    eq(L._indexedPassageForFix(chat, 0, 2), '[0] (Narrator) Jovan pockets the phone, her reply still unread.\n\n[1] (PLAYER) I head downstairs.\n\n[2] (Narrator) The doorbell rings.', 'the fixer sees raw indexed text with authorship tags');
+}
+
+// The structural invariants the pure functions cannot see — the orchestration order
+// and the no-loop marker. Text guards, because these properties ARE the ordering.
+{
+    section('source repair — the ordering is the safety');
+    const iSnap = SRC_FULL.indexOf('beforeSnap.set(i, chat[i].mes)');
+    const iBackup = SRC_FULL.indexOf('const backup = {');
+    const iWrite = SRC_FULL.indexOf('for (const e of edits) chat[e.index].mes = e.text;');
+    const iEmit = SRC_FULL.indexOf('await eventSource.emit(event_types.MESSAGE_EDITED, e.index);');
+    ok(iSnap !== -1 && iBackup !== -1 && iWrite !== -1 && iSnap < iBackup && iBackup < iWrite,
+        'the original text is snapshotted, then backed up, BEFORE any message is overwritten');
+    const iRederive = SRC_FULL.indexOf('await _rederiveSnippetText(sn)');
+    ok(iRederive !== -1 && iWrite < iRederive && iRederive < iEmit,
+        'KILL SHOT: the snippet is re-derived from the corrected passage BEFORE MESSAGE_EDITED fires — a recheck must never audit against memory that still narrates the contradiction');
+    ok(/if \(auto && !flag\.msgFixTried\)/.test(SRC_FULL),
+        'an auto attempt is marked before the call — a refusal or crash can never become a retry loop');
+    ok((SRC_FULL.match(/!f\.msgFixTried/g) || []).length >= 2,
+        'and BOTH autonomous paths (live queue and backfill) skip findings already attempted — no flag is auto-fixed twice');
+    const rsBlock = SRC_FULL.slice(SRC_FULL.indexOf('async function recheckSnippet'), SRC_FULL.indexOf('async function flushEditedRecheck'));
+    ok(rsBlock.length > 0 && !/applyMessageFix/.test(rsBlock),
+        'the user-edit recheck path never auto-edits messages — the player\u2019s own correction is never fought');
+    ok(!/sc-cf-copilot/.test(SRC_FULL), 'the disabled copilot dead-end button is GONE — source findings have a real in-extension action');
 }
 
 

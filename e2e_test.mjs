@@ -41,6 +41,7 @@ export const calls = [];
 export async function sendSummarizerRequest(s, sysPrompt, prompt) {
     const kind = /continuity AUDITOR for the character ledger/.test(sysPrompt) ? 'ledger-audit'
         : /character-continuity mind/.test(sysPrompt) ? 'ledger-scribe'
+        : /surgical continuity editor/.test(sysPrompt) ? 'msg-fix'
         : /detail/i.test(sysPrompt) ? 'detail'
         : 'summary';
     globalThis.__calls.push({ kind, prompt });
@@ -74,6 +75,11 @@ function __reply(kind, prompt) {
         return JSON.stringify([
             { name: 'Claire Argent', state: 'waiting by the arch, watching the platform' },
         ]);
+    }
+    if (kind === 'msg-fix') {
+        // The surgical message editor. The scenario hands its reply in directly —
+        // the assertions are about what the PIPELINE does with it, not the prose.
+        return typeof globalThis.__msgFixReply === 'string' ? globalThis.__msgFixReply : '[]';
     }
     return 'A compact summary line.';
 }
@@ -773,6 +779,83 @@ try {
 
         globalThis.__swipeProbe = false;
         s.ledgerEditRewindDepth = 10;
+    }
+
+    // ── v5.118.0: source-level repair, end to end ───────────────────────────
+    // A "the MESSAGE contradicts the record" finding used to be a dead end (a
+    // disabled Copilot button). Now: surgical message edit → snippet re-derived
+    // from the corrected passage → recheck clears the flag → undo restores.
+    {
+        console.log('\n== 21. CONTINUITY SOURCE REPAIR: fix the message, heal the memory, undo, refuse the bad fix ==');
+        const sc = ctx.chat;
+        const wasLedger = s.ledgerEnabled, wasCont = s.continuityEnabled;
+        s.ledgerEnabled = false;   // keep the ledger out of this scenario
+        s.continuityEnabled = true;   // earlier scenarios turned the auditor off — the recheck path needs it on
+        const LONG = 'Jovan read the reply three times, the lamplight crawling across the screen while the house settled around him — the porch boards, the stair rail, the hum of the fridge downstairs. He typed nothing back. He pocketed the phone and stood there a moment longer, weighing the doorbell against the tease still glowing unread in his pocket.';
+        const FIXED = 'Jovan read the reply three times, the lamplight crawling across the screen while the house settled around him — the porch boards, the stair rail, the hum of the fridge downstairs. He typed nothing back. He pocketed the phone — her answer glowing read at last — and stood there a moment longer, weighing the doorbell against the tease he had finally seen.';
+        sc.push(mkMsg('Narrator', LONG));
+        const mIdx = sc.length - 1;
+        const snip0 = { text: 'Jovan pocketed the phone with her reply unread.', turnRange: [mIdx, mIdx], timestamp: Date.now() };
+        store().layers = [[snip0]];
+        store().continuityFlags = [{
+            id: 'cf_e2e', turnRange: [mIdx, mIdx], kind: 'continuity', where: 'source', status: 'open', createdAt: Date.now(),
+            issue: 'The passage has him pocket the phone with the reply unread, but the record establishes he read it before descending.',
+            fix: 'He reads Aurora\u2019s reply before pocketing the phone.',
+        }];
+        store().continuityMsgFixes = [];
+        store().continuityResolved = [];
+        await new Promise(r => setTimeout(r, 50));
+
+        // 1) The good fix lands everywhere it must, and ONLY there.
+        globalThis.__msgFixReply = JSON.stringify([{ index: mIdx, text: FIXED }]);
+        const r1 = await globalThis.summaryceptionContinuity.fixMessage('cf_e2e');
+        ok(r1 && r1.ok === true && r1.edited === 1, 'the repair applies through the public API');
+        ok(sc[mIdx].mes === FIXED, 'the MESSAGE text is corrected');
+        const bk = (store().continuityMsgFixes || [])[0];
+        ok(bk && bk.edits[0].before === LONG && bk.edits[0].after === FIXED, 'KILL SHOT: a before/after backup exists — no auto edit is ever written without an undo path');
+        ok(store().layers[0][0].text === 'A compact summary line.', 'the snippet is RE-DERIVED from the corrected passage — memory stops narrating the contradiction');
+        ok(bk && bk.snippet && bk.snippet.before === 'Jovan pocketed the phone with her reply unread.', 'and the snippet\u2019s own before/after rides in the backup');
+        const rlog = (store().continuityResolved || [])[0];
+        ok(rlog && rlog.msgFix === true && rlog.backupId === bk.id, 'the resolved log carries the undo handle');
+        ok((store().continuityFlags || []).length === 1, 'the flag is NOT closed by the fixer — only a fresh audit may close it');
+
+        // 2) The recheck (what ST's MESSAGE_EDITED dispatch drives) clears it.
+        await fire('MESSAGE_EDITED', mIdx);
+        await sleep(2400);   // 1.5s debounce + one stub call
+        ok((store().continuityFlags || []).length === 0, 'the debounced recheck clears the flag once the fresh audit finds nothing');
+
+        // 3) Undo puts everything back — and the finding comes back with it.
+        const undone = await globalThis.summaryceptionContinuity.undoFix(bk.id);
+        ok(undone === true, 'undo succeeds');
+        ok(sc[mIdx].mes === LONG, 'undo restores the original message text');
+        ok(store().layers[0][0].text === 'Jovan pocketed the phone with her reply unread.', 'undo restores the snippet the fix re-derived');
+        ok((store().continuityMsgFixes || []).length === 0, 'the backup is consumed by the undo');
+        ok((store().continuityFlags || []).length === 1 && store().continuityFlags[0].status === 'open', 'the finding is re-raised — the panel tells the truth again');
+
+        // 4) A gutting rewrite is refused and destroys nothing.
+        // (The undo re-raised the finding with a FRESH id — read the live one.)
+        const liveId = store().continuityFlags[0].id;
+        globalThis.__msgFixReply = JSON.stringify([{ index: mIdx, text: 'He read it.' }]);
+        const r2 = await globalThis.summaryceptionContinuity.fixMessage(liveId);
+        ok(r2 && r2.ok === false, 'KILL SHOT: a rewrite that guts the message is refused');
+        ok(sc[mIdx].mes === LONG, 'and the message survives it untouched');
+        ok((store().continuityFlags || []).length === 1, 'the flag stays open for review');
+
+        // 5) The fixer can never launder an edit to the PLAYER\u2019s turn through the model.
+        const uIdx = sc.findLastIndex(m => m && m.is_user === true && m.mes && m.mes.trim());
+        const uBefore = sc[uIdx].mes;
+        store().continuityFlags[0].turnRange = [uIdx, mIdx];   // the player turn is IN the range — the authorship guard, not the range guard, must do the refusing
+        globalThis.__msgFixReply = JSON.stringify([{ index: uIdx, text: 'I never sent the tease.' }]);
+        const r3 = await globalThis.summaryceptionContinuity.fixMessage(liveId);
+        ok(r3 && r3.ok === false && r3.droppedUser === 1, 'KILL SHOT: a fix that edits only the player\u2019s turn is refused BECAUSE it is the player\u2019s');
+        ok(sc[uIdx].mes === uBefore, 'the player\u2019s message is never touched');
+        ok(sc[mIdx].mes === LONG, 'and the story message is untouched too');
+
+        globalThis.__msgFixReply = null;
+        store().continuityFlags = [];
+        store().continuityResolved = [];
+        s.ledgerEnabled = wasLedger;
+        s.continuityEnabled = wasCont;
     }
 
 } finally {
