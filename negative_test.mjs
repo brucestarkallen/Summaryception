@@ -700,6 +700,32 @@ const MUTATIONS = [
         '    if (s.disableGhosting) log(`Ghosting ${toHide.length} message(s) up to ${upto} — excluded from AI context, visuals neutralized.`);',
         '    if (s.disableGhosting) { log(`Ghosted ${toHide.length} message(s) up to ${upto} — metadata only (hiding disabled).`); return; }',
         'H3: ghostMessagesUpTo never skips the hide (the old metadata-only lie)'],
+
+    // ── v5.117.0: saved providers + the no-thinking strategies ──
+    ['the active provider is ignored (the stale flat slot always wins)', 'connectionutil.js',
+        "            const p = resolveOpenAIProvider(settings);",
+        "            const p = makeOpenAIProvider({ url: settings.openaiUrl, key: settings.openaiKey, model: settings.openaiModel, maxTokens: settings.openaiMaxTokens });",
+        'the request goes to the ACTIVE provider\u2019s endpoint', 'connection_test.mjs'],
+
+    ['the strategies are bundled again ("auto" sprays every parameter at once)', 'connectionutil.js',
+        "        default:\n            break;   // 'off' (and anything unrecognised) sends nothing extra",
+        "        default:\n            body.chat_template_kwargs = { enable_thinking: false };\n            body.enable_thinking = false;\n            body.thinking = { type: 'disabled' };\n            body.reasoning_effort = 'none';\n            break;",
+        'off sends NO extra fields at all', 'connection_test.mjs'],
+
+    ['a deleted provider list resurrects from the legacy slot on reload (the zombie)', 'connectionutil.js',
+        "    if (settings.openaiProvidersMigrated) return false;",
+        "    if (false) return false;",
+        'a deleted list stays deleted', 'connection_test.mjs'],
+
+    ['/no_think lands on the system message (where the Qwen3 template never reads it)', 'connectionutil.js',
+        "                if (msgs[i] && msgs[i].role === 'user') {",
+        "                if (msgs[i] && msgs[i].role === 'system') {",
+        'prompt mode appends /no_think to the LAST USER message', 'connection_test.mjs'],
+
+    ['a hand-edited unknown thinking mode reaches the wire as a made-up parameter', 'connectionutil.js',
+        "    return THINKING_MODES.some(m => m.id === mode) ? mode : 'off';",
+        "    return mode || 'off';",
+        'an unknown thinking mode collapses to off', 'connection_test.mjs'],
 ];
 
 function scratchCopy() {

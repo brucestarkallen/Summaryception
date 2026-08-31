@@ -124,6 +124,96 @@ ok($('#sc_notepad_fs').length === 0, 'Escape closes');
 ok(window._scNotepadFsFit === undefined, 'close unbinds the viewport listeners — no leak, no ghost re-fits');
 ok(store.notepad === 'replaced by import', 'closing never discards — the store holds the last text');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5.117.0: the saved-provider panel — SHIPPED markup (settings.html) against
+// SHIPPED wiring (index.js), in a real DOM. The transport side is proven in
+// connection_test.mjs; this gate proves the panel that drives it: switching,
+// adding, deleting, per-field edits, and that the dropdown the user sees is
+// the provider the resolver will actually send to.
+
+console.log('\n== saved OpenAI providers: SHIPPED markup + SHIPPED wiring, real DOM ==');
+
+const { resolveOpenAIProvider, makeOpenAIProvider, THINKING_MODES } = await import('./connectionutil.js');
+
+const HTML_SRC = readFileSync(new URL('./settings.html', import.meta.url), 'utf8');
+{
+    const a = HTML_SRC.indexOf('<!-- ── OpenAI Compatible Sub-panel ── -->');
+    const b = HTML_SRC.indexOf('<!-- Connection Status Indicator -->', a);
+    if (a === -1 || b === -1) throw new Error('settings.html: provider panel markers not found');
+    window.document.body.insertAdjacentHTML('beforeend', HTML_SRC.slice(a, b));
+}
+
+const providerBlock = slice('function _openaiProviderEls() {', 'function populateOllamaModelDropdown');
+
+const settings = {
+    openaiProviders: [],
+    openaiActiveProviderId: '',
+    openaiUrl: '', openaiKey: '', openaiModel: '', openaiMaxTokens: 0,
+};
+let providerSaves = 0;
+const providerSandbox = {
+    document: window.document,
+    window,
+    getSettings: () => settings,
+    saveSettings: () => { providerSaves++; },
+    resolveOpenAIProvider, makeOpenAIProvider, THINKING_MODES,   // the REAL transport pieces
+    toastr: { info: () => {}, success: () => {}, warning: () => {}, error: () => {} },
+    confirm: () => true,   // the user means it
+};
+const providerRunner = new Function(...Object.keys(providerSandbox),
+    providerBlock + '\nreturn { initOpenAIProviderUI, renderOpenAIProviderUI };');
+const providerUI = providerRunner(...Object.values(providerSandbox));
+
+const el = (id) => window.document.getElementById(id);
+const type = (id, v) => { const e = el(id); e.value = v; e.dispatchEvent(new window.Event('input', { bubbles: true })); };
+const choose = (id, v) => { const e = el(id); e.value = v; e.dispatchEvent(new window.Event('change', { bubbles: true })); };
+const click = (id) => el(id).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+providerUI.initOpenAIProviderUI();
+
+// fresh install: a placeholder, empty fields, and the full thinking-mode list
+ok(el('summaryception_openai_provider').options.length === 1 && el('summaryception_openai_provider').options[0].value === '', 'fresh install shows the placeholder, not a ghost provider');
+ok(el('summaryception_openai_thinking_mode').options.length === THINKING_MODES.length, 'the thinking dropdown is fed by THINKING_MODES (' + THINKING_MODES.length + ' options)');
+
+// first keystroke creates Provider 1 — no "Add" ceremony
+type('summaryception_openai_url', 'https://openrouter.ai/api/v1');
+ok(settings.openaiProviders.length === 1, 'typing a URL saves Provider 1');
+ok(settings.openaiProviders[0].url === 'https://openrouter.ai/api/v1', 'the URL landed on the provider');
+ok(settings.openaiActiveProviderId === settings.openaiProviders[0].id, 'and it is the active one');
+type('summaryception_openai_model', 'deepseek/deepseek-chat');
+type('summaryception_openai_provider_name', 'OpenRouter');
+choose('summaryception_openai_thinking_mode', 'prompt');
+ok(settings.openaiProviders[0].thinkingMode === 'prompt', 'choosing a no-thinking strategy writes it to the provider');
+ok(el('summaryception_openai_provider').options[0].textContent === 'OpenRouter', 'the dropdown label follows the name while typing');
+
+// add a second provider; the switch must swap every field
+click('summaryception_openai_provider_add');
+ok(settings.openaiProviders.length === 2 && settings.openaiActiveProviderId === settings.openaiProviders[1].id, 'Add creates provider 2 and makes it active');
+ok(el('summaryception_openai_url').value === '', 'the fields show the NEW provider, not the old one\u2019s leftovers');
+type('summaryception_openai_url', 'http://localhost:1234/v1');
+type('summaryception_openai_model', 'qwen3-8b');
+choose('summaryception_openai_thinking_mode', 'template_kwargs');
+choose('summaryception_openai_provider', settings.openaiProviders[0].id);
+ok(el('summaryception_openai_url').value === 'https://openrouter.ai/api/v1' && el('summaryception_openai_model').value === 'deepseek/deepseek-chat', 'switching back restores provider 1\u2019s fields verbatim');
+ok(el('summaryception_openai_thinking_mode').value === 'prompt', 'and its thinking strategy comes back with it');
+choose('summaryception_openai_provider', settings.openaiProviders[1].id);
+ok(el('summaryception_openai_url').value === 'http://localhost:1234/v1', 'switching forward shows provider 2');
+
+// what the user sees selected IS what the next request uses
+ok(resolveOpenAIProvider(settings).id === el('summaryception_openai_provider').value, 'dropdown and resolver agree on the active provider');
+
+// delete the active one: the survivor becomes active, pointer self-heals
+click('summaryception_openai_provider_delete');
+ok(settings.openaiProviders.length === 1 && settings.openaiProviders[0].url === 'https://openrouter.ai/api/v1', 'delete removes exactly the selected provider');
+ok(settings.openaiActiveProviderId === settings.openaiProviders[0].id, 'the active pointer moves to the survivor, never dangles');
+ok(el('summaryception_openai_provider').value === settings.openaiProviders[0].id && el('summaryception_openai_url').value === 'https://openrouter.ai/api/v1', 'and the panel re-renders the survivor');
+
+// a dangling id from a hand-edit self-heals on render
+settings.openaiActiveProviderId = 'ghost-id';
+providerUI.renderOpenAIProviderUI();
+ok(settings.openaiActiveProviderId === settings.openaiProviders[0].id, 'a dangling active id is repaired by render, so the panel never lies about what will be called');
+ok(providerSaves > 0, 'every one of these paths persisted');
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }

@@ -82,6 +82,15 @@ export async function fetchOllamaModels() { return []; }
 export async function testOpenAIConnection() { return true; }
 export async function populateProfileDropdown() {}
 export function getConnectionDisplayName() { return 'stub'; }
+// v5.117.0 surface: provider list + no-thinking strategies. The REAL
+// implementations are proven in connection_test.mjs; here they only need to
+// exist so index.js imports and its APP_READY migration call run.
+export const THINKING_MODES = Object.freeze([{ id: 'off', label: 'off' }]);
+export function makeOpenAIProvider(fields = {}) {
+    return { id: fields.id || 'stub-p', name: '', url: '', key: '', model: '', maxTokens: 0, thinkingMode: 'off', ...fields };
+}
+export function migrateOpenAIProviderSettings() { return false; }
+export function resolveOpenAIProvider() { return makeOpenAIProvider(); }
 export class ConnectionError extends Error {
     constructor(message, { retryable = false, status = null } = {}) { super(message); this.name = 'ConnectionError'; this.retryable = retryable; this.status = status; }
 }

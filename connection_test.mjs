@@ -10,7 +10,14 @@
 //
 // Drives the REAL sendSummarizerRequest against a scripted fetch: no network.
 
-import { sendSummarizerRequest } from './connectionutil.js';
+import {
+    sendSummarizerRequest,
+    getConnectionDisplayName,
+    makeOpenAIProvider,
+    migrateOpenAIProviderSettings,
+    resolveOpenAIProvider,
+    THINKING_MODES,
+} from './connectionutil.js';
 
 let pass = 0, fail = 0;
 const fails = [];
@@ -391,6 +398,154 @@ section('the dispatcher routes to the mode it was asked for');
     hit.length = 0;
     await sendSummarizerRequest({}, 's', 'u');
     eq(hit.join(','), 'default', 'an unset connectionSource falls back to default, not to nothing');
+}
+
+// ─── v5.117.0: saved providers + the no-thinking strategies ────────────────
+// The flat single slot meant "switch providers" = delete and retype. And a
+// hybrid thinking model had exactly one coping mechanism (output cleaning —
+// the safety net), never the root fix (tell the server not to think). Both
+// live in the transport now, and the transport is where they're proven.
+
+section('provider resolution: the active entry wins, the legacy slot is the fallback');
+{
+    const legacy = { openaiUrl: 'https://legacy.invalid/v1', openaiKey: 'lk', openaiModel: 'legacy-m', openaiMaxTokens: 123 };
+    const r0 = resolveOpenAIProvider(legacy);
+    eq(r0.url, 'https://legacy.invalid/v1', 'no saved list → the legacy flat slot resolves');
+    eq(r0.model, 'legacy-m', 'legacy model resolves');
+    eq(r0.maxTokens, 123, 'legacy maxTokens resolves');
+    eq(r0.thinkingMode, 'off', 'legacy slot has no thinking mode → off, never undefined');
+
+    const list = {
+        openaiUrl: 'https://STALE.invalid/v1', openaiModel: 'stale-m',   // must be IGNORED once a list exists
+        openaiProviders: [
+            makeOpenAIProvider({ id: 'a', name: 'First', url: 'https://a.invalid/v1', model: 'm-a' }),
+            makeOpenAIProvider({ id: 'b', name: 'Second', url: 'https://b.invalid/v1', model: 'm-b' }),
+        ],
+        openaiActiveProviderId: 'b',
+    };
+    const r1 = resolveOpenAIProvider(list);
+    eq(r1.id, 'b', 'the ACTIVE provider is the one the request uses');
+    eq(r1.url, 'https://b.invalid/v1', 'and its URL, not the stale flat slot');
+
+    const r2 = resolveOpenAIProvider({ ...list, openaiActiveProviderId: 'deleted-id' });
+    eq(r2.id, 'a', 'a dangling active id falls back to the first entry, not to nothing');
+}
+{
+    const weird = resolveOpenAIProvider({
+        openaiProviders: [{ id: 'x', name: 42, url: 'https://x.invalid/v1', model: 'm', maxTokens: 'lots', thinkingMode: 'spray-everything' }],
+        openaiActiveProviderId: 'x',
+    });
+    eq(weird.name, '42', 'hand-edited entries are coerced to strings');
+    eq(weird.maxTokens, 0, 'a junk maxTokens collapses to 0 (no limit) instead of reaching the wire');
+    eq(weird.thinkingMode, 'off', 'an unknown thinking mode collapses to off — never a made-up parameter');
+    ok(THINKING_MODES.every(m => typeof m.id === 'string' && typeof m.label === 'string'), 'every mode carries an id and a label for the dropdown');
+}
+
+section('provider migration: one-time, and never a zombie');
+{
+    const st = { openaiUrl: 'https://old.invalid/v1', openaiKey: 'k', openaiModel: 'old-m', openaiMaxTokens: 50 };
+    eq(migrateOpenAIProviderSettings(st), true, 'a populated legacy slot migrates');
+    eq(st.openaiProviders.length, 1, 'becomes the first saved provider');
+    eq(st.openaiProviders[0].url, 'https://old.invalid/v1', 'endpoint carried over');
+    eq(st.openaiProviders[0].key, 'k', 'key carried over');
+    eq(st.openaiProviders[0].maxTokens, 50, 'maxTokens carried over');
+    eq(st.openaiActiveProviderId, st.openaiProviders[0].id, 'and is the active one');
+    eq(migrateOpenAIProviderSettings(st), false, 'a second run is a no-op (idempotent)');
+
+    // The zombie case: user migrates, later deletes EVERY provider, reloads.
+    // Without the flag the stale flat slot would resurrect as a new provider.
+    st.openaiProviders = [];
+    st.openaiActiveProviderId = '';
+    eq(migrateOpenAIProviderSettings(st), false, 'a deleted list stays deleted — the flag blocks resurrection');
+    eq(st.openaiProviders.length, 0, 'no provider is recreated from the stale flat slot');
+}
+{
+    const fresh = {};
+    eq(migrateOpenAIProviderSettings(fresh), false, 'a fresh install (empty slot) creates nothing');
+    eq(fresh.openaiProvidersMigrated, true, 'but is still flagged, so it never runs again');
+}
+{
+    // Flag lost (hand-edited settings.json) while a list exists: data wins,
+    // never a duplicate entry for the same endpoint.
+    const st = { openaiUrl: 'https://old.invalid/v1', openaiModel: 'm', openaiProviders: [makeOpenAIProvider({ id: 'kept', url: 'https://new.invalid/v1', model: 'n' })] };
+    eq(migrateOpenAIProviderSettings(st), false, 'an existing list is never double-migrated');
+    eq(st.openaiProviders[0].id, 'kept', 'the existing entry is untouched');
+}
+
+section('no-thinking strategies: one mechanism each, never a bundle');
+{
+    const base = () => ({
+        connectionSource: 'openai',
+        // The legacy slot is deliberately present and WRONG: if the dispatcher
+        // ever stops resolving the active provider, this is what it sends —
+        // and the active-provider assertion below gets to say so.
+        openaiUrl: 'https://WRONG.invalid/v1',
+        openaiModel: 'wrong-model',
+        openaiProviders: [makeOpenAIProvider({ id: 't', name: 'T', url: 'https://think.invalid/v1', model: 'qwen3' })],
+        openaiActiveProviderId: 't',
+    });
+    const sendWith = async (mode) => {
+        const st = base();
+        st.openaiProviders[0].thinkingMode = mode;
+        mockFetch(streamOf(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n']));
+        await sendSummarizerRequest(st, 'sys', 'user');
+        return JSON.parse(lastInit.body);
+    };
+
+    const off = await sendWith('off');
+    ok(!('chat_template_kwargs' in off) && !('enable_thinking' in off) && !('thinking' in off) && !('reasoning_effort' in off), 'off sends NO extra fields at all');
+    eq(off.messages[1].content, 'user', 'off leaves the prompt untouched');
+
+    const tk = await sendWith('template_kwargs');
+    eq(tk.chat_template_kwargs?.enable_thinking, false, 'template_kwargs sends chat_template_kwargs.enable_thinking=false');
+    ok(!('enable_thinking' in tk) && !('thinking' in tk) && !('reasoning_effort' in tk), 'and nothing else — a strict server must not 400 on stowaway fields');
+    eq(tk.messages[1].content, 'user', 'template_kwargs leaves the prompt untouched');
+
+    const et = await sendWith('enable_thinking');
+    eq(et.enable_thinking, false, 'enable_thinking sends the top-level flag');
+    ok(!('chat_template_kwargs' in et) && !('thinking' in et) && !('reasoning_effort' in et), 'and nothing else');
+
+    const td = await sendWith('thinking_disabled');
+    eq(td.thinking?.type, 'disabled', 'thinking_disabled sends thinking.type=disabled (GLM/Anthropic shape)');
+    ok(!('chat_template_kwargs' in td) && !('enable_thinking' in td) && !('reasoning_effort' in td), 'and nothing else');
+
+    const re = await sendWith('reasoning_effort');
+    eq(re.reasoning_effort, 'none', 'reasoning_effort sends "none"');
+    ok(!('chat_template_kwargs' in re) && !('enable_thinking' in re) && !('thinking' in re), 'and nothing else');
+
+    const pr = await sendWith('prompt');
+    eq(pr.messages[1].content, 'user\n/no_think', 'prompt mode appends /no_think to the LAST USER message');
+    ok(!('chat_template_kwargs' in pr) && !('enable_thinking' in pr) && !('thinking' in pr) && !('reasoning_effort' in pr), 'prompt mode adds NO envelope fields — it survives param-stripping proxies by construction');
+    eq(pr.messages[0].content, 'sys', 'the system message is left alone');
+}
+{
+    // The dispatcher must send the ACTIVE provider's coordinates, not the
+    // legacy slot's — this is the bug "multiple providers" exists to fix.
+    const st = {
+        connectionSource: 'openai',
+        openaiUrl: 'https://STALE.invalid/v1', openaiModel: 'stale',
+        openaiProviders: [
+            makeOpenAIProvider({ id: 'one', name: 'One', url: 'https://one.invalid/v1', model: 'm1' }),
+            makeOpenAIProvider({ id: 'two', name: 'Two', url: 'https://two.invalid/v1', model: 'm2' }),
+        ],
+        openaiActiveProviderId: 'two',
+    };
+    let seenUrl = null;
+    globalThis.fetch = async (u, i) => { seenUrl = u; lastInit = i; return { ok: true, status: 200, body: streamOf(['data: {"choices":[{"delta":{"content":"x"}}]}\n\n']), text: async () => '' }; };
+    await sendSummarizerRequest(st, 'sys', 'user');
+    ok(String(seenUrl).includes('two.invalid'), 'the request goes to the ACTIVE provider\u2019s endpoint');
+    eq(JSON.parse(lastInit.body).model, 'm2', 'and asks for the ACTIVE provider\u2019s model');
+}
+
+section('display name follows the provider');
+{
+    const st = {
+        connectionSource: 'openai',
+        openaiProviders: [makeOpenAIProvider({ id: 'n', name: 'OpenRouter', url: 'https://x.invalid/v1', model: 'deepseek' })],
+        openaiActiveProviderId: 'n',
+    };
+    eq(getConnectionDisplayName(st), 'OpenAI: OpenRouter', 'the provider NAME is what the user recognises');
+    eq(getConnectionDisplayName({ connectionSource: 'openai', openaiModel: 'flat-m' }), 'OpenAI: flat-m', 'the legacy slot still names itself by model');
 }
 
 console.log('\n────────────────────────────────────────');
