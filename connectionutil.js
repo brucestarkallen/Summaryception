@@ -36,6 +36,146 @@ class ConnectionError extends Error {
 
 export { ConnectionError };
 
+// ─── Saved Providers (OpenAI-compatible) ────────────────────────────
+
+/**
+ * Thinking-mode strategies. There is NO universal OpenAI-compatible switch
+ * for turning a hybrid reasoning model's thinking off — each provider family
+ * speaks a different parameter, and strict servers answer unknown fields with
+ * a 400. Sending several mechanisms at once ("auto") is therefore how a
+ * perfectly working provider gets misdiagnosed as broken: one mode = one
+ * mechanism, chosen to match the server.
+ *
+ * This list is the single source of truth for the settings dropdown AND for
+ * validation: a hand-edited settings.json carrying an unknown mode resolves
+ * to 'off', never to a made-up parameter.
+ */
+const THINKING_MODES = Object.freeze([
+    { id: 'off',               label: 'Model default (no override)' },
+    { id: 'template_kwargs',   label: 'chat_template_kwargs — Qwen3 on vLLM / LM Studio / SGLang' },
+    { id: 'enable_thinking',   label: 'enable_thinking flag — top-level vLLM / SGLang builds' },
+    { id: 'thinking_disabled', label: 'thinking.type — GLM / Zhipu, Anthropic-style gateways' },
+    { id: 'reasoning_effort',  label: 'reasoning_effort "none" — OpenAI / Groq-style' },
+    { id: 'prompt',            label: '/no_think prompt switch — Qwen3 template (survives proxies that strip parameters)' },
+]);
+export { THINKING_MODES };
+
+function _validThinkingMode(mode) {
+    return THINKING_MODES.some(m => m.id === mode) ? mode : 'off';
+}
+
+function _providerId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    } catch (_) { /* fall through to the manual id */ }
+    return 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * One saved OpenAI-compatible provider. `name` is display-only; url/key/
+ * model/maxTokens/thinkingMode are what the transport consumes. Also serves
+ * as the normalizer for hand-edited entries: every field is coerced, and an
+ * unrecognised thinkingMode collapses to 'off' instead of reaching the wire.
+ */
+export function makeOpenAIProvider(fields = {}) {
+    return {
+        id: (fields.id && typeof fields.id === 'string') ? fields.id : _providerId(),
+        name: String(fields.name ?? ''),
+        url: String(fields.url ?? ''),
+        key: String(fields.key ?? ''),
+        model: String(fields.model ?? ''),
+        maxTokens: (typeof fields.maxTokens === 'number' && isFinite(fields.maxTokens)) ? fields.maxTokens : 0,
+        thinkingMode: _validThinkingMode(fields.thinkingMode),
+    };
+}
+
+/**
+ * One-time migration: the original single flat slot (openaiUrl/openaiKey/
+ * openaiModel/openaiMaxTokens) becomes the first saved provider, so existing
+ * installs keep their endpoint without retyping it.
+ *
+ * The flag matters, not just the data: without it, a user who later deletes
+ * every saved provider would watch the legacy slot resurrect as a zombie
+ * provider on the next reload. And if the flag is somehow lost while the list
+ * is populated, we never create a duplicate — an existing list wins.
+ *
+ * @returns {boolean} true when settings were changed
+ */
+export function migrateOpenAIProviderSettings(settings) {
+    if (!settings || typeof settings !== 'object') return false;
+    if (settings.openaiProvidersMigrated) return false;
+    settings.openaiProvidersMigrated = true;
+    if (!Array.isArray(settings.openaiProviders)) settings.openaiProviders = [];
+    if (settings.openaiProviders.length > 0) return false;
+
+    const url = String(settings.openaiUrl || '').trim();
+    const key = String(settings.openaiKey || '').trim();
+    const model = String(settings.openaiModel || '').trim();
+    const maxTokens = (typeof settings.openaiMaxTokens === 'number' && isFinite(settings.openaiMaxTokens)) ? settings.openaiMaxTokens : 0;
+    if (!url && !key && !model) return false;   // fresh install — nothing to carry over
+
+    const p = makeOpenAIProvider({ name: model || url, url, key, model, maxTokens });
+    settings.openaiProviders.push(p);
+    settings.openaiActiveProviderId = p.id;
+    return true;
+}
+
+/**
+ * The provider the next request will actually use: the list entry the active
+ * id points at, else the first entry (dangling id after a delete), else the
+ * legacy flat slot — which keeps pre-migration installs and hand-built
+ * settings objects working unchanged. Never null: the existing
+ * "URL is not configured" guards in sendViaOpenAI handle the empty shape.
+ */
+export function resolveOpenAIProvider(settings) {
+    const s = settings || {};
+    const list = Array.isArray(s.openaiProviders) ? s.openaiProviders : [];
+    const active = list.find(p => p && p.id === s.openaiActiveProviderId) || list[0];
+    if (active) return makeOpenAIProvider(active);
+    return makeOpenAIProvider({
+        url: s.openaiUrl,
+        key: s.openaiKey,
+        model: s.openaiModel,
+        maxTokens: s.openaiMaxTokens,
+    });
+}
+
+/**
+ * Apply the chosen no-thinking strategy to the outgoing request body.
+ * 'prompt' edits the last user message instead of the envelope: /no_think is
+ * read by the Qwen3 chat template itself, so it keeps working through a proxy
+ * that strips unknown parameters. Every other mode sets exactly one field.
+ */
+function _applyThinkingMode(body, mode) {
+    switch (mode) {
+        case 'template_kwargs':
+            body.chat_template_kwargs = { enable_thinking: false };
+            break;
+        case 'enable_thinking':
+            body.enable_thinking = false;
+            break;
+        case 'thinking_disabled':
+            body.thinking = { type: 'disabled' };
+            break;
+        case 'reasoning_effort':
+            body.reasoning_effort = 'none';
+            break;
+        case 'prompt': {
+            const msgs = Array.isArray(body.messages) ? body.messages : [];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+                if (msgs[i] && msgs[i].role === 'user') {
+                    msgs[i].content = String(msgs[i].content ?? '') + '\n/no_think';
+                    break;
+                }
+            }
+            break;
+        }
+        default:
+            break;   // 'off' (and anything unrecognised) sends nothing extra
+    }
+    return body;
+}
+
 // ─── CORS Proxy Helper ───────────────────────────────────────────────
 
 /**
@@ -92,8 +232,13 @@ export async function sendSummarizerRequest(settings, systemPrompt, userPrompt, 
             return await sendViaProfile(settings.connectionProfileId, systemPrompt, userPrompt, settings.debugMode);
         case 'ollama':
             return await sendViaOllama(settings.ollamaUrl, settings.ollamaModel, systemPrompt, userPrompt, tempOverride, signal);
-        case 'openai':
-            return await sendViaOpenAI(settings.openaiUrl, settings.openaiKey, settings.openaiModel, systemPrompt, userPrompt, settings.openaiMaxTokens, tempOverride, signal);
+        case 'openai': {
+            // Resolve the ACTIVE saved provider (falling back to the legacy
+            // flat slot) — never the raw flat fields, which go stale the
+            // moment more than one provider exists.
+            const p = resolveOpenAIProvider(settings);
+            return await sendViaOpenAI(p.url, p.key, p.model, systemPrompt, userPrompt, p.maxTokens, tempOverride, signal, p.thinkingMode);
+        }
         case 'default':
         default:
             return await sendViaDefault(systemPrompt, userPrompt, settings.summarizerResponseLength);
@@ -462,7 +607,7 @@ function _parseNonStreamed(text) {
     return '';
 }
 
-async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens, temperatureOverride = null, signal = null) {
+async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTokens, temperatureOverride = null, signal = null, thinkingMode = 'off') {
     if (!url) {
         throw new ConnectionError(
             'OpenAI Compatible URL is not configured. Please set it in Summaryception settings.',
@@ -515,6 +660,11 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
     if (tokenLimit) {
         requestBody.max_tokens = tokenLimit;
     }
+
+    // Per-provider no-thinking strategy. Applied AFTER the envelope is built
+    // so it can reach either the envelope (one parameter, mode-dependent) or
+    // the messages ('prompt' mode appends /no_think to the last user turn).
+    _applyThinkingMode(requestBody, thinkingMode);
 
     const body = JSON.stringify(requestBody);
 
@@ -689,7 +839,7 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
  * @param {string} model
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function testOpenAIConnection(url, apiKey, model) {
+export async function testOpenAIConnection(url, apiKey, model, thinkingMode = 'off') {
     try {
         const result = await sendViaOpenAI(
             url,
@@ -697,7 +847,11 @@ export async function testOpenAIConnection(url, apiKey, model) {
             model || 'test',
             'You are a test assistant.',
             'Respond with exactly: CONNECTION_OK',
-            100 // small token limit for test
+            100, // small token limit for test
+            null,
+            null,
+            thinkingMode   // exercise the SAME body shape real calls will send — a mode the
+                           // server rejects must fail HERE, not mid-batch
         );
         return {
             success: true,
@@ -753,8 +907,10 @@ export function getConnectionDisplayName(settings) {
             return `Profile: ${settings.connectionProfileId || '(none)'}`;
         case 'ollama':
             return `Ollama: ${settings.ollamaModel || '(no model)'}`;
-        case 'openai':
-            return `OpenAI: ${settings.openaiModel || '(no model)'}`;
+        case 'openai': {
+            const p = resolveOpenAIProvider(settings);
+            return `OpenAI: ${p.name || p.model || '(no model)'}`;
+        }
         default:
             return 'Default (Main API)';
     }

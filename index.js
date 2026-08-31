@@ -15,10 +15,14 @@ import {
     testOpenAIConnection,
     populateProfileDropdown,
     ConnectionError,
+    THINKING_MODES,
+    makeOpenAIProvider,
+    migrateOpenAIProviderSettings,
+    resolveOpenAIProvider,
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.116.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.117.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -331,6 +335,8 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
         '</output>',
         '<thinking>',
         '</thinking>',
+        '<think>',
+        '</think>',
     ],
 
     // Machine-note blocks removed from STORY INPUT before any summarizer / ledger
@@ -357,10 +363,13 @@ BEFORE OUTPUTTING, verify: (1) the line starts with a temporal prefix if availab
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: '',
     ollamaModelsCache: [],                // Cached model list from Ollama
-    openaiUrl: '',
+    openaiUrl: '',                        // legacy single slot — kept as the resolver's fallback; new installs use openaiProviders
     openaiKey: '',
     openaiModel: '',
     openaiMaxTokens: 0,                   // 0 = no limit (provider default)
+    openaiProviders: [],                  // saved OpenAI-compatible providers: [{ id, name, url, key, model, maxTokens, thinkingMode }]
+    openaiActiveProviderId: '',           // which saved provider the next request uses
+    openaiProvidersMigrated: false,       // one-time flag: flat slot → first saved provider (stops a deleted list resurrecting on reload)
     summarizerTemperature: null,          // null = mode default (0.3 Ollama / 0.8 OpenAI-compatible / preset for default & profile); number overrides
 });
 
@@ -10359,35 +10368,10 @@ function initConnectionUI() {
         });
     }
 
-    // ── OpenAI URL ──
-    const openaiUrl = document.getElementById('summaryception_openai_url');
-    if (openaiUrl) {
-        openaiUrl.value = s().openaiUrl || '';
-        openaiUrl.addEventListener('input', () => {
-            s().openaiUrl = openaiUrl.value.trim();
-            save();
-        });
-    }
-
-    // ── OpenAI Key ──
-    const openaiKey = document.getElementById('summaryception_openai_key');
-    if (openaiKey) {
-        openaiKey.value = s().openaiKey || '';
-        openaiKey.addEventListener('input', () => {
-            s().openaiKey = openaiKey.value.trim();
-            save();
-        });
-    }
-
-    // ── OpenAI Model ──
-    const openaiModel = document.getElementById('summaryception_openai_model');
-    if (openaiModel) {
-        openaiModel.value = s().openaiModel || '';
-        openaiModel.addEventListener('input', () => {
-            s().openaiModel = openaiModel.value.trim();
-            save();
-        });
-    }
+    // ── OpenAI-compatible: saved providers + per-provider thinking control ──
+    // All of it lives in initOpenAIProviderUI so the flat legacy fields are no
+    // longer edited anywhere — the providers list is the single source.
+    initOpenAIProviderUI();
 
     // ── Summarizer Temperature (applies to Ollama + OpenAI-compatible modes) ──
     const summTemp = document.getElementById('summaryception_summarizer_temperature');
@@ -10397,16 +10381,6 @@ function initConnectionUI() {
             const raw = summTemp.value.trim();
             const v = parseFloat(raw);
             s().summarizerTemperature = (raw === '' || isNaN(v)) ? null : Math.min(2, Math.max(0, v));
-            save();
-        });
-    }
-
-    // ── OpenAI Max Tokens ──
-    const openaiMaxTokens = document.getElementById('summaryception_openai_max_tokens');
-    if (openaiMaxTokens) {
-        openaiMaxTokens.value = s().openaiMaxTokens || 0;
-        openaiMaxTokens.addEventListener('input', () => {
-            s().openaiMaxTokens = parseInt(openaiMaxTokens.value, 10) || 0;
             save();
         });
     }
@@ -10436,6 +10410,191 @@ function updateConnectionSubPanels(source) {
 
     if (panels[source]) {
         panels[source].style.display = 'block';
+    }
+}
+
+// ── OpenAI-compatible saved providers ─────────────────────────────────
+// The providers LIST is the single source of truth; the transport resolves
+// the active entry via resolveOpenAIProvider(), so no code path reads the
+// legacy flat slot except as a pre-migration fallback.
+
+function _openaiProviderEls() {
+    return {
+        select:    document.getElementById('summaryception_openai_provider'),
+        add:       document.getElementById('summaryception_openai_provider_add'),
+        del:       document.getElementById('summaryception_openai_provider_delete'),
+        name:      document.getElementById('summaryception_openai_provider_name'),
+        url:       document.getElementById('summaryception_openai_url'),
+        key:       document.getElementById('summaryception_openai_key'),
+        model:     document.getElementById('summaryception_openai_model'),
+        maxTokens: document.getElementById('summaryception_openai_max_tokens'),
+        thinking:  document.getElementById('summaryception_openai_thinking_mode'),
+    };
+}
+
+function _providerLabel(p) {
+    return p.name || p.model || p.url || '(unnamed provider)';
+}
+
+/**
+ * Rebuild the dropdown's OPTION SET only when membership changed — a rebuild
+ * on every keystroke would fight the user's caret in the fields below it.
+ */
+function _syncOpenAIProviderDropdown(selectedId) {
+    const els = _openaiProviderEls();
+    if (!els.select) return;
+    const st = getSettings();
+    const list = Array.isArray(st.openaiProviders) ? st.openaiProviders : [];
+    const have = new Set(Array.from(els.select.options).map(o => o.value));
+    if (list.length === els.select.options.length && list.every(p => have.has(p.id))) return;
+    els.select.innerHTML = '';
+    for (const p of list) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = _providerLabel(p);
+        els.select.appendChild(opt);
+    }
+    if (selectedId) els.select.value = selectedId;
+}
+
+/** Update one option's label in place (name/model/url edits while typing). */
+function _syncOpenAIProviderOption(p) {
+    const els = _openaiProviderEls();
+    if (!els.select) return;
+    const opt = Array.from(els.select.options).find(o => o.value === p.id);
+    if (opt) opt.textContent = _providerLabel(p);
+}
+
+/**
+ * The provider the fields are editing. Lazily creates Provider 1 on the first
+ * keystroke on a fresh install — the user just starts typing a URL and the
+ * saved list grows beneath them, no "Add" ceremony required.
+ */
+function _openaiProviderForEdit() {
+    const st = getSettings();
+    if (!Array.isArray(st.openaiProviders)) st.openaiProviders = [];
+    let p = st.openaiProviders.find(x => x && x.id === st.openaiActiveProviderId) || st.openaiProviders[0];
+    if (!p) {
+        p = makeOpenAIProvider({ name: 'Provider 1' });
+        st.openaiProviders.push(p);
+        st.openaiActiveProviderId = p.id;
+    }
+    return p;
+}
+
+function renderOpenAIProviderUI() {
+    const els = _openaiProviderEls();
+    if (!els.select) return;
+    const st = getSettings();
+    const list = Array.isArray(st.openaiProviders) ? st.openaiProviders : [];
+    const active = resolveOpenAIProvider(st);
+
+    if (list.length === 0) {
+        els.select.innerHTML = '';
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '(none yet — type below to save one)';
+        els.select.appendChild(opt);
+    } else {
+        // Self-heal a dangling pointer (e.g. after a delete) so what the user
+        // sees selected IS what the next request uses.
+        if (st.openaiActiveProviderId !== active.id) {
+            st.openaiActiveProviderId = active.id;
+            saveSettings();
+        }
+        els.select.innerHTML = '';
+        for (const p of list) {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = _providerLabel(p);
+            els.select.appendChild(opt);
+        }
+        els.select.value = active.id;
+    }
+
+    if (els.name)      els.name.value = active.name || '';
+    if (els.url)       els.url.value = active.url || '';
+    if (els.key)       els.key.value = active.key || '';
+    if (els.model)     els.model.value = active.model || '';
+    if (els.maxTokens) els.maxTokens.value = active.maxTokens || 0;
+    if (els.thinking)  els.thinking.value = active.thinkingMode || 'off';
+}
+
+function initOpenAIProviderUI() {
+    const els = _openaiProviderEls();
+    if (!els.select) return;
+
+    // The dropdown options come from the transport's own mode list, so the UI
+    // can never offer a strategy the wire layer doesn't understand.
+    if (els.thinking) {
+        els.thinking.innerHTML = '';
+        for (const m of THINKING_MODES) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.label;
+            els.thinking.appendChild(opt);
+        }
+    }
+
+    renderOpenAIProviderUI();
+
+    els.select.addEventListener('change', () => {
+        const st = getSettings();
+        st.openaiActiveProviderId = els.select.value;
+        saveSettings();
+        renderOpenAIProviderUI();
+    });
+
+    if (els.add) els.add.addEventListener('click', () => {
+        const st = getSettings();
+        if (!Array.isArray(st.openaiProviders)) st.openaiProviders = [];
+        const p = makeOpenAIProvider({ name: `Provider ${st.openaiProviders.length + 1}` });
+        st.openaiProviders.push(p);
+        st.openaiActiveProviderId = p.id;
+        saveSettings();
+        renderOpenAIProviderUI();
+        if (els.name) { els.name.focus(); els.name.select(); }
+    });
+
+    if (els.del) els.del.addEventListener('click', () => {
+        const st = getSettings();
+        const list = Array.isArray(st.openaiProviders) ? st.openaiProviders : [];
+        const p = list.find(x => x && x.id === st.openaiActiveProviderId) || list[0];
+        if (!p) {
+            toastr.info('No saved provider to delete.', 'Summaryception');
+            return;
+        }
+        // Keys are not recoverable from anywhere else — deleting must be deliberate.
+        if (!confirm(`Delete saved provider "${_providerLabel(p)}"? Its endpoint, API key, and model will be removed from Summaryception.`)) return;
+        st.openaiProviders = list.filter(x => x && x.id !== p.id);
+        st.openaiActiveProviderId = st.openaiProviders[0]?.id || '';
+        saveSettings();
+        renderOpenAIProviderUI();
+        toastr.success('Provider deleted.', 'Summaryception');
+    });
+
+    const onEdit = (el, apply) => {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const p = _openaiProviderForEdit();
+            apply(p);
+            _syncOpenAIProviderDropdown(p.id);   // first keystroke may have created Provider 1
+            _syncOpenAIProviderOption(p);
+            saveSettings();
+        });
+    };
+    onEdit(els.name,      p => { p.name = els.name.value.trim(); });
+    onEdit(els.url,       p => { p.url = els.url.value.trim(); });
+    onEdit(els.key,       p => { p.key = els.key.value.trim(); });
+    onEdit(els.model,     p => { p.model = els.model.value.trim(); });
+    onEdit(els.maxTokens, p => { p.maxTokens = parseInt(els.maxTokens.value, 10) || 0; });
+
+    if (els.thinking) {
+        els.thinking.addEventListener('change', () => {
+            const p = _openaiProviderForEdit();
+            p.thinkingMode = els.thinking.value;   // option ids come from THINKING_MODES; resolve normalizes regardless
+            saveSettings();
+        });
     }
 }
 
@@ -10482,20 +10641,22 @@ async function refreshOllamaModels() {
 }
 
 async function testOpenAIConnectionHandler() {
-    const s = getSettings();
+    // Test the ACTIVE saved provider, thinking-mode included — a strategy the
+    // server rejects must fail here, not mid-batch.
+    const p = resolveOpenAIProvider(getSettings());
 
-    if (!s.openaiUrl) {
+    if (!p.url) {
         toastr.warning('Please enter an endpoint URL first.', 'Summaryception');
         return;
     }
-    if (!s.openaiModel) {
+    if (!p.model) {
         toastr.warning('Please enter a model name first.', 'Summaryception');
         return;
     }
 
     showConnectionStatus('loading', 'Testing connection...');
 
-    const result = await testOpenAIConnection(s.openaiUrl, s.openaiKey, s.openaiModel);
+    const result = await testOpenAIConnection(p.url, p.key, p.model, p.thinkingMode);
 
     if (result.success) {
         showConnectionStatus('success', result.message);
@@ -10645,10 +10806,16 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { patchSummarizerPrompt(); } catch (_) {}
             try { migrateInjectionRoles(); } catch (_) {}
             try { migrateInjectionDepth(); } catch (_) {}
+            try {
+                if (migrateOpenAIProviderSettings(getSettings())) {
+                    saveSettings();
+                    log('OpenAI-compatible connection migrated to a saved provider — you can now keep several and switch between them.');
+                }
+            } catch (_) {}
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — one exclusive LLM channel, enforced at the lock instead of at six copies of it. _acquireSummarize() set isSummarizing after checking only isSummarizing, so any caller that forgot to pair it with an _llmChannelBusy() guard could start a SECOND concurrent callSummarizer while the ledger scribe / auditor / continuity pass held the channel — and callSummarizer snapshots ST's prompt toggles, disables them and restores on finish, so interleaving them leaves the user's toggles permanently wrong. Five entry points had drifted into exactly that hand-rolled subset (Force Summarize, Rebuild All, snippet redo, detail redo, Apply-all fixes) and the Co-Writer held no flag at all — a bidirectional hole, since every other pass then saw an idle channel for the whole duration of the largest call this extension makes. The check now lives at the one place the flag is ever set, its answer is load-bearing at all twelve call sites, and isSummarizing is read by nothing but _llmChannelBusy(). Rebuild All checks BEFORE it clears the snippets, because refusing at the lock would have wiped the memory and rebuilt nothing. Stop asks the channel too: it used to report “Nothing is running.” between two batches of a running background queue. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the OpenAI-compatible connection is now a SAVED PROVIDER LIST: keep several endpoints (OpenRouter, LM Studio, DeepSeek…) and switch between them from a dropdown instead of deleting and retyping, with a one-time migration that carries the old single slot over. Each provider carries its own Disable-Thinking strategy — one mechanism per provider family (chat_template_kwargs / enable_thinking / thinking.type / reasoning_effort / the /no_think prompt switch), never a bundle, because strict servers answer unknown parameters with a 400 and an "auto" spray is how a working provider gets misdiagnosed as broken. The output cleaner also strips raw <think> blocks now, so a model that thinks anyway still can't leak its scratchpad into memory. Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
