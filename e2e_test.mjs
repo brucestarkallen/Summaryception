@@ -382,6 +382,10 @@ try {
             { issue: 'future receipt', fix: 'x', kind: 'contradiction', turnRange: [90, 95], resolvedAt: 1 },
             { issue: 'legacy receipt (no range)', fix: 'y', kind: 'drift', resolvedAt: 2 },
         ];
+        st.continuityMsgFixes = [
+            { id: 'mf_live', turnRange: [1, 1], edits: [], at: 1 },
+            { id: 'mf_dead', turnRange: [7, 8], edits: [], at: 2 },
+        ];
         // A real bulk trim — the branch shape — through the real router.
         chat.push(mkMsg('Player', 'And then.', true), mkMsg('Narrator', 'Claire Argent smiled, briefly.'));
         await fire('GENERATION_STARTED');
@@ -395,6 +399,8 @@ try {
         const rec = store().continuityResolved || [];
         ok(!rec.some((r) => r && r.issue === 'future receipt'), 'a resolved receipt about abandoned turns is trimmed at the branch');
         ok(rec.some((r) => r && r.issue === 'legacy receipt (no range)'), 'receipts that cannot be judged are kept (they age out of the cap)');
+        const mfb = store().continuityMsgFixes || [];
+        ok(mfb.some((b) => b && b.id === 'mf_live') && !mfb.some((b) => b && b.id === 'mf_dead'), 'a message-fix backup about abandoned turns is trimmed at the branch (no dangling Undo)');
     }
 
     console.log('== 13. DELETE THE LAST AI REPLY (D == liveIdx): the rewind fires AT the deletion, not at the next edit ==');
@@ -489,6 +495,33 @@ try {
         led = store().ledger || {};
         ok(led['Rukia'] && !/FUTURE/.test(String(led['Rukia'].state)), 'C (transplant then branch): the future leaves the page');
         ok(String(led['Rukia'].state).includes('as of the transplant') && String(led['Rukia'].core || '').includes('Imported'), 'C: folds to the imported base — the transplant is the floor');
+
+        // Shape D — THE REPORTED SHAPE (v5.119.0): the page entry's _t reads old (2), so
+        // every trigger based on _t and the journal stays quiet — but the STATE was last
+        // observed at turn 8 (_st), on the timeline this branch abandoned. Before the
+        // trigger learned _st, repair returned 'healthy' and the future state stayed;
+        // and without the adoption guard, the rewind's own adoption journaled the future
+        // state INTO the surviving branch at the fold.
+        mkBranch(baseChat.slice(), {
+            ledger: { 'Zaraki': { core: 'Brutal joy.', state: 'FUTURE: mid-duel, blood up, name spoken', _t: 2, _st: 8 } },
+            ledgerNotes: [
+                { t: 1, name: 'Zaraki', at: 1, base: true, core: 'Brutal joy.', state: 'grinning at the rail' },
+                { t: 2, name: 'Zaraki', at: 2, state: 'watched the bow, amused' },
+            ],
+            ledgerNotesFrom: 0, ledgerLiveIdx: 4, summarizedUpTo: -1, layers: [[]],
+            continuityMsgFixes: [
+                { id: 'mf_live', turnRange: [1, 2], edits: [], at: 1 },
+                { id: 'mf_dead', turnRange: [7, 9], edits: [], at: 2 },
+            ],
+        });
+        await fire('CHAT_CHANGED');
+        await sleep(1800);
+        led = store().ledger || {};
+        ok(led['Zaraki'] && !/FUTURE/.test(String(led['Zaraki'].state)), 'D (state stamp ahead, _t sane): a state observed on the abandoned timeline leaves the page at the branch');
+        ok(String(led['Zaraki'].state).includes('amused'), 'D: the page folds to the branch-point truth, not the fossil');
+        ok(!(store().ledgerNotes || []).some((n) => /FUTURE/.test(String(n && n.state || ''))), 'D: the journal is NOT fed a state its own stamp proves it never saw (adoption refused the launder)');
+        const mfb2 = store().continuityMsgFixes || [];
+        ok(mfb2.some((b) => b && b.id === 'mf_live') && !mfb2.some((b) => b && b.id === 'mf_dead'), 'D: the branch-repair door trims dead undo backups too');
     }
 
     console.log('== 15. THE RESIDUE (pre-fix damage): sane pointer, journal ahead — heals on chat open ==');

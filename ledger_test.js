@@ -3691,6 +3691,64 @@ section('MC name — resolved automatically, override only to correct');
     ok(!/sc-cf-copilot/.test(SRC_FULL), 'the disabled copilot dead-end button is GONE — source findings have a real in-extension action');
 }
 
+// ─── v5.119.0: the branch never shows a future that never happened ────────────
+// Reported from play: branch a chat backward and the ledger kept narrating the
+// abandoned timeline (a plan list — shower, outfit, departure — as PRESENT state).
+// Three doors, three laws: the trigger must read the state's own stamp (_st), the
+// adoption must not launder a provably-unvouched state into the surviving journal,
+// and the undo backups trim with their receipts.
+{
+    section('branch truth — _st is a trigger, adoption refuses the unvouched, backups trim');
+    // Behavioral: the bulk clamp drops dead undo backups, keeps live ones.
+    const st = {
+        summarizedUpTo: 10, layers: [[]], ledgerLiveIdx: 10,
+        continuityMsgFixes: [
+            { id: 'mf_keep', turnRange: [2, 3], edits: [] },
+            { id: 'mf_dead', turnRange: [6, 9], edits: [] },
+        ],
+        continuityResolved: [
+            { fix: 'kept receipt', turnRange: [2, 3] },
+            { fix: 'dead receipt', turnRange: [6, 9] },
+        ],
+    };
+    L.clampStoreToLength(st, 5);   // the branch shape: messages 0..4 survive
+    eq(st.continuityMsgFixes.map(b => b.id), ['mf_keep'], 'KILL SHOT: a message-fix backup past the chat end is dropped at a bulk trim — no dangling Undo');
+    eq(st.continuityResolved.map(r => r.fix), ['kept receipt'], 'the receipt trims with its backup, as a pair');
+    eq(st.summarizedUpTo, 4, 'the summary pointer clamps to the surviving end');
+    eq(st.ledgerLiveIdx, 4, 'the ledger pointer clamps with it');
+    // Structural: the branch trigger must read _st, not only _t.
+    ok(/typeof e\._st === 'number' && e\._st > _lastIdx/.test(SRC_FULL),
+        'branch repair triggers on the STATE stamp (_st) — a future-observed state cannot hide behind an old _t');
+    // Structural: BOTH trim doors drop the dead backups.
+    const trimSites = (SRC_FULL.match(/continuityMsgFixes[^\n]*\.filter\(/g) || []).length;
+    ok(trimSites >= 2, 'both trim doors (bulk clamp and branch repair) drop dead undo backups');
+    // Structural: adoption must refuse a state its own stamp proves the journal never saw.
+    ok(/fld === 'state' && f && typeof e\._st === 'number' && typeof f\._st === 'number' && e\._st > f\._st/.test(SRC_FULL),
+        'adoption skips a state stamped NEWER than the journal — the dead timeline is not laundered into the surviving notes');
+    // And the scribe's own rule, shipped and patched.
+    const dflt2 = SRC_FULL.slice(SRC_FULL.indexOf('const defaultSettings'), SRC_FULL.indexOf('// ─── Prompt Presets'));
+    ok(/scheduled future event/.test(dflt2) && /is NEVER state/.test(dflt2),
+        'the shipped scribe prompt says it plainly: a plan or scheduled future event is NEVER state');
+    ok(/PLAN_TAG = 'is NEVER state'/.test(SRC_FULL),
+        'existing installs are patched to the same rule (not just fresh ones)');
+    // reindexAfterDeletion: backups carry chat coordinates, so a deletion reaches them too.
+    const st2 = {
+        summarizedUpTo: 5, layers: [[]], ledgerLiveIdx: 5,
+        continuityMsgFixes: [
+            { id: 'gone', turnRange: [7, 9], edits: [{ index: 7, before: 'a', after: 'b' }] },
+            { id: 'shift', turnRange: [9, 11], edits: [{ index: 10, before: 'a', after: 'b' }] },
+            { id: 'keep', turnRange: [0, 2], edits: [{ index: 1, before: 'a', after: 'b' }] },
+        ],
+    };
+    L.reindexAfterDeletion(st2, 7);
+    const ids2 = st2.continuityMsgFixes.map(b => b.id);
+    ok(!ids2.includes('gone'), 'KILL SHOT: a backup whose edited message was deleted is dropped — a partial restore is worse than none');
+    ok(ids2[0] === 'shift' && st2.continuityMsgFixes[0].turnRange[1] === 10 && st2.continuityMsgFixes[0].edits[0].index === 9,
+        'coordinates above the deletion shift down — Undo never aims at the wrong message');
+    ok(ids2[1] === 'keep' && st2.continuityMsgFixes[1].turnRange.join(',') === '0,2' && st2.continuityMsgFixes[1].edits[0].index === 1,
+        'below the deletion, nothing moves');
+}
+
 
 // ─── v5.104.0: a fossil checkpoint cursor cannot block checkpointing ──────────
 // _ckptLast and ledgerLiveIdx are a coupled pair, and only some writers know it:

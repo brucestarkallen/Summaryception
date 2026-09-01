@@ -762,6 +762,32 @@ const MUTATIONS = [
         'class="menu_button sc-cf-fixmsg"',
         'class="menu_button sc-cf-copilot"',
         'the disabled copilot dead-end button is GONE'],
+
+    // ── v5.119.0: the branch never shows a future that never happened ──
+    ['the branch trigger goes blind to the state stamp again (_st)', 'index.js',
+        "        && Object.values(store.ledger).some(e => e && ((typeof e._t === 'number' && e._t > _lastIdx) || (typeof e._st === 'number' && e._st > _lastIdx)));",
+        "        && Object.values(store.ledger).some(e => e && (typeof e._t === 'number' && e._t > _lastIdx));",
+        'a state observed on the abandoned timeline leaves the page at the branch', 'e2e_test.mjs'],
+
+    ['adoption launders a provably-future state into the surviving journal', 'index.js',
+        "            if (fld === 'state' && f && typeof e._st === 'number' && typeof f._st === 'number' && e._st > f._st) continue;",
+        "            void fld;",
+        'the journal is NOT fed a state its own stamp proves it never saw', 'e2e_test.mjs'],
+
+    ['the bulk clamp stops trimming dead undo backups', 'index.js',
+        "    if (Array.isArray(store.continuityMsgFixes)) {\n        store.continuityMsgFixes = store.continuityMsgFixes.filter(b => b && (!Array.isArray(b.turnRange) || b.turnRange[1] <= max));\n    }",
+        "",
+        'a message-fix backup past the chat end is dropped at a bulk trim'],
+
+    ['the branch-repair door stops trimming dead undo backups', 'index.js',
+        "    store.continuityMsgFixes = (store.continuityMsgFixes || []).filter(b =>\n        b && (!Array.isArray(b.turnRange) || b.turnRange[1] < chatLength));",
+        "",
+        'the branch-repair door trims dead undo backups too', 'e2e_test.mjs'],
+
+    ['a single deletion stops reaching the backup coordinates (Undo aims at the wrong message)', 'index.js',
+        "            if (Array.isArray(b.edits) && b.edits.some(e => e && e.index === D)) return false;   // the fixed message itself was deleted",
+        "",
+        'a backup whose edited message was deleted is dropped'],
 ];
 
 function scratchCopy() {
