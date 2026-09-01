@@ -130,6 +130,7 @@ function makeStore(chatLen) {
     if (rnd() < 0.5) {
         st.continuityFlags.push({ id: 'f1', status: 'open', fix: 'x', where: pick(['snippet', 'source']), turnRange: [0, Math.max(0, chatLen - 1)], createdAt: 1 });
         st.continuityResolved.push({ issue: 'y', turnRange: [0, Math.max(0, chatLen - 1)], resolvedAt: 1 });
+        st.continuityMsgFixes = [{ id: 'mf1', turnRange: [0, Math.max(0, chatLen - 1)], edits: [], at: 1 }];
     }
     return st;
 }
@@ -203,6 +204,11 @@ function check(st, chatLen, where) {
     for (const r of (st.continuityResolved || [])) {
         if (r && Array.isArray(r.turnRange) && (r.turnRange[0] > r.turnRange[1] || r.turnRange[1] > last || r.turnRange[0] < 0)) {
             bad.push(`a resolved receipt points at [${r.turnRange}] outside 0..${last}`); break;
+        }
+    }
+    for (const b of (st.continuityMsgFixes || [])) {
+        if (b && Array.isArray(b.turnRange) && (b.turnRange[0] > b.turnRange[1] || b.turnRange[1] > last || b.turnRange[0] < 0)) {
+            bad.push(`a message-fix backup points at [${b.turnRange}] outside 0..${last}`); break;
         }
     }
 
@@ -345,7 +351,7 @@ if (failures.length === 0) {
     console.log('  • no fossil checkpoint cursor can block checkpointing');
     console.log('  • no journal note, live or staging, sits past the chat end');
     console.log('  • no snippet range is inverted, negative, or past the chat end');
-    console.log('  • no continuity flag or receipt points outside the chat');
+    console.log('  • no continuity flag, receipt, or message-fix backup points outside the chat');
     console.log('  • page never loses a character fold(notes) still has');
     console.log('  • NOTHING IS HIDDEN THAT NO SURVIVING SNIPPET NARRATES');
     console.log('CHAOS GATE PASSED ✓');

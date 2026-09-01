@@ -22,7 +22,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.118.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.119.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -229,7 +229,7 @@ You receive the CURRENT LEDGER (what is already known about each character), the
 Each entry tracks four fields. A character PRESENT in the passage must never be left describing an EARLIER scene: if the story has moved and their state field still reads like a previous moment, that is an ERROR - refresh it to where they are and what they want NOW, even when the change is small. Standing in a room that has changed IS a change of state. Update ONLY what the passage changes; OMIT any field that is unchanged.
 
 - core — the character's STABLE nature: temperament, values, and above all HOW THEY EXPRESS THEMSELVES. Capture what a writer needs to keep them in character: their default emotional register; how they behave under stress, embarrassment, or threat; their tells and defense mechanisms; how they speak (formal or plain, blunt or indirect, verbal habits) and specifically how they ADDRESS {{player_name}} and others (by name, nickname, title, coldly, teasingly); and the lines they would NOT cross. This is the anchor that keeps them recognizable across the whole story. Write it once when a character is established, then change it only when the passage reveals a genuinely NEW stable trait — never for a passing mood. When you do touch core, restate the FULL stable picture (everything already established plus the new trait) so nothing is lost. Favor concrete, actable specifics: "when flustered, goes clipped and sarcastic and changes the subject; never raises her voice" beats "proud but shy."
-- state — the character's CURRENT, volatile condition right after this passage. LEAD with WHERE they are and what they are physically doing or their immediate situation, then their mood, what is on their mind, what they want in this moment, and how they are carrying themselves — written as prose, never a labelled field. Their WHEREABOUTS is part of state: whenever the passage relocates them or reveals where they are, even in a brief off-page mention (waiting in the library, gone to the dorms), update it so the ledger always reflects where each person currently is. This is overwritten each time they act, but it is NOT a blank slate — emotions have momentum. Carry forward the mood the ledger already records and evolve it realistically: a shock lingers and eases only with time or reassurance; a slight festers until addressed; warmth or anger set earlier still colors how they act now. If a character re-enters after being off-page, their last recorded state is where they resume unless the passage changes it. Record what would still be true a few beats later, not just the instant snapshot.
+- state — the character's CURRENT, volatile condition right after this passage. LEAD with WHERE they are and what they are physically doing or their immediate situation, then their mood, what is on their mind, what they want in this moment, and how they are carrying themselves — written as prose, never a labelled field. Their WHEREABOUTS is part of state: whenever the passage relocates them or reveals where they are, even in a brief off-page mention (waiting in the library, gone to the dorms), update it so the ledger always reflects where each person currently is. This is overwritten each time they act, but it is NOT a blank slate — emotions have momentum. Carry forward the mood the ledger already records and evolve it realistically: a shock lingers and eases only with time or reassurance; a slight festers until addressed; warmth or anger set earlier still colors how they act now. If a character re-enters after being off-page, their last recorded state is where they resume unless the passage changes it. Record what would still be true a few beats later, not just the instant snapshot. Record ONLY what the passage shows as happening or having just happened: a plan, intention, or scheduled future event ("he would shower next", "she was to leave at five") is NEVER state, no matter how firmly announced — if it matters, it is a thread.
 - arc — the SLOW trajectory of this character's key relationships, above all with {{player_name}}, kept as a brief PROGRESSION: where the relationship began, the specific turns that moved it, and where it is heading now — and for EACH turn, WHY it moved: what {{player_name}} did that they will not forget (a kindness, a betrayal, a moment of being truly seen or let down). This is the relationship's HISTORY, not just its current temperature — a later storyteller should be able to read how these two got HERE. If the story tracks a relationship score, THIS is where its movement is explained: the number itself lives in the summary, the reason lives here. Keep it a tight two to four sentences — append the newest turn and COMPRESS older ones into a phrase so the arc never balloons and the most recent development is never the part that gets cut. Update only when the passage actually moves it; evolve the existing arc, never restart it.
 - threads — the character's CURRENTLY OPEN loose ends: concrete, unresolved things that will shape how they behave next (a promise pending, a lie unconfessed, an unaddressed slight, a confession half-made, a question left hanging, a debt owed either way). Output the CURRENT open list: KEEP threads still unresolved, DROP any this passage resolved, ADD any it opened. A thread stays open until the STORY resolves it — never merely because time passed. Omit the field entirely if nothing changed; use an empty array [] ONLY to signal that all previously-open threads are now resolved.
 
@@ -620,6 +620,17 @@ function patchLedgerPrompt() {
     const EPI_ANCHOR = "their state and choices follow from their own perspective, not the reader's.";
     const EPI_TAG = 'This applies to threads doubly';
     if (cur.indexOf(EPI_ANCHOR) !== -1 && cur.indexOf(EPI_TAG) === -1) { cur = cur.replace(EPI_ANCHOR, EPI_ANCHOR + " This applies to threads doubly: a thread in a character's entry must be something that character KNOWS exists — another character's private orders, secret plans, or off-screen instructions ABOUT them belong in the entry of whoever made them, never in the subject's own threads."); changed = true; }
+
+    // state is what IS, never what is PLANNED. A passage full of announced intent
+    // ("he would shower next", "she was to leave at five") was landing in state as
+    // if it had occurred — the ledger then narrated a future the chat had not
+    // reached (or, on a branch, never would).
+    const PLAN_ANCHOR = 'not just the instant snapshot.';
+    const PLAN_TAG = 'is NEVER state';
+    if (cur.indexOf(PLAN_ANCHOR) !== -1 && cur.indexOf(PLAN_TAG) === -1) {
+        cur = cur.replace(PLAN_ANCHOR, PLAN_ANCHOR + ' Record ONLY what the passage shows as happening or having just happened: a plan, intention, or scheduled future event is NEVER state, no matter how firmly announced — if it matters, it is a thread.');
+        changed = true;
+    }
 
     if (changed) {
         s.ledgerSystemPrompt = cur;
@@ -1325,8 +1336,12 @@ async function repairIfBranched() {
     const _lastIdx = chatLength - 1;
     const ledgerNotesAhead = Array.isArray(store.ledgerNotes)
         && store.ledgerNotes.some(n => n && typeof n.t === 'number' && n.t > _lastIdx);
+    // _st (the state's OWN observation turn, v5.115+) is checked alongside _t: an
+    // entry whose state was last OBSERVED on the abandoned timeline — but whose _t
+    // reads old because a later arc/threads note touched it — otherwise slips every
+    // trigger and the branch keeps a future that never happened here.
     const ledgerStampAhead = !!store.ledger && typeof store.ledger === 'object'
-        && Object.values(store.ledger).some(e => e && typeof e._t === 'number' && e._t > _lastIdx);
+        && Object.values(store.ledger).some(e => e && ((typeof e._t === 'number' && e._t > _lastIdx) || (typeof e._st === 'number' && e._st > _lastIdx)));
     if (!summaryOverruns && !snippetOverruns && !verbatimGhosted && !ledgerAhead && !ledgerNotesAhead && !ledgerStampAhead) return;   // healthy — leave it alone
 
     const oldSummarizedUpTo = store.summarizedUpTo;
@@ -1417,6 +1432,10 @@ async function repairIfBranched() {
     // Legacy entries without a turnRange can't be judged; they age out of the cap.
     store.continuityResolved = (store.continuityResolved || []).filter(r =>
         r && (!Array.isArray(r.turnRange) || r.turnRange[1] < chatLength));
+    // The undo backups those receipts point at obey the same boundary, so a kept
+    // receipt never dangles a dead Undo.
+    store.continuityMsgFixes = (store.continuityMsgFixes || []).filter(b =>
+        b && (!Array.isArray(b.turnRange) || b.turnRange[1] < chatLength));
 
     await saveChatStore();
     log(`Branch repair complete. summarizedUpTo: ${oldSummarizedUpTo} → ${store.summarizedUpTo}, un-ghosted ${unghosted} turn(s).`);
@@ -3400,6 +3419,14 @@ function adoptExternalLedgerEdits(store, tFloor) {
         for (const fld of ['core', 'state', 'arc']) {
             const pv = (typeof e[fld] === 'string') ? e[fld] : undefined;
             const fv = (f && typeof f[fld] === 'string') ? f[fld] : undefined;
+            // A state whose own observation stamp (_st) is NEWER than the journal's
+            // is content the journal cannot vouch for — the surviving shape of a
+            // branch whose page carried abandoned-timeline text. External editors
+            // never touch _st (same law as _t above), so a genuine copilot edit
+            // compares equal here; adopting the provably-unvouched state would
+            // launder the dead timeline into the journal at the fold. Legacy
+            // journals without _st can't prove anything either way — old behavior.
+            if (fld === 'state' && f && typeof e._st === 'number' && typeof f._st === 'number' && e._st > f._st) continue;
             if (pv !== undefined && pv !== fv) { note[fld] = pv; has = true; }
         }
         const pt = Array.isArray(e.threads) ? e.threads : undefined;
@@ -7426,6 +7453,27 @@ function reindexAfterDeletion(store, D) {
     // came from, and sat one line below them being shifted — while the receipts
     // were left pointing at whatever moved into their old coordinates. Display-only,
     // but a receipt that names the wrong turns is worse than no receipt.
+    // Message-fix backups carry TWO sets of chat coordinates (turnRange AND
+    // per-edit indices). A deletion that takes an edited message kills the whole
+    // backup — a partial restore is worse than none. Above the deletion every
+    // coordinate shifts down one, or Undo would aim at the wrong message (its text
+    // verification would refuse forever, leaving dead weight).
+    if (Array.isArray(store.continuityMsgFixes)) {
+        store.continuityMsgFixes = store.continuityMsgFixes.filter(b => {
+            if (!b) return false;
+            if (!Array.isArray(b.turnRange)) return true;
+            if (Array.isArray(b.edits) && b.edits.some(e => e && e.index === D)) return false;   // the fixed message itself was deleted
+            let a = b.turnRange[0], c = b.turnRange[1];
+            if (a > D) a -= 1;
+            if (c >= D) c -= 1;
+            if (a > c || c < 0) return false;
+            b.turnRange = [a, c];
+            if (Array.isArray(b.edits)) {
+                for (const e of b.edits) { if (e && typeof e.index === 'number' && e.index > D) e.index -= 1; }
+            }
+            return true;
+        });
+    }
     if (Array.isArray(store.continuityResolved)) {
         store.continuityResolved = store.continuityResolved.filter(r => {
             if (!r) return false;
@@ -7494,6 +7542,14 @@ function clampStoreToLength(store, newLen) {
     if (Array.isArray(store.ghostedIndices)) store.ghostedIndices = store.ghostedIndices.filter(i => i <= max);
     if (Array.isArray(store.continuityResolved)) {
         store.continuityResolved = store.continuityResolved.filter(r => r && (!Array.isArray(r.turnRange) || r.turnRange[1] <= max));
+    }
+    // Message-fix backups obey the same law as the receipts they pair with: past the
+    // chat end their indices point at messages this timeline no longer has. (Undo
+    // verifies text before restoring, so a straggler could never WRITE — but dead
+    // backups are noise, and a receipt without its backup offers an undo that can
+    // only fail.)
+    if (Array.isArray(store.continuityMsgFixes)) {
+        store.continuityMsgFixes = store.continuityMsgFixes.filter(b => b && (!Array.isArray(b.turnRange) || b.turnRange[1] <= max));
     }
 }
 
@@ -11208,7 +11264,7 @@ async function fetchProfilesFallback(selectElement, currentValue) {
             try { gcLocalStorageBudget(); } catch (_) {}   // bounded checkpoint/backup footprint — quota death silently breaks checkpointing
             updateInjection();
             updateUI();
-            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — the continuity auditor's source-level findings are no longer a dead end: "the MESSAGE contradicts the record" is now repaired in-extension by a surgical message edit (fewest messages, smallest change, player turns never touched, gutting rewrites refused by the same verdict that guards snippet fixes), with a before/after backup for Undo. The covering snippet is then re-derived from the CORRECTED passage — without that, memory would keep narrating the contradiction the message no longer contains — and only then is MESSAGE_EDITED emitted, so the ledger rewind and the debounced recheck run against healed memory and the flag clears only when a fresh audit agrees. Auto-fix is on by default (continuityAutoFixMessages) and each finding is attempted once — a refusal leaves the flag open, never a retry loop. Full history: git log.`);
+            console.log(LOG_PREFIX, `Summaryception v${SC_VERSION} loaded — branch repair now triggers on the state stamp (_st) too: an entry whose state was last OBSERVED on the abandoned timeline can no longer slip through because its _t reads old, so a branched chat stops carrying future states that never happened here. Message-fix undo backups are trimmed with everything else at a branch or bulk trim, so a kept receipt never dangles a dead Undo. And the scribe's state rule is explicit: a plan, intention, or scheduled future event is NEVER state — it is a thread — so announced intent stops landing in the ledger as present fact (existing installs are patched in place). Full history: git log.`);
         });
 
         // Settings panel — isolated. renderExtensionTemplateAsync() fetches
