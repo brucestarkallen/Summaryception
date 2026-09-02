@@ -293,6 +293,65 @@ renderContinuityNow();
     ok(window.document.querySelector('#sc_continuity_view .sc-cf-apply') !== null, 'snippet-level findings keep their Apply button');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v5.120.0: the ledger panel may never CLAIM an injection a gate has turned off.
+// The shipped renderLedger, real DOM, both gates exercised.
+
+console.log('\n== ledger panel: "Injected this turn" tells the truth when a gate is off ==');
+
+window.document.body.insertAdjacentHTML('beforeend', '<div id="sc_ledger_view"></div>');
+
+const lgBlocks = [
+    slice('function _ledgerInjectionOn(s) {', 'function buildCharacterBlock() {'),
+    slice('function escapeHtml(text) {', '// ─── Continuity Editor'),
+    slice('function renderLedger() {', "// A snippet's POSITION is not its identity"),
+].join('\n');
+
+const lgStore = {
+    ledger: { 'Jovan Wells': { core: 'guarded', state: 'seated at The Perch', threads: ['the wager'], arc: 'thawing', updatedAt: 1 } },
+    summarizedUpTo: 33, ledgerLiveIdx: 33,
+};
+const lgSandbox = {
+    $, window, document: window.document,
+    getChatStore: () => lgStore,
+    SillyTavern: { getContext: () => ({ chat: [] }) },
+    getSettings: () => lgSandbox.__settings,
+    __settings: {},
+    defaultSettings: { ledgerActiveWindow: 12 },
+    renderContinuity: () => {},
+    computeLedgerCast: () => ({ shown: [{ name: 'Jovan Wells' }], compact: [], recalled: [], roster: [] }),
+    getLedgerPins: () => [],
+    _rosterTick: 0,
+    _chatHeadTurn: () => 33,
+    getAssistantTurns: () => [{ index: 33 }],
+    _computeLiveLedgerRange: () => null,
+    _stateAsOf: () => ({ label: 'Now' }),
+    _historyHtml: () => '',
+    _histOpen: new Set(),
+    _ledgerActive: false, _ledgerAuditActive: false, _ledgerQueue: [], _liveRetryTimer: null,
+    _ledgerOrder: [],
+    log: () => {},
+};
+const lgRunner = new Function(...Object.keys(lgSandbox), lgBlocks + '\nreturn { renderLedger };');
+const renderLedgerNow = lgRunner(...Object.values(lgSandbox)).renderLedger;
+const lgText = () => (window.document.getElementById('sc_ledger_view').textContent || '');
+
+lgSandbox.__settings = {};
+renderLedgerNow();
+ok(lgText().includes('💉 Injected this turn:'), 'gate open: the panel claims injection');
+ok((window.document.querySelector('#sc_ledger_view .sc-ledger-badge') || {}).textContent?.includes('💉'), 'gate open: the 💉 badge renders');
+
+lgSandbox.__settings = { ledgerEnabled: false };
+renderLedgerNow();
+ok(lgText().includes('⛔ Not injected — the ledger is OFF'), 'KILL SHOT: disabled ledger — the panel SAYS it is not injected');
+ok(!lgText().includes('💉 Injected this turn:'), 'and the count line is gone');
+ok(!Array.from(window.document.querySelectorAll('#sc_ledger_view .sc-ledger-badge')).some(b => (b.textContent || '').includes('💉')), 'and no 💉 badge survives on any card');
+
+lgSandbox.__settings = { ledgerEnabled: true, injectLedger: false };
+renderLedgerNow();
+ok(lgText().includes('Injection Contents'), 'injection-only off: the panel names the right toggle');
+ok(!lgText().includes('💉 Injected this turn:'), 'and again no false count');
+
 console.log('\n────────────────────────────────────────');
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail > 0) { console.log('\nFAILURES:'); fails.forEach(f => console.log('  - ' + f)); process.exit(1); }

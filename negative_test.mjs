@@ -788,6 +788,22 @@ const MUTATIONS = [
         "            if (Array.isArray(b.edits) && b.edits.some(e => e && e.index === D)) return false;   // the fixed message itself was deleted",
         "",
         'a backup whose edited message was deleted is dropped'],
+
+    // ── v5.120.0: the panel may never claim an injection a gate turned off ──
+    ['the 💉 badge renders even when the ledger is disabled (the reported lie)', 'index.js',
+        "            const badge = !_injOn ? ''",
+        "            const badge = false ? ''",
+        'no 💉 badge renders while a gate is off'],
+
+    ['the panel hides the OFF state and shows the count anyway', 'index.js',
+        "        let html = freshHtml + (_injLine || ",
+        "        let html = freshHtml + (",
+        'the summary line tells the truth when off instead of the count'],
+
+    ['the character block stops respecting the feature toggle', 'index.js',
+        "    if (!s.ledgerEnabled) return '';",
+        "    if (false) return '';",
+        'the character block is EMPTY when the ledger is disabled'],
 ];
 
 function scratchCopy() {

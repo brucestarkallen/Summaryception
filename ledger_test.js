@@ -37,7 +37,8 @@ const names = ['stripMetaBlocks', 'buildPassageFromRange', '_ledgerDroppingPast'
     'recomputeSummarizedUpTo', '_snipSig', '_resolveSnipRow',
     '_selectNudgeFlags', '_fixVerdict', '_turnHasCoverage', '_uncoveredTurnsIn', '_ckptDue',
     '_turnSig', '_CKPT_DRIFT_WINDOW', '_relocateCheckpoint',
-    'normalizeMessageFixOutput', '_validateMessageEdits', '_indexedPassageForFix'];
+    'normalizeMessageFixOutput', '_validateMessageEdits', '_indexedPassageForFix',
+    '_ledgerInjectionOn'];
 
 const body = names.map(extractTopLevel).join('\n\n');
 
@@ -109,6 +110,7 @@ return {
   _selectNudgeFlags, _fixVerdict, _turnHasCoverage, _uncoveredTurnsIn, _ckptDue,
   _turnSig, _relocateCheckpoint, _CKPT_DRIFT_WINDOW,
   normalizeMessageFixOutput, _validateMessageEdits, _indexedPassageForFix,
+  _ledgerInjectionOn,
 };
 `;
 const L = new Function(sandbox)();
@@ -3747,6 +3749,30 @@ section('MC name — resolved automatically, override only to correct');
         'coordinates above the deletion shift down — Undo never aims at the wrong message');
     ok(ids2[1] === 'keep' && st2.continuityMsgFixes[1].turnRange.join(',') === '0,2' && st2.continuityMsgFixes[1].edits[0].index === 1,
         'below the deletion, nothing moves');
+}
+
+// ─── v5.120.0: the panel and the injection read the SAME truth ────────────────
+// Reported from a screenshot: "Enable character ledger" OFF, yet the panel still
+// claimed "💉 Injected this turn: 9 of 9" and every card wore a 💉 badge. The
+// block was honestly empty — the panel just never checked. One answer, one helper.
+{
+    section('ledger injection truth — the block, the panel, and the badges read the same gates');
+    eq(L._ledgerInjectionOn({}), true, 'unset settings mean injected (defaults are on)');
+    eq(L._ledgerInjectionOn({ ledgerEnabled: false }), false, 'the feature toggle gates injection');
+    eq(L._ledgerInjectionOn({ injectLedger: false }), false, 'the Injection Contents toggle gates injection');
+    eq(L._ledgerInjectionOn({ ledgerEnabled: true, injectLedger: true }), true, 'both on means on');
+    L.__setSettings({ ledgerEnabled: false });
+    L.__setStore({ ledger: { Mara: { core: 'x', state: 'y' } } });
+    eq(L.buildCharacterBlock(), '', 'KILL SHOT: the character block is EMPTY when the ledger is disabled — nothing reaches the storyteller');
+    L.__setSettings({});
+    ok(/const _injOn = _ledgerInjectionOn\(s\);/.test(SRC_FULL),
+        'the panel computes injection truth through the one helper, not its own guess');
+    ok(/const badge = !_injOn \? ''/.test(SRC_FULL),
+        'no 💉 badge renders while a gate is off — the panel cannot claim an injection it is not performing');
+    ok(/freshHtml \+ \(_injLine \|\|/.test(SRC_FULL),
+        'the summary line tells the truth when off instead of the count');
+    ok(/s\.injectLedger !== false\) \? buildCharacterBlock\(\)/.test(SRC_FULL),
+        'the Injection Contents toggle still gates the block in the assembler');
 }
 
 
