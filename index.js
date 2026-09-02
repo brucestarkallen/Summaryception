@@ -22,7 +22,7 @@ import {
 } from './connectionutil.js';
 
 const MODULE_NAME = 'summaryception';
-const SC_VERSION = '5.119.0';   // real version — keep in sync with manifest.json on every release
+const SC_VERSION = '5.120.0';   // real version — keep in sync with manifest.json on every release
 const LOG_PREFIX = '[Summaryception]';
 // const TRACE_MODE = true;  // ultra-verbose logging
 
@@ -6828,6 +6828,15 @@ function _composeRoster(offscreen, pinnedNames, cap, tick, rotate) {
     return out;
 }
 
+// The ONE answer to "is the character ledger reaching the storyteller this turn?"
+// Both gates: the feature toggle (passes + injection) and the Injection Contents
+// toggle (injection only). The panel and the injection must read the same truth —
+// a badge claiming "injected" while a gate is off is the panel lying about the one
+// thing the user opened it to check.
+function _ledgerInjectionOn(s) {
+    return (s.ledgerEnabled !== false) && (s.injectLedger !== false);
+}
+
 function buildCharacterBlock() {
     const s = getSettings();
     if (!s.ledgerEnabled) return '';
@@ -8229,6 +8238,15 @@ function renderLedger() {
             return `<div class="sc-ledger-field"><span class="sc-ledger-flabel">${label}</span> ${escapeHtml(String(val).trim())}</div>`;
         };
 
+        // Injection TRUTH, before any badge or count is computed: with the feature
+        // off, nothing below may claim "injected"; with only the Injection Contents
+        // toggle off, the passes still run but the storyteller sees nothing.
+        const _injOn = _ledgerInjectionOn(s);
+        const _injLine = !_injOn
+            ? (s.ledgerEnabled === false
+                ? `<div class="sc-ledger-injsum sc-muted">⛔ Not injected — the ledger is OFF. No passes run, nothing is sent to the storyteller. Entries are kept; re-enable to resume.</div>`
+                : `<div class="sc-ledger-injsum sc-muted">⛔ Not injected — "Character ledger" is unchecked in Injection Contents. Background passes still maintain the ledger, but the storyteller never sees it.</div>`)
+            : '';
         const _pinnedSet = new Set(getLedgerPins().map(p => String(p).toLowerCase()));
         // Freshness, stated plainly: no guessing whether a pass is running, no tapping
         // to find out. The scribe reads a turn AFTER it exists, so "current through
@@ -8259,10 +8277,13 @@ function renderLedger() {
                     ? `<div class="sc-ledger-fresh sc-fresh-lag">⚠ ${_behind} turn(s) not read yet — the next turn picks them up automatically.</div>`
                     : `<div class="sc-ledger-fresh sc-fresh-ok">✓ Current through turn ${_li} (the newest turn). Nothing pending.</div>`;
         } catch (_) { /* no chat loaded */ }
-        let html = freshHtml + `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full + ${(cast.compact || []).length} compact (all on screen) + ${(cast.recalled || []).length ? `${cast.recalled.length} recalled (mentioned, off-screen) + ` : ''}${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}. Nobody on screen is ever reduced to a name.</div>`;
+        let html = freshHtml + (_injLine || `<div class="sc-ledger-injsum">💉 Injected this turn: <b>${_nInj}</b> of ${names.length} — ${cast.shown.length} full + ${(cast.compact || []).length} compact (all on screen) + ${(cast.recalled || []).length ? `${cast.recalled.length} recalled (mentioned, off-screen) + ` : ''}${cast.roster.length} roster line${cast.roster.length === 1 ? '' : 's'}. Nobody on screen is ever reduced to a name.</div>`);
         entries.forEach(({ name, entry, st }, i) => {
             // Badge = this turn's injection truth, straight from the shared selector.
-            const badge = st === 'full'
+            // When a gate is off, the truth is "nothing is injected" — no per-card
+            // 💉 badge may claim otherwise (the summary line above already says why).
+            const badge = !_injOn ? ''
+                : st === 'full'
                 ? '<span class="sc-ledger-badge">💉 injected — full entry (on screen)</span>'
                 : st === 'compact'
                     ? '<span class="sc-ledger-badge sc-ledger-rosterbadge">💉 injected — on screen (compact: nature + now)</span>'
